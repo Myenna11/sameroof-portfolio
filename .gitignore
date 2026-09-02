@@ -8,3 +8,4 @@ node_modules/
 state/
 !rooms/*/handover/
 rooms/*/handover/history.md
+rooms/*/memory/

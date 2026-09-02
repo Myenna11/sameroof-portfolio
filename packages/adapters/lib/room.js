@@ -3,6 +3,7 @@
 const fs = require('fs'), path = require('path'), http = require('http');
 const yaml = require('/root/sameroof/packages/living-room/node_modules/js-yaml');
 const HOUSE = process.env.SAMEROOF_HOUSE || path.resolve(__dirname, '../../..');
+const memoryPlugin = require('../../plugin-memory');
 const LR = process.env.SAMEROOF_LR || 'http://127.0.0.1:8790';
 const RUN = path.join(process.env.HOME || '/root', '.sameroof', 'run');
 
@@ -44,11 +45,14 @@ function open(roomName) {
     const [a, b] = q.split('-').map(s => Number(s.split(':')[0])); return a <= b ? (h >= a && h < b) : (h >= a || h < b);
   };
   const budgetLeft = () => {
-    const day = new Date().toISOString().slice(0, 10); if (state.day !== day) { state.day = day; state.wakes_today = 0; save(); }
+    const day = new Intl.DateTimeFormat('sv-SE', { timeZone: house.timezone }).format(new Date()); // 按房子的账务时区算"今天"
+    if (state.day !== day) { state.day = day; state.wakes_today = 0; save(); }
     const cap = (((room.heartbeat || {}).budget || {}).per_day) || ((((house.defaults || {}).heartbeat || {}).budget || {}).per_day) || {};
     return !cap.requests || state.wakes_today < cap.requests;
   };
-  return { room, house, roomDir, api, houseTime, inQuiet, budgetLeft, state, save, soul };
+  const plugins = room.plugins || (house.defaults || {}).plugins || [];
+  const memory = plugins.includes('memory') ? memoryPlugin.open(roomDir) : null;
+  return { room, house, roomDir, api, houseTime, inQuiet, budgetLeft, state, save, soul, memory };
 }
 
 async function run(roomName, runtimeName, think, opts = {}) {
@@ -64,13 +68,21 @@ async function run(roomName, runtimeName, think, opts = {}) {
       const members = await api('GET', '/members');
       const hoPath = path.join(R.roomDir, 'handover', 'latest.md'); const handover = fs.existsSync(hoPath) ? fs.readFileSync(hoPath, 'utf8') : '（没有交接信）';
       state.wakes_today++; state.last_wake = new Date().toISOString(); save();
+      let remembered = '';
+      if (R.memory) {
+        const q = inbox.map(m => m.text).join(' ') || handover;
+        const hits = R.memory.recall(q, 4); const recent = R.memory.recent(3).filter(m => !hits.find(h => h.id === m.id));
+        const list = [...hits, ...recent]; if (list.length) remembered = '【我记得的事】\n' + R.memory.render(list);
+      }
       const system = [soul || `你是${room.name}。`, '', R.houseTime(), `【家里的人】${members.map(m => `${m.name}(${m.species}${m.online ? '·在线' : ''})`).join('、')}`,
         '【规矩】你在客厅里说话，全家都看得见；私信请以 DM: 开头并写收件人。你只搬字，不能执行命令；要做高危动作请回 APPROVAL: <action> <参数>。',
-        `【为什么醒】${reason}`, '【上次交接信】', handover].join('\n');
+        `【为什么醒】${reason}`, '【上次交接信】', handover, remembered,
+        R.memory ? '【记东西】值得以后还记得的事，在回复末尾另起一行写 REMEMBER: 一句话（可多行）。房子会存下来，标记为你自己写的、未审。' : ''].filter(Boolean).join('\n');
       const user = inbox.length ? '【客厅里等你的话】\n' + inbox.map(m => `${m.from}${m.kind === 'dm' ? '(私信)' : ''}：${m.text}`).join('\n') + '\n\n回一句就好，像家里人说话，不要列清单。'
         : '心跳醒来。客厅没人叫你。读一下交接信，惦记一下没做完的事；确实有话要说就说一句，没有就回 (静默)。';
       let reply = opts.dry ? (console.log('==== SYSTEM ====\n' + system + '\n==== USER ====\n' + user), '(dry-run)') : await think(system, user);
       reply = String(reply || '').trim();
+      if (R.memory) { const lines = reply.split('\n'); const keep = []; for (const l of lines) { const m = l.match(/^\s*REMEMBER[:：]\s*(.+)$/); if (m) { R.memory.remember({ content: m[1], source: 'self', by: room.id }); console.log(`[${room.name} 记住] ${m[1].slice(0, 60)}`); } else keep.push(l); } reply = keep.join('\n').trim(); }
       if (inbox.length) await api('POST', '/inbox/ack', { ids: inbox.map(m => m.id) });
       if (!reply || reply === '(静默)') { console.log('[静默]'); return; }
       if (reply.startsWith('DM:')) { const m = reply.match(/^DM:\s*(\S+)\s*[:：]?\s*([\s\S]*)$/); if (m) { await api('POST', '/dm', { to: m[1], text: m[2] }); return; } }
