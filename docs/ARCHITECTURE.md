@@ -1,4 +1,6 @@
-# 架构（2026-09-02 定案）
+# 架构（2026-09-02 晚二稿）
+
+> **当前权威结论见 DECISIONS.md #6/#7 与 README。** 本文早期段落把 dsh 写成基座、mousecrew 写成传话层，已被取代（标 [superseded]），保留是为了看得见思路怎么变的。
 
 ## 需求（维护者原话整理）
 - 装一个东西，引导装基座，选模型，点登录或填 API key。像 Claude Code 一样简单。
@@ -10,7 +12,7 @@
 
 ## 分层
 
-### 1. 基座：DeepSeek Harness (dsh)
+### 1. [superseded] 基座：DeepSeek Harness (dsh) → 现为候选运行时之一
 - everything-is-a-plugin，Cordis 微内核。
 - profile = 有序 bundle 叠层 + cordis.patch.yml；web / headless / sdk / sdk-minimal / acp 五种模板。
 - 模型层走 dsh-llm-pi-ai → pi-ai 的 provider 目录（含各家 OAuth）。
@@ -18,7 +20,7 @@
 - dsh 本体单 session；多 agent 由社区插件验证可行（dsh-agent-teams / agent-team / dsh-agent-team-gui）。
   它们是"任务临时小队"，我们是"住家人"——这一层自己写。
 
-### 2. 群/传话：mousecrew
+### 2. [superseded] 群/传话：mousecrew → 现为道理来源，客厅自己写（见 LIVING_ROOM.md）
 - 一个群所有人都在；@name 唤醒（先归一化，防自唤醒）；私信通道带送达回执；工单状态机；催办。
 - transport：local（本机 headless）/ remote（另一台机器 worker 反向拨入）/ terminal（tmux/cmux 窗口注入）。
 - 不托管模型，不拿 key，只搬文字。
