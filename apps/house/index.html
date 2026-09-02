@@ -1,0 +1,52 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>同屋</title><link rel="manifest" href="./manifest.json"><meta name="theme-color" content="#faf7f2">
+<style>
+:root{--bg:#faf7f2;--ink:#2b2622;--mute:#8a817a;--me:#dfe9ff;--them:#fff;--sys:#f1ece4;--line:#e8e1d8}
+*{box-sizing:border-box}html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:16px/1.5 -apple-system,"PingFang SC","Noto Sans SC",sans-serif}
+#top{position:sticky;top:0;background:var(--bg);border-bottom:1px solid var(--line);padding:calc(10px + env(safe-area-inset-top)) 14px 10px;display:flex;align-items:center;gap:10px}
+#top b{font-size:17px}#who{color:var(--mute);font-size:13px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#log{padding:12px 12px 90px;display:flex;flex-direction:column;gap:8px}
+.m{max-width:82%;padding:8px 12px;border-radius:14px;background:var(--them);box-shadow:0 1px 0 rgba(0,0,0,.04);white-space:pre-wrap;word-break:break-word}
+.m .n{font-size:12px;color:var(--mute);margin-bottom:2px}.m .t{font-size:11px;color:var(--mute);margin-top:2px;text-align:right}
+.me{align-self:flex-end;background:var(--me)}.sys{align-self:center;background:var(--sys);color:var(--mute);font-size:13px;max-width:92%;text-align:center}
+.dm{border:1px dashed #c9b8ff}
+#bar{position:fixed;left:0;right:0;bottom:0;background:var(--bg);border-top:1px solid var(--line);padding:8px 10px calc(8px + env(safe-area-inset-bottom));display:flex;gap:8px}
+#bar textarea{flex:1;resize:none;border:1px solid var(--line);border-radius:12px;padding:8px 10px;font:inherit;background:#fff;max-height:120px}
+#bar button{border:0;border-radius:12px;padding:0 16px;background:var(--ink);color:#fff;font:inherit}
+#pair{padding:24px 18px;max-width:420px;margin:0 auto}#pair input{width:100%;padding:10px;margin:6px 0 12px;border:1px solid var(--line);border-radius:10px;font:inherit}
+#pair button{width:100%;padding:12px;border:0;border-radius:12px;background:var(--ink);color:#fff;font:inherit}
+.ap{display:flex;gap:8px;justify-content:center;margin-top:6px}.ap button{border:1px solid var(--line);background:#fff;border-radius:10px;padding:4px 12px;font:inherit}
+</style></head><body>
+<div id="pair" hidden><h2>进门</h2><p>粘上户主给你的配对链接，或者分别填地址和 token。</p>
+<input id="plink" placeholder="sameroof://pair?api=...&token=..."><input id="papi" placeholder="http://192.168.1.5:8790"><input id="ptok" placeholder="token"><button id="pgo">进屋</button></div>
+<div id="app" hidden><div id="top"><b>同屋</b><span id="who"></span><span id="dot" style="color:#c33">●</span></div><div id="log"></div>
+<div id="bar"><textarea id="in" rows="1" placeholder="说点什么，@名字 叫人"></textarea><button id="send">说</button></div></div>
+<script>
+const S=k=>localStorage.getItem(k),W=(k,v)=>localStorage.setItem(k,v);
+let api=S('api'),tok=S('token'),me=null,members=[],lastSeq=0;
+const $=s=>document.querySelector(s),log=$('#log');
+const ppair=()=>{$('#pair').hidden=false;$('#app').hidden=true};
+$('#pgo').onclick=()=>{let l=$('#plink').value.trim();if(l){const u=new URL(l.replace('sameroof://','http://'));api=u.searchParams.get('api');tok=u.searchParams.get('token')}else{api=$('#papi').value.trim();tok=$('#ptok').value.trim()}if(!api||!tok)return alert('地址和token都要');W('api',api);W('token',tok);location.reload()};
+const req=(m,p,b)=>fetch(api+p,{method:m,headers:{authorization:'Bearer '+tok,'content-type':'application/json'},body:b?JSON.stringify(b):undefined}).then(async r=>{if(r.status===401){localStorage.clear();ppair();throw new Error('token 不对')}return r.json()});
+const name=id=>(members.find(x=>x.id===id)||{}).name||id;
+const fmt=ts=>new Date(ts).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
+function show(m){if(m.seq&&m.seq<=lastSeq)return;if(m.seq)lastSeq=m.seq;const d=document.createElement('div');
+ if(m.kind==='system'){d.className='m sys';d.textContent=m.text;const meta=m.meta&&(typeof m.meta==='string'?JSON.parse(m.meta):m.meta);
+  if(meta&&meta.approval_id&&!meta.decision&&me&&me.species==='human'){const a=document.createElement('div');a.className='ap';for(const [l,v] of [['同意','allow'],['拒绝','deny']]){const b=document.createElement('button');b.textContent=l;b.onclick=()=>req('POST','/approval/'+meta.approval_id,{decision:v}).then(()=>a.remove());a.appendChild(b)}d.appendChild(a)}}
+ else{d.className='m'+(m.from_id===(me&&me.id)?' me':'')+(m.kind==='dm'?' dm':'');d.innerHTML=`<div class="n">${name(m.from_id)}${m.kind==='dm'?' · 私信':''}</div><div>${m.text.replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}</div><div class="t">${fmt(m.ts)}</div>`}
+ log.appendChild(d);window.scrollTo(0,document.body.scrollHeight)}
+async function boot(){if(!api||!tok)return ppair();$('#pair').hidden=true;$('#app').hidden=false;
+ members=await req('GET','/members');const r=await fetch(api+'/inbox',{headers:{authorization:'Bearer '+tok}});
+ me=members.find(x=>x.online)||null; // 先占位，下面用 /members 里 last_seen 更准
+ const hist=await req('GET','/history?since=0&limit=200');hist.forEach(show);
+ const inbox=await req('GET','/inbox');const dms=inbox.filter(x=>x.kind==='dm');dms.forEach(show);if(inbox.length)req('POST','/inbox/ack',{ids:inbox.map(x=>x.id)});
+ members=await req('GET','/members');me=members.reduce((a,b)=>(!a||(b.last_seen||'')>(a.last_seen||''))?b:a,null);
+ $('#who').textContent='我是 '+(me?me.name:'?')+' · 家里：'+members.map(x=>x.name).join('、');
+ sse()}
+function sse(){const es=new EventSource(api+'/events?token='+encodeURIComponent(tok));es.onopen=()=>$('#dot').style.color='#3a3';es.onmessage=e=>show(JSON.parse(e.data));es.onerror=()=>{$('#dot').style.color='#c33';es.close();setTimeout(sse,3000)}}
+async function say(){const t=$('#in').value.trim();if(!t)return;$('#in').value='';const dm=t.match(/^DM:\s*(\S+)\s*[:：]?\s*([\s\S]*)$/);
+ if(dm){const m=await req('POST','/dm',{to:dm[1],text:dm[2]});show(m)}else await req('POST','/say',{text:t})}
+$('#send').onclick=say;$('#in').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();say()}});
+if('serviceWorker' in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
+boot();
+</script></body></html>

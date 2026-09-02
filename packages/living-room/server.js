@@ -106,13 +106,20 @@ function post({ kind, from_id, to_id = null, text, reply_to = null, meta = null 
 // ---------- HTTP ----------
 const json = (res, code, obj) => { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
 const readBody = req => new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => { try { r(JSON.parse(b || '{}')); } catch { r(null); } }); });
+const STATIC = path.join(HOUSE, 'apps', 'house');
 function auth(req) {
-  const t = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const url0 = new URL(req.url, 'http://x');
+  const t = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || url0.searchParams.get('token') || '';
   const id = idByToken.get(t);
   return id ? byId.get(id) : null;
 }
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
+  // 壳：纯静态，谁都能拿到（里面没有秘密），进门要 token
+  if (req.method === 'GET' && ['/', '/index.html', '/manifest.json', '/sw.js'].includes(url.pathname)) {
+    const f = path.join(STATIC, url.pathname === '/' ? 'index.html' : url.pathname.slice(1));
+    if (fs.existsSync(f)) { res.writeHead(200, { 'content-type': f.endsWith('.json') ? 'application/manifest+json' : f.endsWith('.js') ? 'text/javascript' : 'text/html; charset=utf-8' }); return res.end(fs.readFileSync(f)); }
+  }
   const me = auth(req);
   if (!me) return json(res, 401, { error: '不认识你。每个住户一把 token，在 ~/.sameroof/run/living-room-tokens.json' });
   const p = presence.get(me.id) || {}; p.last_seen = new Date().toISOString(); presence.set(me.id, p);

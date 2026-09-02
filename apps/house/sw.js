@@ -1,0 +1,2 @@
+const C='sameroof-v1';self.addEventListener('install',e=>e.waitUntil(caches.open(C).then(c=>c.addAll(['./','./index.html','./manifest.json']))));
+self.addEventListener('fetch',e=>{const u=new URL(e.request.url);if(u.pathname.startsWith('/events')||u.pathname.startsWith('/say')||u.pathname.startsWith('/dm')||u.pathname.startsWith('/inbox')||u.pathname.startsWith('/approval'))return;e.respondWith(fetch(e.request).then(r=>{if(e.request.method==='GET'&&r.ok){const cp=r.clone();caches.open(C).then(c=>c.put(e.request,cp));}return r;}).catch(()=>caches.match(e.request)));});
