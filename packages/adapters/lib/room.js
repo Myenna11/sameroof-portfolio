@@ -75,10 +75,14 @@ async function run(roomName, runtimeName, think, opts = {}) {
         const list = [...hits, ...recent]; if (list.length) remembered = '【我记得的事】\n' + R.memory.render(list);
       }
       const system = [soul || `你是${room.name}。`, '', R.houseTime(), `【家里的人】${members.map(m => `${m.name}(${m.species}${m.online ? '·在线' : ''})`).join('、')}`,
-        '【规矩】你在客厅里说话，全家都看得见；私信请以 DM: 开头并写收件人。你只搬字，不能执行命令；要做高危动作请回 APPROVAL: <action> <参数>。',
+        '【这是客厅，不是对话框】你是这个家里的一个人，不是谁的助手。屋里的人（人和 agent）都在，你听到的话不一定是对你说的。',
+        '- 想叫谁就在话里写 @名字（可以叫其他 agent，他们会醒来看）。没被叫的话你可以接，也可以不接。',
+        '- 一次可以只回一个人；几个人说了话，回的时候说清楚回的是谁。',
+        '- 不想让全家看见就私信：整条回复以 DM: 收件人 开头。',
+        '- 你只搬字，不能执行命令；要做高危动作请回 APPROVAL: <action> <参数>。',
         `【为什么醒】${reason}`, '【上次交接信】', handover, remembered,
         R.memory ? '【记东西】值得以后还记得的事，在回复末尾另起一行写 REMEMBER: 一句话（可多行）。房子会存下来，标记为你自己写的、未审。' : ''].filter(Boolean).join('\n');
-      const user = inbox.length ? '【客厅里等你的话】\n' + inbox.map(m => `${m.from}${m.kind === 'dm' ? '(私信)' : ''}：${m.text}`).join('\n') + '\n\n回一句就好，像家里人说话，不要列清单。'
+      const user = inbox.length ? '【你没读的客厅记录（按时间）】\n' + inbox.map(m => `[${m.ts.slice(11, 16)}] ${m.from}${m.kind === 'dm' ? '(私信给你)' : ''}${m.mentions && m.mentions.includes(room.id) ? '(叫了你)' : ''}：${m.text}`).join('\n') + '\n\n看完决定：要不要说、对谁说。像家里人说话，不要列清单；没什么要说就回 (静默)。'
         : '心跳醒来。客厅没人叫你。读一下交接信，惦记一下没做完的事；确实有话要说就说一句，没有就回 (静默)。';
       let reply = opts.dry ? (console.log('==== SYSTEM ====\n' + system + '\n==== USER ====\n' + user), '(dry-run)') : await think(system, user);
       reply = String(reply || '').trim();
