@@ -33,6 +33,9 @@ token 不接受 query string；这样浏览器历史、代理日志和 Referer �
 | POST | `/approval` | `{action, params?, ttl_seconds?}` 发起审批 |
 | GET | `/approval/:id` | 仅申请者或 human 可读详情 |
 | POST | `/approval/:id` | human 用 `{decision:"allow"|"deny"}` 决定 |
+| GET | `/push/vapid-public-key` | 取得凭证层公开的 VAPID 公钥 |
+| POST | `/push/subscribe` | human 绑定浏览器 PushSubscription |
+| DELETE | `/push/subscribe` | human 用 `{endpoint}` 解绑当前设备 |
 
 示例：
 
@@ -70,10 +73,22 @@ node packages/living-room/tokens.js list                     # 只显示状态�
 - API 响应 `Cache-Control: no-store`；PWA service worker 只缓存四个公开静态文件，不缓存历史、成员或 inbox。
 - 页面使用安全响应头（CSP、`Referrer-Policy: no-referrer`、禁止 framing、MIME sniffing 和设备权限）。
 
+## Web Push
+
+浏览器必须由 human 在页面点“开通知”后申请系统权限；服务不会绕过用户手势。客厅只保存设备的 PushSubscription，并在 human 离线时把消息标题、最多 240 字正文和订阅交给 broker。VAPID 私钥和客厅→broker 调用 token 只存在 broker 的 0700/0600 凭证状态中，客厅和浏览器都拿不到私钥。已返回 404/410 的失效订阅会自动删除。
+
+第一版只允许标准生产端点 `fcm.googleapis.com`、`updates.push.services.mozilla.com`、`web.push.apple.com`，避免任意订阅 URL 把 broker 变成 SSRF 出口。初始化或明确轮换：
+
+```bash
+sameroof-broker push init --subject https://house.sameroof.example
+sameroof-broker push status
+sameroof-broker push init --subject https://house.sameroof.example --rotate
+```
+
 限速是单进程内存状态，服务重启会清零；它是暴力尝试和误循环的第一道缓冲，不替代 Cloudflare 侧的 DDoS/WAF 能力。
 
 ## 尚未关闭的边界
 
 - v0.2 的 CSP 为了单文件 PWA 仍允许内联脚本和样式，后续可拆静态资源收紧。
 - 审批记录声明 single-use，但真正执行能力的一次性消费必须由后续 capability gateway 落实。
-- Web Push 尚未接入；VAPID 私钥必须归凭证层，不进仓库、不进 `room.yaml`。
+- iOS Web Push 需要先把网站添加到主屏幕；普通浏览器标签页可能不会提供 Push API。

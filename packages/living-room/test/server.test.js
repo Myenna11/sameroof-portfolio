@@ -44,11 +44,14 @@ function fixture() {
 
 test('public boundary uses bearer auth, IP failure limit, resident say limit, and hot token rotation', async () => {
   const root = fixture();
-  const room = createLivingRoom({ houseDir: root, runDir: path.join(root, 'run'), dataDir: path.join(root, 'state'), port: 0, authFailureLimit: 2, authBlockMs: 5000, sayLimit: 1 });
+  const sent = [];
+  const notificationClient = { publicKey: async () => ({ public_key: 'test-public-key' }), send: async (subscription, payload) => { sent.push({ subscription, payload }); return { delivered: true }; } };
+  const room = createLivingRoom({ houseDir: root, runDir: path.join(root, 'run'), dataDir: path.join(root, 'state'), port: 0, authFailureLimit: 2, authBlockMs: 5000, sayLimit: 1, notificationClient });
   try {
     const address = await room.listen();
     const port = address.port;
     const alpha = room.tokenStore.issue('resident_alpha_01').token;
+    const beta = room.tokenStore.issue('resident_beta_01').token;
     assert.equal((await request(port, '/me', { token: alpha })).body.id, 'resident_alpha_01');
     assert.equal((await request(port, '/me?token=' + encodeURIComponent(alpha))).status, 401);
     assert.equal((await request(port, '/me', { token: 'x'.repeat(32) })).status, 401);
@@ -56,6 +59,14 @@ test('public boundary uses bearer auth, IP failure limit, resident say limit, an
     assert.equal((await request(port, '/me', { token: 'x'.repeat(32), ip: '203.0.113.20' })).status, 401);
     assert.equal((await request(port, '/me', { token: 'x'.repeat(32), ip: '203.0.113.20' })).status, 429);
     assert.equal((await request(port, '/me', { token: alpha, ip: '203.0.113.21' })).status, 200);
+    assert.equal((await request(port, '/push/vapid-public-key', { token: alpha })).body.public_key, 'test-public-key');
+    const subscription = { endpoint: 'https://fcm.googleapis.com/fcm/send/test-device', expirationTime: null, keys: { p256dh: 'a'.repeat(87), auth: 'b'.repeat(22) } };
+    assert.equal((await request(port, '/push/subscribe', { method: 'POST', token: alpha, body: subscription })).status, 200);
+    assert.equal((await request(port, '/push/subscribe', { method: 'POST', token: beta, body: subscription })).status, 403);
+    assert.equal((await request(port, '/say', { method: 'POST', token: beta, body: { text: '叫维护者回家' } })).status, 200);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].payload.body, '叫维护者回家');
     assert.equal((await request(port, '/say', { method: 'POST', token: alpha, body: { text: '第一句' } })).status, 200);
     const limited = await request(port, '/say', { method: 'POST', token: alpha, body: { text: '第二句' } });
     assert.equal(limited.status, 429);

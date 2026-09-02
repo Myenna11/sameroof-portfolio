@@ -5,6 +5,7 @@
 *{box-sizing:border-box}html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:16px/1.5 -apple-system,"PingFang SC","Noto Sans SC",sans-serif}
 #top{position:sticky;top:0;background:var(--bg);border-bottom:1px solid var(--line);padding:calc(10px + env(safe-area-inset-top)) 14px 10px;display:flex;align-items:center;gap:10px}
 #top b{font-size:17px}#who{color:var(--mute);font-size:13px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#notify{border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);padding:3px 8px;font:inherit;font-size:12px}
 #log{padding:12px 12px 90px;display:flex;flex-direction:column;gap:8px}
 .m{max-width:82%;padding:8px 12px;border-radius:14px;background:var(--them);box-shadow:0 1px 0 rgba(0,0,0,.04);white-space:pre-wrap;word-break:break-word}
 .m .n{font-size:12px;color:var(--mute);margin-bottom:2px}.m .t{font-size:11px;color:var(--mute);margin-top:2px;text-align:right}
@@ -19,7 +20,7 @@
 </style></head><body>
 <div id="pair" hidden><h2>进门</h2><p>粘上户主给你的配对链接，或者分别填地址和 token。</p>
 <input id="plink" placeholder="sameroof://pair?api=...&token=..."><input id="papi" placeholder="http://192.168.1.5:8790"><input id="ptok" placeholder="token"><button id="pgo">进屋</button></div>
-<div id="app" hidden><div id="top"><b>同屋</b><span id="who"></span><span id="dot" style="color:#c33">●</span></div><div id="log"></div>
+<div id="app" hidden><div id="top"><b>同屋</b><span id="who"></span><button id="notify" type="button">开通知</button><span id="dot" style="color:#c33">●</span></div><div id="log"></div>
 <div id="bar"><textarea id="in" rows="1" placeholder="说点什么，@名字 叫人"></textarea><button id="send">说</button></div></div>
 <script>
 const S=k=>localStorage.getItem(k),W=(k,v)=>localStorage.setItem(k,v);
@@ -44,6 +45,9 @@ async function boot(){if(!api||!tok)return ppair();$('#pair').hidden=true;$('#ap
 async function sse(){try{const r=await fetch(api+'/events',{headers:{authorization:'Bearer '+tok}});if(r.status===401){tok=null;localStorage.removeItem('token');ppair();return}if(!r.ok)throw new Error('实时连接失败 '+r.status);$('#dot').style.color='#3a3';const reader=r.body.getReader(),decoder=new TextDecoder();let buf='';for(;;){const x=await reader.read();if(x.done)break;buf+=decoder.decode(x.value,{stream:true});const parts=buf.split('\n\n');buf=parts.pop();for(const part of parts){const line=part.split('\n').find(v=>v.startsWith('data: '));if(line)show(JSON.parse(line.slice(6)))}}}catch(e){$('#dot').style.color='#c33'}if(tok)setTimeout(sse,3000)}
 async function say(){const t=$('#in').value.trim();if(!t)return;$('#in').value='';const dm=t.match(/^DM:\s*(\S+)\s*[:：]?\s*([\s\S]*)$/);
  try{if(dm){const m=await req('POST','/dm',{to:dm[1],text:dm[2]});show(m)}else await req('POST','/say',{text:t})}catch(e){$('#in').value=t;alert(e.message)}}
+const vapidBytes=value=>{const s=(value+'='.repeat((4-value.length%4)%4)).replace(/-/g,'+').replace(/_/g,'/'),raw=atob(s),out=new Uint8Array(raw.length);for(let i=0;i<raw.length;i++)out[i]=raw.charCodeAt(i);return out};
+async function enablePush(){try{if(!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window))throw new Error('这台设备暂不支持网页通知');const permission=await Notification.requestPermission();if(permission!=='granted')throw new Error('通知权限没有打开');const reg=await navigator.serviceWorker.ready,key=await req('GET','/push/vapid-public-key');let sub=await reg.pushManager.getSubscription();if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:vapidBytes(key.public_key)});await req('POST','/push/subscribe',sub.toJSON());$('#notify').textContent='通知已开';$('#notify').disabled=true}catch(e){alert(e.message)}}
+$('#notify').onclick=enablePush;
 $('#send').onclick=say;$('#in').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();say()}});
 if('serviceWorker' in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
 boot().catch(e=>{alert(e.message);if(!tok)ppair()});

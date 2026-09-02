@@ -12,6 +12,7 @@ const yaml = require('js-yaml');
 const Database = require('better-sqlite3');
 const { TokenStore } = require('./tokens');
 const { SlidingWindowLimiter, AuthFailureLimiter } = require('./rate-limit');
+const { PushClient, PushClientError } = require('./push-client');
 
 const RESERVED = new Set(['system', 'all', 'everyone', 'house']);
 const MESSAGE_MAX = 8000;
@@ -20,6 +21,7 @@ const ACK_MAX = 200;
 const SSE_TOTAL_MAX = 100;
 const SSE_RESIDENT_MAX = 3;
 const SSE_IP_MAX = 10;
+const PUSH_HOSTS = new Set(['fcm.googleapis.com', 'updates.push.services.mozilla.com', 'web.push.apple.com']);
 
 class HttpError extends Error {
   constructor(status, code, message) {
@@ -126,6 +128,18 @@ function positiveInt(value, fallback, min, max, code) {
   return number;
 }
 
+function pushSubscription(value) {
+  if (!value || typeof value !== 'object' || typeof value.endpoint !== 'string' || !value.keys) throw new HttpError(400, 'PUSH-SUBSCRIPTION-INVALID', '推送订阅格式不合法。');
+  let endpoint;
+  try { endpoint = new URL(value.endpoint); } catch { throw new HttpError(400, 'PUSH-SUBSCRIPTION-INVALID', '推送 endpoint 不是合法 URL。'); }
+  const p256dh = value.keys.p256dh;
+  const auth = value.keys.auth;
+  if (endpoint.protocol !== 'https:' || !PUSH_HOSTS.has(endpoint.hostname) || value.endpoint.length > 2048 || typeof p256dh !== 'string' || p256dh.length < 80 || p256dh.length > 200 || typeof auth !== 'string' || auth.length < 16 || auth.length > 100) {
+    throw new HttpError(400, 'PUSH-SUBSCRIPTION-INVALID', '推送订阅端点或密钥不在允许范围。');
+  }
+  return { endpoint: value.endpoint, expirationTime: value.expirationTime || null, keys: { p256dh, auth } };
+}
+
 function createLivingRoom(options = {}) {
   const houseDir = path.resolve(options.houseDir || process.env.SAMEROOF_HOUSE || path.resolve(__dirname, '../..'));
   const runDir = path.resolve(options.runDir || path.join(process.env.HOME || os.homedir(), '.sameroof', 'run'));
@@ -140,6 +154,7 @@ function createLivingRoom(options = {}) {
 
   const tokenFile = path.join(runDir, 'living-room-tokens.json');
   const tokenStore = options.tokenStore || new TokenStore({ file: tokenFile });
+  const notificationClient = options.notificationClient || new PushClient();
   tokenStore.ensure(residents.map(resident => resident.id));
 
   const db = new Database(path.join(dataDir, 'house.db'));
@@ -154,7 +169,10 @@ function createLivingRoom(options = {}) {
     'PRIMARY KEY(message_id, resident_id));',
     'CREATE TABLE IF NOT EXISTS approvals(',
     'id TEXT PRIMARY KEY, resident_id TEXT, action TEXT, params_digest TEXT, params TEXT,',
-    'status TEXT, decided_by TEXT, created_ts TEXT, expires_ts TEXT, used INTEGER DEFAULT 0);'
+    'status TEXT, decided_by TEXT, created_ts TEXT, expires_ts TEXT, used INTEGER DEFAULT 0);',
+    'CREATE TABLE IF NOT EXISTS push_subscriptions(',
+    'endpoint TEXT PRIMARY KEY, resident_id TEXT NOT NULL, subscription TEXT NOT NULL, created_ts TEXT NOT NULL, updated_ts TEXT NOT NULL);',
+    'CREATE INDEX IF NOT EXISTS push_subscriptions_resident ON push_subscriptions(resident_id);'
   ].join('\n'));
 
   let seq = db.prepare('SELECT MAX(seq) AS value FROM messages').get().value || 0;
@@ -163,6 +181,10 @@ function createLivingRoom(options = {}) {
   const ackDelivery = db.prepare("UPDATE deliveries SET status='read', ts=? WHERE message_id=? AND resident_id=? AND status!='read'");
   const unread = db.prepare("SELECT m.* FROM deliveries d JOIN messages m ON m.id=d.message_id WHERE d.resident_id=? AND d.status!='read' ORDER BY m.seq");
   const history = db.prepare("SELECT * FROM messages WHERE kind!='dm' AND seq>? ORDER BY seq LIMIT ?");
+  const pushForResident = db.prepare('SELECT endpoint,subscription FROM push_subscriptions WHERE resident_id=?');
+  const upsertPush = db.prepare(`INSERT INTO push_subscriptions(endpoint,resident_id,subscription,created_ts,updated_ts) VALUES(?,?,?,?,?)
+    ON CONFLICT(endpoint) DO UPDATE SET resident_id=excluded.resident_id,subscription=excluded.subscription,updated_ts=excluded.updated_ts`);
+  const deletePush = db.prepare('DELETE FROM push_subscriptions WHERE endpoint=? AND resident_id=?');
 
   const listeners = new Set();
   const presence = new Map();
@@ -178,6 +200,27 @@ function createLivingRoom(options = {}) {
   const dmLimiter = new SlidingWindowLimiter({ limit: options.dmLimit || 20, windowMs: 60000 });
   const approvalLimiter = new SlidingWindowLimiter({ limit: options.approvalLimit || 6, windowMs: 60000 });
   const ackLimiter = new SlidingWindowLimiter({ limit: options.ackLimit || 60, windowMs: 60000 });
+  const pushLimiter = new SlidingWindowLimiter({ limit: options.pushLimit || 10, windowMs: 60000 });
+
+  function notifyOfflineHumans(row, targets) {
+    const from = byId.get(row.from_id);
+    for (const residentId of targets) {
+      const resident = byId.get(residentId);
+      if (!resident || resident.species !== 'human' || presence.get(residentId)?.online) continue;
+      for (const saved of pushForResident.all(residentId)) {
+        let subscription;
+        try { subscription = JSON.parse(saved.subscription); } catch { deletePush.run(saved.endpoint, residentId); continue; }
+        setImmediate(async () => {
+          try {
+            await notificationClient.send(subscription, { title: '同屋 · ' + (from?.name || '家里'), body: String(row.text || '').slice(0, 240), url: '/' });
+          } catch (error) {
+            if (error instanceof PushClientError && error.status === 410) deletePush.run(saved.endpoint, residentId);
+            else console.error('[客厅推送失败]', error.code || error.message);
+          }
+        });
+      }
+    }
+  }
 
   function mentionsIn(text) {
     const found = new Set();
@@ -219,6 +262,7 @@ function createLivingRoom(options = {}) {
     state.last_said = ts;
     presence.set(row.from_id, state);
     for (const listener of listeners) if (row.kind !== 'dm' || listener.id === row.to_id || listener.id === row.from_id) listener.send(row);
+    notifyOfflineHumans(row, targets);
     return row;
   }
 
@@ -370,6 +414,28 @@ function createLivingRoom(options = {}) {
         return writeJson(res, 200, residents.map(resident => ({ id: resident.id, name: resident.name, species: resident.species, ...(presence.get(resident.id) || {}) })));
       }
 
+      if (req.method === 'GET' && url.pathname === '/push/vapid-public-key') {
+        const value = await notificationClient.publicKey();
+        return writeJson(res, 200, value);
+      }
+
+      if (req.method === 'POST' && url.pathname === '/push/subscribe') {
+        if (me.species !== 'human') throw new HttpError(403, 'PUSH-HUMAN-ONLY', '只有人的房间可以绑定手机推送。');
+        rateOrThrow(pushLimiter, me.id, '绑定通知');
+        const subscription = pushSubscription(await readJson(req));
+        const ts = new Date().toISOString();
+        upsertPush.run(subscription.endpoint, me.id, JSON.stringify(subscription), ts, ts);
+        return writeJson(res, 200, { subscribed: true });
+      }
+
+      if (req.method === 'DELETE' && url.pathname === '/push/subscribe') {
+        if (me.species !== 'human') throw new HttpError(403, 'PUSH-HUMAN-ONLY', '只有人的房间可以解绑手机推送。');
+        rateOrThrow(pushLimiter, me.id, '解绑通知');
+        const body = await readJson(req);
+        if (!body || typeof body.endpoint !== 'string' || body.endpoint.length > 2048) throw new HttpError(400, 'PUSH-ENDPOINT-INVALID', '要提供合法 endpoint。');
+        return writeJson(res, 200, { removed: deletePush.run(body.endpoint, me.id).changes > 0 });
+      }
+
       if (req.method === 'POST' && url.pathname === '/approval') {
         rateOrThrow(approvalLimiter, me.id, '申请审批');
         const body = await readJson(req);
@@ -414,9 +480,10 @@ function createLivingRoom(options = {}) {
       throw new HttpError(404, 'ROUTE-NOT-FOUND', '没这个门。');
     } catch (error) {
       if (res.headersSent) return res.destroy();
-      const status = error instanceof HttpError ? error.status : 500;
-      const code = error instanceof HttpError ? error.code : 'INTERNAL-ERROR';
-      if (!(error instanceof HttpError)) console.error('[客厅请求失败]', error);
+      const known = error instanceof HttpError || error instanceof PushClientError;
+      const status = known ? error.status : 500;
+      const code = known ? error.code : 'INTERNAL-ERROR';
+      if (!known) console.error('[客厅请求失败]', error);
       const extra = error.retryAfterMs ? { 'retry-after': String(Math.ceil(error.retryAfterMs / 1000)) } : {};
       writeJson(res, status, { error: { code, message: status === 500 ? '客厅内部出了点问题。' : error.message } }, extra);
     }

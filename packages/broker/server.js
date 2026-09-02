@@ -5,6 +5,7 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const { BrokerStore, BrokerError } = require('./store');
+const { PushCredentialStore } = require('./push');
 
 const MAX_BODY = 2 * 1024 * 1024;
 const MAX_RESPONSE = 20 * 1024 * 1024;
@@ -104,6 +105,7 @@ function createBroker(options = {}) {
     dbPath: options.dbPath
   });
   const ownsStore = !options.store;
+  const pushCredentials = options.pushCredentials || new PushCredentialStore({ stateDir: store.stateDir });
   const socketPath = path.resolve(options.socketPath || process.env.SAMEROOF_BROKER_SOCKET || path.join(store.runDir, 'broker.sock'));
   const socketMode = options.socketMode === undefined
     ? Number.parseInt(process.env.SAMEROOF_BROKER_SOCKET_MODE || '600', 8)
@@ -116,6 +118,15 @@ function createBroker(options = {}) {
     const started = Date.now();
     try {
       if (req.method === 'GET' && req.url === '/health') return json(res, 200, { ok: true });
+
+      if (req.method === 'GET' && req.url === '/internal/web-push/public-key') {
+        return json(res, 200, pushCredentials.publicKey(bearer(req)));
+      }
+      if (req.method === 'POST' && req.url === '/internal/web-push/send') {
+        const secret = bearer(req);
+        const body = await readJson(req);
+        return json(res, 200, await pushCredentials.send(secret, body));
+      }
 
       const secret = bearer(req);
       if (req.method === 'GET' && req.url.split('?')[0] === '/v1/models') {
@@ -241,7 +252,7 @@ function createBroker(options = {}) {
     });
   }
 
-  return { server, store, socketPath, listen, close };
+  return { server, store, pushCredentials, socketPath, listen, close };
 }
 
 async function main() {

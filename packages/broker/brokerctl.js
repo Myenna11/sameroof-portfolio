@@ -4,6 +4,7 @@
 const fs = require('fs');
 const { BrokerStore, BrokerError } = require('./store');
 const { createBroker } = require('./server');
+const { PushCredentialStore } = require('./push');
 
 function parse(argv) {
   const positional = [];
@@ -51,6 +52,8 @@ sameroof-broker cred revoke <alias>
 sameroof-broker token issue <resident_id> --credential <alias[,alias]> --models <id[,id]> [--purposes interactive,heartbeat] [--ttl 12h] [--max-requests 100] [--max-tokens 200000] [--replace]
 sameroof-broker token list
 sameroof-broker token revoke|quarantine|activate <token_id>
+sameroof-broker push init --subject <https://...|mailto:...> [--rotate]
+sameroof-broker push status
 sameroof-broker ledger [--limit 50]
 
 真凭证永远不接受 --api-key，避免进入 shell history。token secret 只在签发时显示一次，并写入 0600 token 文件。`);
@@ -67,6 +70,10 @@ async function run(argv = process.argv.slice(2)) {
 
   const store = new BrokerStore();
   try {
+    const push = new PushCredentialStore({ stateDir: store.stateDir });
+    if (p[0] === 'push' && p[1] === 'init') return print(push.initialize(required(f.subject, '缺 --subject。'), f.rotate === true));
+    if (p[0] === 'push' && p[1] === 'status') return print(push.status());
+
     if (p[0] === 'cred' && p[1] === 'add') return print(store.addCredential({
       alias: required(p[2], '缺凭证别名。'),
       provider: required(f.provider, '缺 --provider。'),
