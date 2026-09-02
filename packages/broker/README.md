@@ -4,9 +4,10 @@
 
 ## 第一版合同
 
-- socket：`~/.sameroof/run/broker.sock`，权限 `0600`
+- 开发默认 socket：`~/.sameroof/run/broker.sock`，权限 `0600`
+- systemd socket：`/run/sameroof-broker/broker.sock`，权限 `0660`，仅 `sameroof` 本机组可连接
 - auth：`Authorization: Bearer <resident token>`
-- token 文件：`~/.sameroof/run/tokens/<resident_id>`，权限 `0600`
+- token 文件：开发默认 `~/.sameroof/run/tokens/<resident_id>`；systemd 为 `/var/lib/sameroof-broker/tokens/<resident_id>`，权限 `0600`
 - API：`GET /v1/models`、`POST /v1/chat/completions`
 - 可选头：`x-sameroof-purpose`、`x-sameroof-credential`
 - 上游路径：`openai` 保留住户 `/v1`；`bare` 表示 base_url 已是 provider API 根并剥离 `/v1`；旧记录 `auto` 对末尾 `/v数字` 兼容止血
@@ -60,7 +61,20 @@ sameroof-broker ledger --limit 50
 sameroof-broker serve
 ```
 
-部署时应把 broker 放在独立 OS 用户下，以 systemd 沙箱限制文件访问和出站。这个 MVP 防住户进程横向偷全家 key，不声称能抵抗 VPS root 已完全失守。
+## systemd 部署
+
+正式服务不从 `/root` 工作树直接运行。安装器把最小运行文件复制到 root 只读的 `/opt/sameroof/broker`，服务使用无登录 shell 的 `sameroof-broker` 用户：
+
+```bash
+sudo deploy/install-broker.sh /root/sameroof
+sudo systemctl enable --now sameroof-broker
+systemctl show sameroof-broker -p User -p Group -p DynamicUser
+systemd-analyze security sameroof-broker.service
+```
+
+状态库和真凭证在 `/var/lib/sameroof-broker`（0700），socket 在重启自动重建的 `/run/sameroof-broker`。管理命令的 `/usr/local/bin/sameroof-broker` wrapper 会降权为服务用户再打开数据库，避免 root 控制命令把状态文件所有者改回 root。现有 root 适配器通过 `/root/.sameroof/run/broker.sock` 兼容 symlink 连接；以后房间拆成独立用户时，只把对应进程加入 `sameroof` 组，不开放状态目录。
+
+沙箱关闭 home、设备、namespace、内核与 control-group 写面，只保留 Unix socket 和上游 HTTPS 所需的地址族。这个边界防住户进程横向读取全家真 key，不声称能抵抗 VPS root 已完全失守。
 
 ## 开发
 

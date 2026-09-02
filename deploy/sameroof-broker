@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+if [ "$(id -u)" -ne 0 ]; then
+  echo "sameroof-broker 控制面必须由 root 调用；数据面服务本身以 sameroof-broker 用户运行。" >&2
+  exit 1
+fi
+exec /usr/sbin/runuser -u sameroof-broker -- env \
+  HOME=/var/lib/sameroof-broker \
+  SAMEROOF_HOME=/var/lib/sameroof-broker \
+  SAMEROOF_STATE_DIR=/var/lib/sameroof-broker \
+  SAMEROOF_TOKEN_DIR=/var/lib/sameroof-broker/tokens \
+  SAMEROOF_RUN_DIR=/run/sameroof-broker \
+  SAMEROOF_BROKER_SOCKET=/run/sameroof-broker/broker.sock \
+  /usr/bin/node /opt/sameroof/broker/brokerctl.js "$@"

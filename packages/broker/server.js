@@ -96,9 +96,19 @@ function safeUpstreamHeaders(req, credential) {
 }
 
 function createBroker(options = {}) {
-  const store = options.store || new BrokerStore({ home: options.home, dbPath: options.dbPath });
+  const store = options.store || new BrokerStore({
+    home: options.home,
+    runDir: options.runDir,
+    stateDir: options.stateDir,
+    tokenDir: options.tokenDir,
+    dbPath: options.dbPath
+  });
   const ownsStore = !options.store;
   const socketPath = path.resolve(options.socketPath || process.env.SAMEROOF_BROKER_SOCKET || path.join(store.runDir, 'broker.sock'));
+  const socketMode = options.socketMode === undefined
+    ? Number.parseInt(process.env.SAMEROOF_BROKER_SOCKET_MODE || '600', 8)
+    : options.socketMode;
+  if (![0o600, 0o660].includes(socketMode)) throw new Error('broker socket mode 只允许 0600 或 0660。');
   const bindPath = path.join(path.dirname(socketPath), '.' + path.basename(socketPath) + '.' + process.pid + '.' + require('crypto').randomBytes(6).toString('hex'));
   let socketIdentity = null;
 
@@ -200,7 +210,7 @@ function createBroker(options = {}) {
             fs.unlinkSync(socketPath);
           }
           fs.renameSync(bindPath, socketPath);
-          fs.chmodSync(socketPath, 0o600);
+          fs.chmodSync(socketPath, socketMode);
           const stat = fs.lstatSync(socketPath);
           socketIdentity = { dev: stat.dev, ino: stat.ino, ctimeMs: stat.ctimeMs };
           resolve({ socketPath });

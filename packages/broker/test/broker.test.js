@@ -95,6 +95,26 @@ test('凭证列表绝不返回 api_key，数据库和 token 文件为 0600', () 
   store.close();
 });
 
+test('state、runtime 与 token 目录可以分离，socket 可安全开放给本机客户端组', async () => {
+  const root = tempHome();
+  const store = new BrokerStore({
+    home: path.join(root, 'home'),
+    stateDir: path.join(root, 'state'),
+    runDir: path.join(root, 'run'),
+    tokenDir: path.join(root, 'tokens')
+  });
+  assert.equal(store.dbPath, path.join(root, 'state', 'broker.db'));
+  assert.equal(store.tokenDir, path.join(root, 'tokens'));
+  const broker = createBroker({ store, socketMode: 0o660 });
+  await broker.listen();
+  try {
+    assert.equal(fs.statSync(broker.socketPath).mode & 0o777, 0o660);
+  } finally {
+    await broker.close();
+    store.close();
+  }
+});
+
 test('旧 broker 数据库自动补 path_style=auto，不要求重建真凭证', () => {
   const home = tempHome();
   const state = path.join(home, 'state');

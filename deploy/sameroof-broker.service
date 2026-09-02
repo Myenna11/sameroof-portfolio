@@ -1,18 +1,53 @@
 [Unit]
 Description=同屋 凭证 broker
-After=network.target
+After=network-online.target
+Wants=network-online.target
+
 [Service]
 Type=simple
-WorkingDirectory=/root/sameroof/packages/broker
-ExecStart=/usr/bin/node server.js
+User=sameroof-broker
+Group=sameroof
+WorkingDirectory=/opt/sameroof/broker
+ExecStart=/usr/bin/node /opt/sameroof/broker/server.js
 Restart=always
 RestartSec=3
-Environment=HOME=/root
-# 沙箱（审查员：正式应独立 OS 用户；今晚先收紧）
+TimeoutStopSec=20
+UMask=0077
+
+Environment=HOME=/var/lib/sameroof-broker
+Environment=SAMEROOF_HOME=/var/lib/sameroof-broker
+Environment=SAMEROOF_STATE_DIR=/var/lib/sameroof-broker
+Environment=SAMEROOF_TOKEN_DIR=/var/lib/sameroof-broker/tokens
+Environment=SAMEROOF_RUN_DIR=/run/sameroof-broker
+Environment=SAMEROOF_BROKER_SOCKET=/run/sameroof-broker/broker.sock
+Environment=SAMEROOF_BROKER_SOCKET_MODE=0660
+
+StateDirectory=sameroof-broker
+StateDirectoryMode=0700
+RuntimeDirectory=sameroof-broker
+RuntimeDirectoryMode=0750
+
 NoNewPrivileges=yes
 PrivateTmp=yes
+PrivateDevices=yes
 ProtectSystem=strict
-ReadWritePaths=/root/.sameroof /root/sameroof/state
-ProtectHome=read-only
+ProtectHome=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
 [Install]
 WantedBy=multi-user.target

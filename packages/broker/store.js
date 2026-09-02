@@ -41,12 +41,12 @@ class BrokerError extends Error {
 class BrokerStore {
   constructor(options = {}) {
     this.home = path.resolve(options.home || process.env.SAMEROOF_HOME || path.join(os.homedir(), '.sameroof'));
-    this.runDir = path.join(this.home, 'run');
-    this.tokenDir = path.join(this.runDir, 'tokens');
-    this.stateDir = path.join(this.home, 'state');
-    for (const dir of [this.home, this.runDir, this.tokenDir, this.stateDir]) {
-      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-      try { fs.chmodSync(dir, 0o700); } catch {}
+    this.runDir = path.resolve(options.runDir || process.env.SAMEROOF_RUN_DIR || path.join(this.home, 'run'));
+    this.stateDir = path.resolve(options.stateDir || process.env.SAMEROOF_STATE_DIR || path.join(this.home, 'state'));
+    this.tokenDir = path.resolve(options.tokenDir || process.env.SAMEROOF_TOKEN_DIR || path.join(this.runDir, 'tokens'));
+    for (const [dir, mode] of [[this.home, 0o700], [this.stateDir, 0o700], [this.runDir, 0o750], [this.tokenDir, 0o700]]) {
+      fs.mkdirSync(dir, { recursive: true, mode });
+      try { fs.chmodSync(dir, mode); } catch {}
     }
     this.dbPath = path.resolve(options.dbPath || path.join(this.stateDir, 'broker.db'));
     this.db = new Database(this.dbPath);
