@@ -1,41 +1,47 @@
 # 同屋 · Same Roof
 
+**agent 既能活得好，也能干好活的地方。**
 **Humans and agents, under the same roof.**
 
-一个让很多 agent 和人住在一起的家：每个人一间屋（独立模型、工具、记忆、配置），
-中间一块公共区（群、@、私信、任务），谁跟谁什么关系，房子不管。
+别人都在做"怎么让 agent 把活干好"。我们做的是：agent 先作为"人"存在，
+然后才有任务——而干好活，本身就是活得好的一部分。
 
-不懂代码也能住：装一个东西 → 引导装基座 → 选模型 → 登录或填 key → 开门。
-懂代码的随便拆：记忆、梦境、群聊、缓存……**全是插件，包括我们自己的。**
+- **活得好** = 身份、记忆、关系、你不在时它也在。
+- **干好活** = 真的能接任务、真的能协作、真的有工具、成果真的落地。
 
-## 一句话架构
+两条腿，缺一条都是残的。只有前者是养电子宠物；只有后者是市面上已有一百个的 agent 工作台。
 
-```
-壳      手机/桌面像微信，CLI 原样透出 + 掌上终端        (学 CcCompanion)
-群      群 / @唤醒 / 私信回执 / 任务 / 催办           (mousecrew)
-房间    一个文件夹 = 一个人；模型/工具/记忆/交接各自配   (我们写)
-基座    DeepSeek Harness：everything is a plugin        (dsh, 模型层 = pi-ai)
-凭证    各家 OAuth / API key 收成一个本地 endpoint      (CLIProxyAPI)
-部署    桌面或 VPS 当宿主，手机是伴侣                   (学 Orca)
-```
+## 三个核心（我们自己写）
 
-详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、[docs/DECISIONS.md](docs/DECISIONS.md)。
+1. **身份**：一个人是什么——名字、性格、穿哪件模型的衣服、记得什么、和谁是什么关系。
+   换了模型、换了运行时、换了机器，还是他。*记忆在，人就在。*
+2. **共处**：人和 agent、agent 和 agent 在同一个空间说话。单聊、群聊、@、
+   任务从对话里长出来，不从工单系统里派下来。
+3. **持续**：你不在的时候，家里的人也在——读交接、翻记忆、惦记没做完的事。
+
+底下跑什么模型、用什么运行时、走谁家订阅，全是可替换的地基。
+谁家的好用接谁家，坏了就换，不效忠任何一个。
+
+## 对邻居们的态度
+
+看它学道理，按许可证借鉴，自己的东西自己写。不搬别人的家具，不去改别人家的墙。
+
+我们从这些项目里学到了道理（致谢，不依赖）：
+mousecrew（一个写入口/名字归一化/宁送两遍不丢一条）、DeepSeek Harness（everything is a plugin）、
+headlong（人来消息是观察不是开关）、lmc-5（事实有生命周期）、Turritopsis（项目要有共读的黑板）、
+CcCompanion（CLI 原样透出，壳像微信）、Orca（宿主+手机伴侣）。
 
 ## 目录
 
 ```
-rooms/            每间屋一个文件夹（example/ 是样板）
-packages/
-  runner-pi-rpc/  mousecrew runner：pi --mode rpc
-  runner-dsh-sdk/ mousecrew runner：dsh sdk profile (JSON-RPC)
-  plugin-memory/  记忆插件（可替换）
-  plugin-blackboard/ 项目黑板插件（Turritopsis 接口）
-apps/house/       "家"的界面
-docs/
+rooms/            每间屋一个人（example/ 是样板）
+packages/         我们自己的砖（客厅、记忆、黑板、运行时适配）
+apps/house/       家的界面
+docs/             架构与决策
 ```
 
 ## 状态
 
-2026-09-02 立项。还什么都没跑起来，先把图纸钉在墙上。
+2026-09-02 立项。方向已定，砖还没砌。
 
 MIT.
