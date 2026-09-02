@@ -48,14 +48,18 @@ function writeJson(res, status, value, extra = {}) {
   res.end(body);
 }
 
-function clientIp(req, trustLoopbackProxy = true) {
+function connectionIdentity(req, trustLoopbackProxy = true) {
   const remote = String(req.socket.remoteAddress || 'unknown').replace(/^::ffff:/, '');
   const loopback = remote === '127.0.0.1' || remote === '::1';
   if (trustLoopbackProxy && loopback) {
     const cloudflare = String(req.headers['cf-connecting-ip'] || '').trim();
-    if (net.isIP(cloudflare)) return cloudflare;
+    if (net.isIP(cloudflare)) return { ip: cloudflare, authFailureKey: cloudflare };
   }
-  return remote;
+  return { ip: remote, authFailureKey: loopback ? null : remote };
+}
+
+function clientIp(req, trustLoopbackProxy = true) {
+  return connectionIdentity(req, trustLoopbackProxy).ip;
 }
 
 function readJson(req, maxBytes = BODY_MAX) {
@@ -227,8 +231,8 @@ function createLivingRoom(options = {}) {
     }
   }
 
-  function authenticate(req, res, ip) {
-    const preflight = authFailures.check(ip);
+  function authenticate(req, res, authFailureKey) {
+    const preflight = authFailureKey ? authFailures.check(authFailureKey) : { allowed: true };
     if (!preflight.allowed) {
       writeJson(res, 429, { error: { code: 'AUTH-RATE-LIMITED', message: '这个 IP 的失败尝试太多，暂时锁门。' } }, { 'retry-after': String(Math.ceil(preflight.retryAfterMs / 1000)) });
       return null;
@@ -237,13 +241,13 @@ function createLivingRoom(options = {}) {
     const residentId = match ? tokenStore.authenticate(match[1]) : null;
     const resident = residentId ? byId.get(residentId) : null;
     if (!resident) {
-      const failed = authFailures.fail(ip);
+      const failed = authFailureKey ? authFailures.fail(authFailureKey) : { allowed: true };
       const status = failed.allowed ? 401 : 429;
       const code = failed.allowed ? 'TOKEN-INVALID' : 'AUTH-RATE-LIMITED';
       writeJson(res, status, { error: { code, message: failed.allowed ? '门牌不对或已被吊销。' : '这个 IP 的失败尝试太多，暂时锁门。' } }, failed.allowed ? {} : { 'retry-after': String(Math.ceil(failed.retryAfterMs / 1000)) });
       return null;
     }
-    authFailures.success(ip);
+    if (authFailureKey) authFailures.success(authFailureKey);
     return { resident, secret: match[1] };
   }
 
@@ -261,12 +265,13 @@ function createLivingRoom(options = {}) {
   }
 
   const server = http.createServer(async (req, res) => {
-    const ip = clientIp(req, options.trustLoopbackProxy !== false);
+    const identity = connectionIdentity(req, options.trustLoopbackProxy !== false);
+    const ip = identity.ip;
     try {
       const url = new URL(req.url, 'http://localhost');
       if (staticResponse(req, res, url.pathname)) return;
 
-      const authn = authenticate(req, res, ip);
+      const authn = authenticate(req, res, identity.authFailureKey);
       if (!authn) return;
       const me = authn.resident;
       const state = presence.get(me.id) || {};

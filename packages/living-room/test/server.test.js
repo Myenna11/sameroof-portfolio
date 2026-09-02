@@ -51,6 +51,8 @@ test('public boundary uses bearer auth, IP failure limit, resident say limit, an
     const alpha = room.tokenStore.issue('resident_alpha_01').token;
     assert.equal((await request(port, '/me', { token: alpha })).body.id, 'resident_alpha_01');
     assert.equal((await request(port, '/me?token=' + encodeURIComponent(alpha))).status, 401);
+    assert.equal((await request(port, '/me', { token: 'x'.repeat(32) })).status, 401);
+    assert.equal((await request(port, '/me', { token: 'x'.repeat(32) })).status, 401);
     assert.equal((await request(port, '/me', { token: 'x'.repeat(32), ip: '203.0.113.20' })).status, 401);
     assert.equal((await request(port, '/me', { token: 'x'.repeat(32), ip: '203.0.113.20' })).status, 429);
     assert.equal((await request(port, '/me', { token: alpha, ip: '203.0.113.21' })).status, 200);
