@@ -1,0 +1,338 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sameroof.local/schema/room-v1.json",
+  "title": "Same Roof room.yaml v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "id",
+    "name"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^resident_[a-z0-9][a-z0-9_-]*$",
+      "minLength": 12,
+      "maxLength": 96
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "aliases": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 80
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "species": {
+      "enum": [
+        "agent",
+        "human"
+      ],
+      "default": "agent"
+    },
+    "model": {
+      "$ref": "#/$defs/model"
+    },
+    "runtime": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "plugins": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160
+      },
+      "uniqueItems": true
+    },
+    "permissions": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)+$"
+      },
+      "additionalProperties": {
+        "enum": [
+          "allow",
+          "approve",
+          "deny"
+        ]
+      }
+    },
+    "approve_timeout": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*(?:s|m|h|d)$"
+    },
+    "heartbeat": {
+      "$ref": "#/$defs/heartbeat"
+    },
+    "relations": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000
+          }
+        }
+      }
+    },
+    "notify": {
+      "type": "object",
+      "required": [
+        "channel"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "channel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        }
+      }
+    },
+    "schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "timezone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "quiet_hours": {
+          "$ref": "#/$defs/quietHours"
+        }
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z][a-z0-9-]*){2,}$"
+      },
+      "additionalProperties": {}
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "species"
+        ],
+        "properties": {
+          "species": {
+            "const": "human"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "model": false,
+          "heartbeat": false,
+          "plugins": false
+        }
+      },
+      "else": {
+        "required": [
+          "model"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "quietHours": {
+      "type": "string",
+      "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]-(?:[01][0-9]|2[0-3]):[0-5][0-9]$"
+    },
+    "auth": {
+      "type": "object",
+      "required": [
+        "mode",
+        "credential"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "broker",
+            "runtime_managed"
+          ]
+        },
+        "credential": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        }
+      }
+    },
+    "modelRef": {
+      "type": "object",
+      "required": [
+        "provider",
+        "id",
+        "auth"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "auth": {
+          "$ref": "#/$defs/auth"
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "required": [
+        "provider",
+        "id",
+        "auth"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "auth": {
+          "$ref": "#/$defs/auth"
+        },
+        "fallback": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/modelRef"
+          },
+          "maxItems": 8
+        }
+      }
+    },
+    "heartbeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "mode": {
+          "enum": [
+            "minimal",
+            "standard",
+            "autonomous"
+          ]
+        },
+        "interval": {
+          "oneOf": [
+            {
+              "const": "adaptive"
+            },
+            {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*(?:s|m|h)$"
+            }
+          ]
+        },
+        "quiet_hours": {
+          "$ref": "#/$defs/quietHours"
+        },
+        "budget": {
+          "type": "object",
+          "required": [
+            "per_day",
+            "on_exceeded"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "per_day": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": false,
+              "properties": {
+                "requests": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "tokens": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "usd": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              }
+            },
+            "on_exceeded": {
+              "enum": [
+                "passive",
+                "deny"
+              ]
+            }
+          }
+        },
+        "on_wake": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "fixed": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "uniqueItems": true
+            },
+            "concerns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "uniqueItems": true
+            }
+          }
+        },
+        "on_sleep": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}

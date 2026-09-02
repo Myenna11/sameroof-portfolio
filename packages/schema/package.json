@@ -1,0 +1,14 @@
+{
+  "name": "@sameroof/schema",
+  "version": "0.1.0",
+  "private": true,
+  "description": "同屋配置 Schema、全屋语义校验器与人话错误码",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "yaml": "^2.8.1"
+  }
+}
