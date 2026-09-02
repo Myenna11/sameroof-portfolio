@@ -1,4 +1,4 @@
-# 房间规范 v0.2（草案二稿）
+# 房间规范 v0.3（草案三稿）
 
 > 一个文件夹 = 一个人。这份文档定义文件夹里有什么、每个字段为什么存在、不写会怎样。
 > v0.2 吸收审查员、检索员评审（见 docs/reviews/）。改动摘要见文末。
@@ -59,12 +59,19 @@ species: agent             # agent | human。默认 agent。人也是住户
 
 ```yaml
 model:
-  provider: kimi-coding    # 凭证服务里的 provider 名
+  provider: kimi-coding
   id: kimi-k3
-  credential: example-model    # 凭证**名**。真凭证不在房间，也不在适配器手里
-  fallback:                # 可选。降级链
-    - {provider: zhipu, id: glm-5.3-flash, credential: shared-cheap}
+  auth:
+    mode: broker           # broker | runtime_managed
+    credential: example-model  # 凭证**别名**。真凭证只在 broker，住户拿到的是本机 socket + 不透明短期 token
+  fallback:
+    - {provider: zhipu, id: glm-5.3-flash, auth: {mode: broker, credential: shared-cheap}}
 ```
+
+**auth.mode 两种：**
+- `broker`：走凭证 broker（独立本机进程，见 DECISIONS #11-12）。权限、配额、审计全部硬执行。
+- `runtime_managed`：运行时自己管登录（如 Claude Code 的 Max 会话）。能力权限仍硬管，
+  **模型用量只能软观测**，UI 与审计标"估算"。承认例外比假装统一安全（DECISIONS #13）。
 
 **切换记录（系统自动写，不靠 agent 自觉）：** 每次模型/运行时切换，房子写一条
 `handover/wardrobe.jsonl`：provider、model 版本、adapter 版本、生效插件集、memory 格式版本、原因、时间。
@@ -103,16 +110,24 @@ approve_timeout: 30m               # 超时按 deny（fail closed）
 **审批不是愿望，是合同。** 一次审批绑定：actor id、动作、完整参数与目标资源、参数摘要、有效期、单次使用、结果与审计。
 防"批了看文件，实际删文件"。审批走客厅广播，全家可见（见 LIVING_ROOM）。
 
-### 心跳区（标配，可关）
+### 作息区（可选）
+
+```yaml
+schedule:
+  timezone: inherit        # 默认继承 house.yaml；可覆盖。账务时区不可覆盖
+  quiet_hours: "02:00-08:00"
+```
+
+### 心跳区（标配，默认开，第一版只做最便宜的"在"）
 
 ```yaml
 heartbeat:
   enabled: true
   interval: adaptive       # 有人说话就快，久无人就指数退避
-  quiet_hours: "02:00-08:00"   # 覆盖项。全家作息在 house.yaml，这里只写例外
+  mode: minimal            # minimal = 低频醒、读未完成的事、必要时说一句。自主长思考默认关（DECISIONS #16）
   budget:
-    per_day: {usd: 1.0}    # 计量单位显式；重置点/时区由 house.yaml 供给
-    on_exceeded: passive   # passive = 只跑不调模型的投递检查与轮询；需要模型的心跳全部暂停。人的消息按单独策略
+    per_day: {requests: 48, tokens: 200000}   # 硬指标用测得准的；美元只显示估算
+    on_exceeded: passive   # 只跑不调模型的投递检查；需要模型的心跳全部暂停。人的消息按单独策略
   on_wake:
     fixed:                 # 安全项，顺序不可变
       - receive_time       # 房子注入：现在几点、今天几号、上次睡是何时、睡了多久
@@ -129,7 +144,18 @@ heartbeat:
 **checkpoint 是底，交接信是面。** 进程会被杀，所以重要状态变化时房子持续 checkpoint 保事实；
 优雅退出时 write_handover 保"人味的叙述"。8.25 那次没写交接信伤了维护者两次，两层都要。
 
-**quiet_hours** 按 house.yaml 时区解析，支持跨午夜；人的紧急唤醒不受限。
+**quiet_hours** 按 schedule.timezone 解析，支持跨午夜；人的紧急唤醒不受限。
+
+### 扩展区（可选）
+
+```yaml
+extensions:
+  dev.sameroof.memory: {recall_limit: 8}
+  dev.sameroof.dream: {enabled: true}
+```
+
+统一 `extensions:` 段，不用散落的 `x-` 前缀。key 是已安装插件的稳定 id（反向域名），
+未知 namespace **拒绝启动**不静默忽略；插件校验自己的值；extensions 不能超过房间权限上限。
 
 ### 关系区（可选，高敏感）
 
@@ -176,6 +202,25 @@ model: {provider: zhipu, id: glm-5.3-flash, credential: shared-cheap}
 3. 选凭证：房子列出**公开别名**（如 shared-cheap），真凭证由维护者在凭证服务里建，住户只引用名字。
 4. 写或不写 SOUL.md：**可选**。缺省时人格由所挂运行时的默认系统提示承担，房子会在启动时提示"此人无身份锚"。
 5. `sameroof check`：校验不过不启动。
+
+## 校验与迁移（合同，非实现）
+
+- **JSON Schema** 管单文件结构（类型、枚举、必填、human 禁 model/heartbeat/plugins、additionalProperties: false）。
+- **语义校验器** 管全屋事实（id/name/alias 唯一与前缀、credential 别名是否存在、runtime/plugin 是否安装且兼容、fallback 无环、权限不超 house 上限）。
+- 错误翻译成人话 + 稳定错误码 + 文件行号，例：
+  `rooms/维护者/room.yaml:6 — 维护者是 human，不能配置 model。[ROOM-HUMAN-001]`
+- `sameroof check` 不提示"与默认相同"；`sameroof explain <room>` 显示每个生效值来自哪。
+- 迁移显式执行：dry-run → 备份 → maintenance lock → staging → 校验 → 原子替换。
+  `serve` 遇旧 schema_version 拒绝启动并提示命令，**不自动迁移**；agent 无权迁移自己的房间。
+
+## v0.3 改动摘要（吸收审查员第二批回答）
+
+- model 区新增 `auth.mode: broker | runtime_managed`；Claude Code 明写为例外
+- 新增 schedule 区（作息时区可覆盖，账务时区不可）
+- 心跳改 `mode: minimal`，预算改硬指标（requests/tokens），美元只估算
+- 新增 extensions 段规则
+- 新增"校验与迁移"合同一节
+- 未做：JSON Schema 文件本体、语义校验器、broker 实现——这些是代码，不是文档
 
 ## v0.2 改动摘要
 
