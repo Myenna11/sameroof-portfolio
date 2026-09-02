@@ -1,0 +1,18 @@
+[Unit]
+Description=同屋 凭证 broker
+After=network.target
+[Service]
+Type=simple
+WorkingDirectory=/root/sameroof/packages/broker
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=3
+Environment=HOME=/root
+# 沙箱（审查员：正式应独立 OS 用户；今晚先收紧）
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/root/.sameroof /root/sameroof/state
+ProtectHome=read-only
+[Install]
+WantedBy=multi-user.target

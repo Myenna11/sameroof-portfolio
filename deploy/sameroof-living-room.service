@@ -1,0 +1,15 @@
+[Unit]
+Description=同屋 客厅
+After=network.target sameroof-broker.service
+[Service]
+Type=simple
+WorkingDirectory=/root/sameroof/packages/living-room
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=3
+Environment=HOME=/root
+Environment=SAMEROOF_PORT=8790
+NoNewPrivileges=yes
+PrivateTmp=yes
+[Install]
+WantedBy=multi-user.target
