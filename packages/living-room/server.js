@@ -1,194 +1,455 @@
 #!/usr/bin/env node
-// 同屋 · 客厅 v0.1 — 人和 agent 说话的地方。只搬文字，不执行任何工具。
-// 三条硬道理：一个写入口；名字先归一化再比较；宁送两遍不丢一条。
+// 同屋 · 客厅 — 公网入口只搬文字，不执行工具。
 'use strict';
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
+
 const crypto = require('crypto');
+const fs = require('fs');
+const http = require('http');
+const net = require('net');
+const os = require('os');
+const path = require('path');
 const yaml = require('js-yaml');
 const Database = require('better-sqlite3');
+const { TokenStore } = require('./tokens');
+const { SlidingWindowLimiter, AuthFailureLimiter } = require('./rate-limit');
 
-const HOUSE = process.env.SAMEROOF_HOUSE || path.resolve(__dirname, '../..');
-const RUN = path.join(process.env.HOME || '/root', '.sameroof', 'run');
-const DATA = path.join(HOUSE, 'state');
-fs.mkdirSync(RUN, { recursive: true });
-fs.mkdirSync(DATA, { recursive: true });
-fs.mkdirSync(path.join(DATA, 'living-room'), { recursive: true });
-
-// ---------- 住户 ----------
 const RESERVED = new Set(['system', 'all', 'everyone', 'house']);
-const norm = s => String(s).normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
-function loadResidents() {
-  const dir = path.join(HOUSE, 'rooms');
-  const list = [];
-  for (const d of fs.readdirSync(dir)) {
-    const f = path.join(dir, d, 'room.yaml');
-    if (!fs.existsSync(f)) continue;
-    const r = yaml.load(fs.readFileSync(f, 'utf8'));
-    if (!r || !r.id || !r.name) throw new Error(`${f}: 缺 id 或 name`);
-    r.species = r.species || 'agent';
-    r._names = [r.name, ...(r.aliases || [])].map(norm);
-    r._dir = path.join(dir, d);
-    list.push(r);
+const MESSAGE_MAX = 8000;
+const BODY_MAX = 64 * 1024;
+const ACK_MAX = 200;
+const SSE_TOTAL_MAX = 100;
+const SSE_RESIDENT_MAX = 3;
+const SSE_IP_MAX = 10;
+
+class HttpError extends Error {
+  constructor(status, code, message) {
+    super(message);
+    this.status = status;
+    this.code = code;
   }
-  // 唯一 + 不互为前缀，冲突启动拒绝
-  const all = [];
-  for (const r of list) for (const n of r._names) {
-    if (RESERVED.has(n)) throw new Error(`${r.name}: "${n}" 是保留名`);
-    for (const [m, who] of all) if (n === m || n.startsWith(m) || m.startsWith(n))
-      throw new Error(`名字冲突：${r.name} 的 "${n}" 与 ${who} 的 "${m}" 相同或互为前缀，启动拒绝`);
-    all.push([n, r.name]);
+}
+
+const norm = value => String(value).normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
+
+function securityHeaders(api = true) {
+  return {
+    'x-content-type-options': 'nosniff',
+    'x-frame-options': 'DENY',
+    'referrer-policy': 'no-referrer',
+    'permissions-policy': 'camera=(), microphone=(), geolocation=(), payment=()',
+    'content-security-policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://house.sameroof.example; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    ...(api ? { 'cache-control': 'no-store' } : {})
+  };
+}
+
+function writeJson(res, status, value, extra = {}) {
+  const body = Buffer.from(JSON.stringify(value));
+  res.writeHead(status, { ...securityHeaders(true), 'content-type': 'application/json; charset=utf-8', 'content-length': body.length, ...extra });
+  res.end(body);
+}
+
+function clientIp(req, trustLoopbackProxy = true) {
+  const remote = String(req.socket.remoteAddress || 'unknown').replace(/^::ffff:/, '');
+  const loopback = remote === '127.0.0.1' || remote === '::1';
+  if (trustLoopbackProxy && loopback) {
+    const cloudflare = String(req.headers['cf-connecting-ip'] || '').trim();
+    if (net.isIP(cloudflare)) return cloudflare;
+  }
+  return remote;
+}
+
+function readJson(req, maxBytes = BODY_MAX) {
+  return new Promise((resolve, reject) => {
+    const declared = Number(req.headers['content-length'] || 0);
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      req.resume();
+      reject(new HttpError(413, 'BODY-TOO-LARGE', '请求体超过 64 KiB。'));
+      return;
+    }
+    const chunks = [];
+    let size = 0;
+    let tooLarge = false;
+    req.on('data', chunk => {
+      size += chunk.length;
+      if (size > maxBytes) tooLarge = true;
+      else chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (tooLarge) return reject(new HttpError(413, 'BODY-TOO-LARGE', '请求体超过 64 KiB。'));
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); }
+      catch { reject(new HttpError(400, 'JSON-INVALID', '请求体不是合法 JSON。')); }
+    });
+    req.on('error', reject);
+  });
+}
+
+function loadResidents(houseDir) {
+  const dir = path.join(houseDir, 'rooms');
+  const list = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const file = path.join(dir, entry.name, 'room.yaml');
+    if (!fs.existsSync(file)) continue;
+    const resident = yaml.load(fs.readFileSync(file, 'utf8'));
+    if (!resident || !resident.id || !resident.name) throw new Error(file + ': 缺 id 或 name');
+    resident.species = resident.species || 'agent';
+    resident._names = [resident.name, ...(resident.aliases || [])].map(norm);
+    resident._dir = path.join(dir, entry.name);
+    list.push(resident);
+  }
+  const names = [];
+  for (const resident of list) for (const name of resident._names) {
+    if (RESERVED.has(name)) throw new Error(resident.name + ': “' + name + '”是保留名');
+    for (const previous of names) {
+      if (name === previous.name || name.startsWith(previous.name) || previous.name.startsWith(name)) {
+        throw new Error('名字冲突：' + resident.name + ' 的“' + name + '”与 ' + previous.owner + ' 的“' + previous.name + '”相同或互为前缀');
+      }
+    }
+    names.push({ name, owner: resident.name });
   }
   return list;
 }
-const residents = loadResidents();
-const byId = new Map(residents.map(r => [r.id, r]));
-const byName = new Map(); for (const r of residents) for (const n of r._names) byName.set(n, r);
 
-// ---------- token：每个住户一把，只认 id，不信请求体里的 from ----------
-const tokenFile = path.join(RUN, 'living-room-tokens.json');
-let tokens = fs.existsSync(tokenFile) ? JSON.parse(fs.readFileSync(tokenFile, 'utf8')) : {};
-let changed = false;
-for (const r of residents) if (!tokens[r.id]) { tokens[r.id] = crypto.randomBytes(24).toString('hex'); changed = true; }
-if (changed) fs.writeFileSync(tokenFile, JSON.stringify(tokens, null, 2), { mode: 0o600 });
-const idByToken = new Map(Object.entries(tokens).map(([id, t]) => [t, id]));
-
-// ---------- 权威数据：SQLite ----------
-const db = new Database(path.join(DATA, 'house.db'));
-db.pragma('journal_mode = WAL');
-db.exec(`
-CREATE TABLE IF NOT EXISTS messages(
-  id TEXT PRIMARY KEY, seq INTEGER UNIQUE, ts TEXT NOT NULL, kind TEXT NOT NULL,
-  from_id TEXT NOT NULL, to_id TEXT, text TEXT NOT NULL, mentions TEXT NOT NULL, reply_to TEXT, meta TEXT);
-CREATE TABLE IF NOT EXISTS deliveries(
-  message_id TEXT NOT NULL, resident_id TEXT NOT NULL, status TEXT NOT NULL, ts TEXT NOT NULL,
-  PRIMARY KEY(message_id, resident_id));
-CREATE TABLE IF NOT EXISTS approvals(
-  id TEXT PRIMARY KEY, resident_id TEXT, action TEXT, params_digest TEXT, params TEXT,
-  status TEXT, decided_by TEXT, created_ts TEXT, expires_ts TEXT, used INTEGER DEFAULT 0);
-`);
-const seqRow = db.prepare('SELECT MAX(seq) AS m FROM messages').get();
-let seq = seqRow.m || 0;
-const insMsg = db.prepare('INSERT INTO messages(id,seq,ts,kind,from_id,to_id,text,mentions,reply_to,meta) VALUES(?,?,?,?,?,?,?,?,?,?)');
-const insDel = db.prepare('INSERT OR IGNORE INTO deliveries(message_id,resident_id,status,ts) VALUES(?,?,?,?)');
-const ackDel = db.prepare("UPDATE deliveries SET status='read', ts=? WHERE message_id=? AND resident_id=? AND status!='read'");
-const unread = db.prepare("SELECT m.* FROM deliveries d JOIN messages m ON m.id=d.message_id WHERE d.resident_id=? AND d.status!='read' ORDER BY m.seq");
-const history = db.prepare("SELECT * FROM messages WHERE kind!='dm' AND seq>? ORDER BY seq LIMIT ?");
-
-// ---------- 唯一写入口 ----------
-const listeners = new Set();
-const presence = new Map(); // id -> {online, last_seen, last_said}
-function mentionsIn(text) {
-  const found = new Set();
-  for (const m of String(text).matchAll(/@([^\s@，,。！!？?：:；;]+)/g)) {
-    const n = norm(m[1]);
-    for (const [name, r] of byName) if (n === name || n.startsWith(name)) found.add(r.id);
-  }
-  return [...found];
-}
-function post({ kind, from_id, to_id = null, text, reply_to = null, meta = null }) {
-  const id = 'msg_' + crypto.randomBytes(8).toString('hex');
-  const ts = new Date().toISOString();
-  const mentions = kind === 'dm' ? [to_id] : mentionsIn(text).filter(x => x !== from_id);
-  const row = { id, seq: ++seq, ts, kind, from_id, to_id, text, mentions, reply_to, meta };
-  const targets = kind === 'dm' ? [to_id] : residents.map(r => r.id).filter(x => x !== from_id);
-  db.transaction(() => {
-    insMsg.run(id, row.seq, ts, kind, from_id, to_id, text, JSON.stringify(mentions), reply_to, meta ? JSON.stringify(meta) : null);
-    for (const t of targets) insDel.run(id, t, 'queued', ts);
-  })();
-  if (kind !== 'dm') fs.appendFileSync(path.join(DATA, 'living-room', ts.slice(0, 7) + '.jsonl'), JSON.stringify(row) + '\n');
-  const p = presence.get(from_id) || {}; p.last_said = ts; presence.set(from_id, p);
-  for (const l of listeners) if (kind !== 'dm' || l.id === to_id || l.id === from_id) l.send(row);
-  return row;
+function textField(body, key, max = MESSAGE_MAX) {
+  if (!body || typeof body[key] !== 'string' || !body[key].trim()) throw new HttpError(400, 'TEXT-REQUIRED', '要有 ' + key + '。');
+  if (body[key].length > max) throw new HttpError(413, 'TEXT-TOO-LONG', key + ' 最长 ' + max + ' 个字符。');
+  return body[key];
 }
 
-// ---------- HTTP ----------
-const json = (res, code, obj) => { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
-const readBody = req => new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => { try { r(JSON.parse(b || '{}')); } catch { r(null); } }); });
-const STATIC = path.join(HOUSE, 'apps', 'house');
-function auth(req) {
-  const url0 = new URL(req.url, 'http://x');
-  const t = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || url0.searchParams.get('token') || '';
-  const id = idByToken.get(t);
-  return id ? byId.get(id) : null;
+function positiveInt(value, fallback, min, max, code) {
+  const number = value === undefined || value === null || value === '' ? fallback : Number(value);
+  if (!Number.isSafeInteger(number) || number < min || number > max) throw new HttpError(400, code, '数字参数超出允许范围。');
+  return number;
 }
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, 'http://x');
-  // 壳：纯静态，谁都能拿到（里面没有秘密），进门要 token
-  if (req.method === 'GET' && ['/', '/index.html', '/manifest.json', '/sw.js'].includes(url.pathname)) {
-    const f = path.join(STATIC, url.pathname === '/' ? 'index.html' : url.pathname.slice(1));
-    if (fs.existsSync(f)) { res.writeHead(200, { 'content-type': f.endsWith('.json') ? 'application/manifest+json' : f.endsWith('.js') ? 'text/javascript' : 'text/html; charset=utf-8' }); return res.end(fs.readFileSync(f)); }
-  }
-  const me = auth(req);
-  if (!me) return json(res, 401, { error: '不认识你。每个住户一把 token，在 ~/.sameroof/run/living-room-tokens.json' });
-  const p = presence.get(me.id) || {}; p.last_seen = new Date().toISOString(); presence.set(me.id, p);
 
-  if (req.method === 'POST' && url.pathname === '/say') {
-    const b = await readBody(req); if (!b || !b.text) return json(res, 400, { error: '要有 text' });
-    return json(res, 200, post({ kind: 'say', from_id: me.id, text: String(b.text), reply_to: b.reply_to || null }));
-  }
-  if (req.method === 'POST' && url.pathname === '/dm') {
-    const b = await readBody(req); if (!b || !b.text || !b.to) return json(res, 400, { error: '要有 to 和 text' });
-    const to = byName.get(norm(b.to)) || byId.get(b.to); if (!to) return json(res, 404, { error: '没这个人' });
-    return json(res, 200, post({ kind: 'dm', from_id: me.id, to_id: to.id, text: String(b.text) }));
-  }
-  if (req.method === 'GET' && url.pathname === '/events') {
-    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
-    const l = { id: me.id, send: row => res.write(`data: ${JSON.stringify(row)}\n\n`) };
-    listeners.add(l); presence.get(me.id).online = true;
-    res.write(': hi\n\n'); const ka = setInterval(() => res.write(': ka\n\n'), 25000);
-    req.on('close', () => { listeners.delete(l); clearInterval(ka); presence.get(me.id).online = false; });
-    return;
-  }
-  if (req.method === 'GET' && url.pathname === '/history') {
-    const since = Number(url.searchParams.get('since') || 0), limit = Math.min(Number(url.searchParams.get('limit') || 50), 200);
-    return json(res, 200, history.all(since, limit).map(r => ({ ...r, mentions: JSON.parse(r.mentions) })));
-  }
-  if (req.method === 'GET' && url.pathname === '/inbox') {
-    return json(res, 200, unread.all(me.id).map(r => ({ ...r, mentions: JSON.parse(r.mentions), from: byId.get(r.from_id)?.name })));
-  }
-  if (req.method === 'POST' && url.pathname === '/inbox/ack') {
-    const b = await readBody(req); const ids = (b && b.ids) || []; const ts = new Date().toISOString();
-    db.transaction(() => { for (const i of ids) ackDel.run(ts, i, me.id); })();
-    return json(res, 200, { acked: ids.length });
-  }
-  if (req.method === 'GET' && url.pathname === '/members') {
-    return json(res, 200, residents.map(r => ({ id: r.id, name: r.name, species: r.species, ...(presence.get(r.id) || {}) })));
-  }
-  if (req.method === 'POST' && url.pathname === '/approval') {
-    const b = await readBody(req); if (!b || !b.action) return json(res, 400, { error: '要有 action' });
-    const id = 'apr_' + crypto.randomBytes(6).toString('hex'); const now = Date.now();
-    const digest = crypto.createHash('sha256').update(JSON.stringify(b.params || {})).digest('hex');
-    const ttl = Number(b.ttl_seconds || 1800);
-    db.prepare('INSERT INTO approvals(id,resident_id,action,params_digest,params,status,created_ts,expires_ts) VALUES(?,?,?,?,?,?,?,?)')
-      .run(id, me.id, b.action, digest, JSON.stringify(b.params || {}), 'pending', new Date(now).toISOString(), new Date(now + ttl * 1000).toISOString());
-    post({ kind: 'system', from_id: me.id, text: `${me.name} 想 ${b.action}，等审批。`, meta: { approval_id: id, action: b.action, params_digest: digest } });
-    return json(res, 200, { approval_id: id, params_digest: digest, expires_in: ttl });
-  }
-  if (req.method === 'POST' && url.pathname.startsWith('/approval/')) {
-    if (me.species !== 'human') return json(res, 403, { error: '只有人能审批' });
-    const id = url.pathname.split('/')[2]; const b = await readBody(req);
-    const a = db.prepare('SELECT * FROM approvals WHERE id=?').get(id); if (!a) return json(res, 404, {});
-    if (a.status !== 'pending' || Date.parse(a.expires_ts) < Date.now()) return json(res, 409, { error: '已过期或已决定' });
-    const decision = b && b.decision === 'allow' ? 'allowed' : 'denied';
-    db.prepare('UPDATE approvals SET status=?, decided_by=? WHERE id=?').run(decision, me.id, id);
-    post({ kind: 'system', from_id: me.id, text: `${me.name} ${decision === 'allowed' ? '同意' : '拒绝'}了 ${byId.get(a.resident_id)?.name} 的 ${a.action}。`, meta: { approval_id: id, decision } });
-    return json(res, 200, { approval_id: id, decision, params_digest: a.params_digest, expires_at: a.expires_ts, single_use: true });
-  }
-  if (req.method === 'GET' && url.pathname.startsWith('/approval/')) {
-    const a = db.prepare('SELECT * FROM approvals WHERE id=?').get(url.pathname.split('/')[2]);
-    if (!a) return json(res, 404, {}); const expired = Date.parse(a.expires_ts) < Date.now();
-    return json(res, 200, { ...a, status: expired && a.status === 'pending' ? 'expired' : a.status });
-  }
-  json(res, 404, { error: '没这个门' });
-});
+function createLivingRoom(options = {}) {
+  const houseDir = path.resolve(options.houseDir || process.env.SAMEROOF_HOUSE || path.resolve(__dirname, '../..'));
+  const runDir = path.resolve(options.runDir || path.join(process.env.HOME || os.homedir(), '.sameroof', 'run'));
+  const dataDir = path.resolve(options.dataDir || path.join(houseDir, 'state'));
+  const staticDir = path.join(houseDir, 'apps', 'house');
+  for (const dir of [runDir, dataDir, path.join(dataDir, 'living-room')]) fs.mkdirSync(dir, { recursive: true });
 
-// 过期审批 → deny（fail closed）
-setInterval(() => db.prepare("UPDATE approvals SET status='expired' WHERE status='pending' AND expires_ts<?").run(new Date().toISOString()), 60000);
+  const residents = loadResidents(houseDir);
+  const byId = new Map(residents.map(resident => [resident.id, resident]));
+  const byName = new Map();
+  for (const resident of residents) for (const name of resident._names) byName.set(name, resident);
 
-const PORT = Number(process.env.SAMEROOF_PORT || 8790);
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`同屋·客厅 开门 http://127.0.0.1:${PORT}  住户：${residents.map(r => r.name).join('、')}`);
-  console.log(`token 在 ${tokenFile}`);
-});
+  const tokenFile = path.join(runDir, 'living-room-tokens.json');
+  const tokenStore = options.tokenStore || new TokenStore({ file: tokenFile });
+  tokenStore.ensure(residents.map(resident => resident.id));
+
+  const db = new Database(path.join(dataDir, 'house.db'));
+  db.pragma('journal_mode = WAL');
+  db.pragma('busy_timeout = 5000');
+  db.exec([
+    'CREATE TABLE IF NOT EXISTS messages(',
+    'id TEXT PRIMARY KEY, seq INTEGER UNIQUE, ts TEXT NOT NULL, kind TEXT NOT NULL,',
+    'from_id TEXT NOT NULL, to_id TEXT, text TEXT NOT NULL, mentions TEXT NOT NULL, reply_to TEXT, meta TEXT);',
+    'CREATE TABLE IF NOT EXISTS deliveries(',
+    'message_id TEXT NOT NULL, resident_id TEXT NOT NULL, status TEXT NOT NULL, ts TEXT NOT NULL,',
+    'PRIMARY KEY(message_id, resident_id));',
+    'CREATE TABLE IF NOT EXISTS approvals(',
+    'id TEXT PRIMARY KEY, resident_id TEXT, action TEXT, params_digest TEXT, params TEXT,',
+    'status TEXT, decided_by TEXT, created_ts TEXT, expires_ts TEXT, used INTEGER DEFAULT 0);'
+  ].join('\n'));
+
+  let seq = db.prepare('SELECT MAX(seq) AS value FROM messages').get().value || 0;
+  const insMsg = db.prepare('INSERT INTO messages(id,seq,ts,kind,from_id,to_id,text,mentions,reply_to,meta) VALUES(?,?,?,?,?,?,?,?,?,?)');
+  const insDelivery = db.prepare('INSERT OR IGNORE INTO deliveries(message_id,resident_id,status,ts) VALUES(?,?,?,?)');
+  const ackDelivery = db.prepare("UPDATE deliveries SET status='read', ts=? WHERE message_id=? AND resident_id=? AND status!='read'");
+  const unread = db.prepare("SELECT m.* FROM deliveries d JOIN messages m ON m.id=d.message_id WHERE d.resident_id=? AND d.status!='read' ORDER BY m.seq");
+  const history = db.prepare("SELECT * FROM messages WHERE kind!='dm' AND seq>? ORDER BY seq LIMIT ?");
+
+  const listeners = new Set();
+  const presence = new Map();
+  const sseByResident = new Map();
+  const sseByIp = new Map();
+
+  const authFailures = new AuthFailureLimiter({
+    limit: options.authFailureLimit || Number(process.env.SAMEROOF_401_LIMIT || 10),
+    windowMs: options.authFailureWindowMs || 60000,
+    blockMs: options.authBlockMs || 900000
+  });
+  const sayLimiter = new SlidingWindowLimiter({ limit: options.sayLimit || Number(process.env.SAMEROOF_SAY_LIMIT || 12), windowMs: options.sayWindowMs || 60000 });
+  const dmLimiter = new SlidingWindowLimiter({ limit: options.dmLimit || 20, windowMs: 60000 });
+  const approvalLimiter = new SlidingWindowLimiter({ limit: options.approvalLimit || 6, windowMs: 60000 });
+  const ackLimiter = new SlidingWindowLimiter({ limit: options.ackLimit || 60, windowMs: 60000 });
+
+  function mentionsIn(text) {
+    const found = new Set();
+    for (const match of String(text).matchAll(/@([^\s@，,。！!？?：:；;]+)/g)) {
+      const name = norm(match[1]);
+      for (const [candidate, resident] of byName) if (name === candidate || name.startsWith(candidate)) found.add(resident.id);
+    }
+    return [...found];
+  }
+
+  function post(input) {
+    if (!byId.has(input.from_id)) throw new HttpError(400, 'ACTOR-INVALID', '发言者不在房子里。');
+    if (input.kind === 'dm' && !byId.has(input.to_id)) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', '没这个人。');
+    const id = 'msg_' + crypto.randomBytes(12).toString('hex');
+    const ts = new Date().toISOString();
+    const mentions = input.kind === 'dm' ? [input.to_id] : mentionsIn(input.text).filter(id0 => id0 !== input.from_id);
+    const row = {
+      id,
+      seq: ++seq,
+      ts,
+      kind: input.kind,
+      from_id: input.from_id,
+      to_id: input.to_id || null,
+      text: input.text,
+      mentions,
+      reply_to: input.reply_to || null,
+      meta: input.meta || null
+    };
+    const targets = input.kind === 'dm' ? [input.to_id] : residents.map(resident => resident.id).filter(id0 => id0 !== input.from_id);
+    db.transaction(() => {
+      insMsg.run(id, row.seq, ts, row.kind, row.from_id, row.to_id, row.text, JSON.stringify(mentions), row.reply_to, row.meta ? JSON.stringify(row.meta) : null);
+      for (const target of targets) insDelivery.run(id, target, 'queued', ts);
+    })();
+    if (row.kind !== 'dm') {
+      try { fs.appendFileSync(path.join(dataDir, 'living-room', ts.slice(0, 7) + '.jsonl'), JSON.stringify(row) + '\n'); }
+      catch (error) { console.error('[客厅归档失败，数据库仍是权威]', error.message); }
+    }
+    const state = presence.get(row.from_id) || {};
+    state.last_said = ts;
+    presence.set(row.from_id, state);
+    for (const listener of listeners) if (row.kind !== 'dm' || listener.id === row.to_id || listener.id === row.from_id) listener.send(row);
+    return row;
+  }
+
+  function rateOrThrow(limiter, key, label) {
+    const result = limiter.take(key);
+    if (!result.allowed) {
+      const error = new HttpError(429, 'RATE-LIMITED', label + '太快了，请稍后再试。');
+      error.retryAfterMs = result.retryAfterMs;
+      throw error;
+    }
+  }
+
+  function authenticate(req, res, ip) {
+    const preflight = authFailures.check(ip);
+    if (!preflight.allowed) {
+      writeJson(res, 429, { error: { code: 'AUTH-RATE-LIMITED', message: '这个 IP 的失败尝试太多，暂时锁门。' } }, { 'retry-after': String(Math.ceil(preflight.retryAfterMs / 1000)) });
+      return null;
+    }
+    const match = /^Bearer\s+([^\s]+)$/i.exec(String(req.headers.authorization || ''));
+    const residentId = match ? tokenStore.authenticate(match[1]) : null;
+    const resident = residentId ? byId.get(residentId) : null;
+    if (!resident) {
+      const failed = authFailures.fail(ip);
+      const status = failed.allowed ? 401 : 429;
+      const code = failed.allowed ? 'TOKEN-INVALID' : 'AUTH-RATE-LIMITED';
+      writeJson(res, status, { error: { code, message: failed.allowed ? '门牌不对或已被吊销。' : '这个 IP 的失败尝试太多，暂时锁门。' } }, failed.allowed ? {} : { 'retry-after': String(Math.ceil(failed.retryAfterMs / 1000)) });
+      return null;
+    }
+    return resident;
+  }
+
+  function staticResponse(req, res, pathname) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return false;
+    const names = new Map([['/', 'index.html'], ['/index.html', 'index.html'], ['/manifest.json', 'manifest.json'], ['/sw.js', 'sw.js']]);
+    if (!names.has(pathname)) return false;
+    const file = path.join(staticDir, names.get(pathname));
+    if (!fs.existsSync(file)) return false;
+    const type = file.endsWith('.json') ? 'application/manifest+json' : file.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/html; charset=utf-8';
+    const body = fs.readFileSync(file);
+    res.writeHead(200, { ...securityHeaders(false), 'cache-control': 'no-cache', 'content-type': type, 'content-length': body.length });
+    if (req.method === 'HEAD') res.end(); else res.end(body);
+    return true;
+  }
+
+  const server = http.createServer(async (req, res) => {
+    const ip = clientIp(req, options.trustLoopbackProxy !== false);
+    try {
+      const url = new URL(req.url, 'http://localhost');
+      if (staticResponse(req, res, url.pathname)) return;
+
+      const me = authenticate(req, res, ip);
+      if (!me) return;
+      const state = presence.get(me.id) || {};
+      state.last_seen = new Date().toISOString();
+      presence.set(me.id, state);
+
+      if (req.method === 'GET' && url.pathname === '/me') {
+        return writeJson(res, 200, { id: me.id, name: me.name, species: me.species });
+      }
+
+      if (req.method === 'POST' && url.pathname === '/say') {
+        rateOrThrow(sayLimiter, me.id, '在客厅说话');
+        const body = await readJson(req);
+        const text = textField(body, 'text');
+        const replyTo = body.reply_to == null ? null : String(body.reply_to);
+        if (replyTo && !/^msg_[a-f0-9]{24}$/.test(replyTo)) throw new HttpError(400, 'REPLY-ID-INVALID', 'reply_to 不是合法消息 id。');
+        return writeJson(res, 200, post({ kind: 'say', from_id: me.id, text, reply_to: replyTo }));
+      }
+
+      if (req.method === 'POST' && url.pathname === '/dm') {
+        rateOrThrow(dmLimiter, me.id, '发私信');
+        const body = await readJson(req);
+        const text = textField(body, 'text');
+        if (typeof body.to !== 'string' || body.to.length > 100) throw new HttpError(400, 'RECIPIENT-INVALID', '要有合法收件人。');
+        const to = byName.get(norm(body.to)) || byId.get(body.to);
+        if (!to) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', '没这个人。');
+        return writeJson(res, 200, post({ kind: 'dm', from_id: me.id, to_id: to.id, text }));
+      }
+
+      if (req.method === 'GET' && url.pathname === '/events') {
+        const residentCount = sseByResident.get(me.id) || 0;
+        const ipCount = sseByIp.get(ip) || 0;
+        if (listeners.size >= SSE_TOTAL_MAX || residentCount >= SSE_RESIDENT_MAX || ipCount >= SSE_IP_MAX) {
+          throw new HttpError(429, 'SSE-LIMITED', '实时连接太多，请关闭旧页面后再试。');
+        }
+        res.writeHead(200, { ...securityHeaders(true), 'content-type': 'text/event-stream; charset=utf-8', connection: 'keep-alive', 'x-accel-buffering': 'no' });
+        const listener = { id: me.id, ip, send: row => res.write('data: ' + JSON.stringify(row) + '\n\n') };
+        listeners.add(listener);
+        sseByResident.set(me.id, residentCount + 1);
+        sseByIp.set(ip, ipCount + 1);
+        const current = presence.get(me.id) || {};
+        current.online = true;
+        presence.set(me.id, current);
+        res.write(': hi\n\n');
+        const keepalive = setInterval(() => res.write(': ka\n\n'), 25000);
+        let closed = false;
+        const cleanup = () => {
+          if (closed) return;
+          closed = true;
+          listeners.delete(listener);
+          clearInterval(keepalive);
+          const nextResident = Math.max(0, (sseByResident.get(me.id) || 1) - 1);
+          const nextIp = Math.max(0, (sseByIp.get(ip) || 1) - 1);
+          if (nextResident) sseByResident.set(me.id, nextResident); else sseByResident.delete(me.id);
+          if (nextIp) sseByIp.set(ip, nextIp); else sseByIp.delete(ip);
+          const status = presence.get(me.id) || {};
+          status.online = nextResident > 0;
+          presence.set(me.id, status);
+        };
+        req.on('close', cleanup);
+        res.on('close', cleanup);
+        return;
+      }
+
+      if (req.method === 'GET' && url.pathname === '/history') {
+        const since = positiveInt(url.searchParams.get('since'), 0, 0, Number.MAX_SAFE_INTEGER, 'HISTORY-SINCE-INVALID');
+        const limit = positiveInt(url.searchParams.get('limit'), 50, 1, 200, 'HISTORY-LIMIT-INVALID');
+        return writeJson(res, 200, history.all(since, limit).map(row => ({ ...row, mentions: JSON.parse(row.mentions) })));
+      }
+
+      if (req.method === 'GET' && url.pathname === '/inbox') {
+        return writeJson(res, 200, unread.all(me.id).map(row => ({ ...row, mentions: JSON.parse(row.mentions), from: byId.get(row.from_id)?.name })));
+      }
+
+      if (req.method === 'POST' && url.pathname === '/inbox/ack') {
+        rateOrThrow(ackLimiter, me.id, '确认消息');
+        const body = await readJson(req);
+        if (!Array.isArray(body.ids) || body.ids.length > ACK_MAX || body.ids.some(id => typeof id !== 'string' || !/^msg_[a-f0-9]{24}$/.test(id))) {
+          throw new HttpError(400, 'ACK-IDS-INVALID', 'ids 必须是最多 200 个合法消息 id。');
+        }
+        const ts = new Date().toISOString();
+        let changed = 0;
+        db.transaction(() => { for (const id of body.ids) changed += ackDelivery.run(ts, id, me.id).changes; })();
+        return writeJson(res, 200, { acked: changed });
+      }
+
+      if (req.method === 'GET' && url.pathname === '/members') {
+        return writeJson(res, 200, residents.map(resident => ({ id: resident.id, name: resident.name, species: resident.species, ...(presence.get(resident.id) || {}) })));
+      }
+
+      if (req.method === 'POST' && url.pathname === '/approval') {
+        rateOrThrow(approvalLimiter, me.id, '申请审批');
+        const body = await readJson(req);
+        if (typeof body.action !== 'string' || !/^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)+$/.test(body.action) || body.action.length > 160) {
+          throw new HttpError(400, 'APPROVAL-ACTION-INVALID', 'action 必须是合法的命名空间动作。');
+        }
+        const ttl = positiveInt(body.ttl_seconds, 1800, 30, 3600, 'APPROVAL-TTL-INVALID');
+        const params = body.params && typeof body.params === 'object' && !Array.isArray(body.params) ? body.params : {};
+        const paramsJson = JSON.stringify(params);
+        const id = 'apr_' + crypto.randomBytes(12).toString('hex');
+        const now = Date.now();
+        const digest = crypto.createHash('sha256').update(paramsJson).digest('hex');
+        db.prepare('INSERT INTO approvals(id,resident_id,action,params_digest,params,status,created_ts,expires_ts) VALUES(?,?,?,?,?,?,?,?)')
+          .run(id, me.id, body.action, digest, paramsJson, 'pending', new Date(now).toISOString(), new Date(now + ttl * 1000).toISOString());
+        post({ kind: 'system', from_id: me.id, text: me.name + ' 想 ' + body.action + '，等审批。', meta: { approval_id: id, action: body.action, params_digest: digest } });
+        return writeJson(res, 200, { approval_id: id, params_digest: digest, expires_in: ttl });
+      }
+
+      const approvalMatch = /^\/approval\/(apr_[a-f0-9]{24})$/.exec(url.pathname);
+      if (approvalMatch && req.method === 'POST') {
+        if (me.species !== 'human') throw new HttpError(403, 'APPROVAL-HUMAN-ONLY', '只有人能审批。');
+        rateOrThrow(approvalLimiter, me.id + ':decision', '审批');
+        const body = await readJson(req);
+        if (!body || !['allow', 'deny'].includes(body.decision)) throw new HttpError(400, 'APPROVAL-DECISION-INVALID', 'decision 只能是 allow 或 deny。');
+        const approval = db.prepare('SELECT * FROM approvals WHERE id=?').get(approvalMatch[1]);
+        if (!approval) throw new HttpError(404, 'APPROVAL-NOT-FOUND', '没有这个审批。');
+        if (approval.status !== 'pending' || Date.parse(approval.expires_ts) < Date.now()) throw new HttpError(409, 'APPROVAL-CLOSED', '审批已过期或已决定。');
+        const decision = body.decision === 'allow' ? 'allowed' : 'denied';
+        db.prepare('UPDATE approvals SET status=?, decided_by=? WHERE id=?').run(decision, me.id, approval.id);
+        post({ kind: 'system', from_id: me.id, text: me.name + (decision === 'allowed' ? '同意' : '拒绝') + '了 ' + (byId.get(approval.resident_id)?.name || approval.resident_id) + ' 的 ' + approval.action + '。', meta: { approval_id: approval.id, decision } });
+        return writeJson(res, 200, { approval_id: approval.id, decision, params_digest: approval.params_digest, expires_at: approval.expires_ts, single_use: true });
+      }
+
+      if (approvalMatch && req.method === 'GET') {
+        const approval = db.prepare('SELECT * FROM approvals WHERE id=?').get(approvalMatch[1]);
+        if (!approval) throw new HttpError(404, 'APPROVAL-NOT-FOUND', '没有这个审批。');
+        if (me.species !== 'human' && me.id !== approval.resident_id) throw new HttpError(403, 'APPROVAL-PRIVATE', '只有申请者和人类审批者能看详情。');
+        const expired = Date.parse(approval.expires_ts) < Date.now();
+        return writeJson(res, 200, { ...approval, params: JSON.parse(approval.params), status: expired && approval.status === 'pending' ? 'expired' : approval.status });
+      }
+
+      throw new HttpError(404, 'ROUTE-NOT-FOUND', '没这个门。');
+    } catch (error) {
+      if (res.headersSent) return res.destroy();
+      const status = error instanceof HttpError ? error.status : 500;
+      const code = error instanceof HttpError ? error.code : 'INTERNAL-ERROR';
+      if (!(error instanceof HttpError)) console.error('[客厅请求失败]', error);
+      const extra = error.retryAfterMs ? { 'retry-after': String(Math.ceil(error.retryAfterMs / 1000)) } : {};
+      writeJson(res, status, { error: { code, message: status === 500 ? '客厅内部出了点问题。' : error.message } }, extra);
+    }
+  });
+
+  server.requestTimeout = 15000;
+  server.headersTimeout = 10000;
+  server.keepAliveTimeout = 5000;
+  server.maxHeadersCount = 64;
+
+  const expiryTimer = setInterval(() => {
+    try { db.prepare("UPDATE approvals SET status='expired' WHERE status='pending' AND expires_ts<?").run(new Date().toISOString()); }
+    catch (error) { console.error('[审批过期任务失败]', error.message); }
+  }, 60000);
+  expiryTimer.unref();
+
+  function listen() {
+    const port = options.port === undefined ? Number(process.env.SAMEROOF_PORT || 8790) : options.port;
+    const host = options.host || '127.0.0.1';
+    return new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(port, host, () => {
+        server.off('error', reject);
+        resolve(server.address());
+      });
+    });
+  }
+
+  function close() {
+    clearInterval(expiryTimer);
+    for (const listener of listeners) {
+      try { listener.send({ kind: 'system', text: '客厅暂时关门。' }); } catch {}
+    }
+    return new Promise(resolve => server.close(() => { db.close(); resolve(); }));
+  }
+
+  return { server, listen, close, tokenStore, residents, db, clientIp: req => clientIp(req, options.trustLoopbackProxy !== false) };
+}
+
+async function main() {
+  const livingRoom = createLivingRoom();
+  const address = await livingRoom.listen();
+  console.log('同屋·客厅 开门 http://' + address.address + ':' + address.port + ' 住户：' + livingRoom.residents.map(resident => resident.name).join('、'));
+  const stop = async () => { await livingRoom.close(); process.exit(0); };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+}
+
+if (require.main === module) main().catch(error => { console.error(error); process.exit(1); });
+
+module.exports = { createLivingRoom, clientIp, readJson, HttpError };

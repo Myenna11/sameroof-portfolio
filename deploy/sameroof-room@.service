@@ -9,7 +9,7 @@ ExecStart=/usr/bin/node adapter.js %i
 Restart=always
 RestartSec=10
 KillSignal=SIGTERM
-TimeoutStopSec=15
+TimeoutStopSec=90
 Environment=HOME=/root
 NoNewPrivileges=yes
 PrivateTmp=yes

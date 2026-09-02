@@ -54,6 +54,7 @@ function open(roomName) {
 async function run(roomName, runtimeName, think, opts = {}) {
   const R = open(roomName); const { room, api, state, save, soul } = R;
   let busy = false;
+  const shift = []; // 这一班窗口里发生的事，睡前写进交接信
   async function wake(reason) {
     if (busy) return; busy = true;
     try {
@@ -75,13 +76,30 @@ async function run(roomName, runtimeName, think, opts = {}) {
       if (reply.startsWith('DM:')) { const m = reply.match(/^DM:\s*(\S+)\s*[:：]?\s*([\s\S]*)$/); if (m) { await api('POST', '/dm', { to: m[1], text: m[2] }); return; } }
       if (reply.startsWith('APPROVAL:')) { const [, action, ...rest] = reply.split(/\s+/); await api('POST', '/approval', { action, params: { raw: rest.join(' ') } }); return; }
       await api('POST', '/say', { text: reply }); console.log(`[${room.name} 说] ${reply.slice(0, 80)}`);
+      shift.push({ at: new Date().toISOString(), heard: inbox.map(m => `${m.from}：${m.text}`), said: reply });
     } catch (e) { console.error('[醒来失败]', e.message); } finally { busy = false; }
   }
-  const sleep = () => { state.last_sleep = new Date().toISOString(); save(); };
-  process.on('SIGINT', () => { sleep(); process.exit(0); }); process.on('SIGTERM', () => { sleep(); process.exit(0); });
+  async function writeHandover() {
+    const hoDir = path.join(R.roomDir, 'handover'); fs.mkdirSync(hoDir, { recursive: true });
+    const hoPath = path.join(hoDir, 'latest.md');
+    const facts = shift.length ? shift.map(s => `- ${s.at.slice(11, 16)} 听到：${s.heard.join(' / ').slice(0, 200)}\n  我说：${s.said.slice(0, 200)}`).join('\n') : '- 这一班没人叫我，我也没说话。';
+    const render = note => `# 交接信 · ${room.name}\n\n写于 ${R.houseTime().replace('【房子供给的时间】', '')}\n\n## 我想对明天的自己说\n${note || '（这一班没来得及写，看下面的事实）'}\n\n## 房子记下的事实\n${facts}\n`;
+    fs.writeFileSync(hoPath, render(''));                       // 先把事实落盘（checkpoint 是底）
+    console.log(`[${room.name}] 交接信·事实已写`);
+    if (shift.length && !opts.dry) {                            // 再让本人补一句（交接信是面）
+      try { const raw = await think(`你是${room.name}。现在要睡了，给明天醒来的自己写两三句交接信：这一班发生了什么、你惦记什么、有什么没做完。像给自己留便条，不要客套。`, `这一班的事实：\n${facts}`);
+        const note = String(raw || '').trim();
+        fs.writeSync(2, `[${room.name}] 便条原文长度 ${note.length}\n`);
+        if (note) { fs.writeFileSync(hoPath, render(note)); fs.writeSync(2, `[${room.name}] 交接信·便条已写\n`); } } catch (e) { fs.writeSync(2, `[便条没写成] ${e && e.stack || e}\n`); }
+    }
+    fs.appendFileSync(path.join(hoDir, 'history.md'), fs.readFileSync(hoPath, 'utf8') + '\n---\n');
+  }
+  let sleeping = false;
+  const sleep = async () => { if (sleeping) return; sleeping = true; try { await writeHandover(); } catch (e) { fs.writeSync(2, `[交接信失败] ${e.message}\n`); } state.last_sleep = new Date().toISOString(); save(); };
+  process.on('SIGINT', async () => { await sleep(); process.exit(0); }); process.on('SIGTERM', async () => { await sleep(); process.exit(0); });
   console.log(`[${room.name}] 适配器上线，runtime=${runtimeName}，客厅=${LR}${opts.dry ? '，dry-run' : ''}`);
   await wake('启动时看看有没有人找我');
-  if (opts.once || opts.dry) { sleep(); return; }
+  if (opts.once || opts.dry) { await sleep(); return; }
   const u = new URL('/events', LR);
   const sub = () => { const req = http.request({ hostname: u.hostname, port: u.port, path: u.pathname, headers: { authorization: `Bearer ${JSON.parse(fs.readFileSync(path.join(RUN, 'living-room-tokens.json'), 'utf8'))[room.id]}` } }, res => {
     let buf = ''; res.on('data', c => { buf += c; let i; while ((i = buf.indexOf('\n\n')) >= 0) { const chunk = buf.slice(0, i); buf = buf.slice(i + 2); if (!chunk.startsWith('data:')) continue; try { const m = JSON.parse(chunk.slice(5)); if (m.from_id !== room.id && (m.mentions.includes(room.id) || m.kind === 'dm')) wake(`${m.from_id} 叫我`); } catch {} } });

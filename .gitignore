@@ -6,3 +6,5 @@ rooms/*/handover/
 !rooms/example/
 node_modules/
 state/
+!rooms/*/handover/
+rooms/*/handover/history.md
