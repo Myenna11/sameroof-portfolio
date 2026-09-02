@@ -1,0 +1,15 @@
+{
+  "name": "@sameroof/cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "同屋控制面 CLI",
+  "bin": {
+    "sameroof": "index.js"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "yaml": "^2.8.1"
+  }
+}
