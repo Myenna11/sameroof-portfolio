@@ -17,4 +17,4 @@ function think(system, user) {
     }); req.on('error', reject); req.write(body); req.end();
   });
 }
-run(ROOM, 'broker-direct', think, { dry: process.argv.includes('--dry'), once: process.argv.includes('--once') });
+run(R.room.name, 'broker-direct', think, { dry: process.argv.includes('--dry'), once: process.argv.includes('--once') });

@@ -6,8 +6,17 @@ const HOUSE = process.env.SAMEROOF_HOUSE || path.resolve(__dirname, '../../..');
 const LR = process.env.SAMEROOF_LR || 'http://127.0.0.1:8790';
 const RUN = path.join(process.env.HOME || '/root', '.sameroof', 'run');
 
+function resolveRoomDir(nameOrId) {
+  const direct = path.join(HOUSE, 'rooms', nameOrId);
+  if (fs.existsSync(path.join(direct, 'room.yaml'))) return direct;
+  for (const d of fs.readdirSync(path.join(HOUSE, 'rooms'))) {           // 机器用 id，人用名字
+    const f = path.join(HOUSE, 'rooms', d, 'room.yaml'); if (!fs.existsSync(f)) continue;
+    const r = yaml.load(fs.readFileSync(f, 'utf8')); if (r && (r.id === nameOrId || r.name === nameOrId)) return path.join(HOUSE, 'rooms', d);
+  }
+  throw new Error(`找不到房间：${nameOrId}`);
+}
 function open(roomName) {
-  const roomDir = path.join(HOUSE, 'rooms', roomName);
+  const roomDir = resolveRoomDir(roomName);
   const room = yaml.load(fs.readFileSync(path.join(roomDir, 'room.yaml'), 'utf8'));
   const house = yaml.load(fs.readFileSync(path.join(HOUSE, 'house.yaml'), 'utf8'));
   const lrToken = JSON.parse(fs.readFileSync(path.join(RUN, 'living-room-tokens.json'), 'utf8'))[room.id];
