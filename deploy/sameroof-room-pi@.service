@@ -1,0 +1,15 @@
+[Unit]
+Description=同屋 房间适配器(pi) %i
+After=sameroof-living-room.service
+Requires=sameroof-living-room.service
+[Service]
+Type=simple
+WorkingDirectory=/root/sameroof/packages/adapters/pi
+ExecStart=/usr/bin/node adapter.js %i
+Restart=always
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=150
+Environment=HOME=/root
+[Install]
+WantedBy=multi-user.target
