@@ -1,0 +1,17 @@
+# 一间屋的样板
+name: 实现员
+runtime: dsh            # dsh | claude-code | pi
+model:
+  provider: kimi-coding # pi-ai provider id
+  id: kimi-k3
+  auth: oauth           # oauth | api_key | proxy
+soul: SOUL.md
+plugins:
+  - memory              # 默认 sameroof-memory，可换
+  - handover
+  - chat                # mousecrew
+  - blackboard          # Turritopsis
+permissions:
+  exec: approve         # allow | approve | deny
+  post_public: approve
+idle_loop: off          # 预留：headlong 式持续思考
