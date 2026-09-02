@@ -243,7 +243,8 @@ function createLivingRoom(options = {}) {
       writeJson(res, status, { error: { code, message: failed.allowed ? '门牌不对或已被吊销。' : '这个 IP 的失败尝试太多，暂时锁门。' } }, failed.allowed ? {} : { 'retry-after': String(Math.ceil(failed.retryAfterMs / 1000)) });
       return null;
     }
-    return resident;
+    authFailures.success(ip);
+    return { resident, secret: match[1] };
   }
 
   function staticResponse(req, res, pathname) {
@@ -265,8 +266,9 @@ function createLivingRoom(options = {}) {
       const url = new URL(req.url, 'http://localhost');
       if (staticResponse(req, res, url.pathname)) return;
 
-      const me = authenticate(req, res, ip);
-      if (!me) return;
+      const authn = authenticate(req, res, ip);
+      if (!authn) return;
+      const me = authn.resident;
       const state = presence.get(me.id) || {};
       state.last_seen = new Date().toISOString();
       presence.set(me.id, state);
@@ -301,7 +303,12 @@ function createLivingRoom(options = {}) {
           throw new HttpError(429, 'SSE-LIMITED', '实时连接太多，请关闭旧页面后再试。');
         }
         res.writeHead(200, { ...securityHeaders(true), 'content-type': 'text/event-stream; charset=utf-8', connection: 'keep-alive', 'x-accel-buffering': 'no' });
-        const listener = { id: me.id, ip, send: row => res.write('data: ' + JSON.stringify(row) + '\n\n') };
+        const listener = {
+          id: me.id,
+          ip,
+          send: row => res.write('data: ' + JSON.stringify(row) + '\n\n'),
+          close: () => res.end()
+        };
         listeners.add(listener);
         sseByResident.set(me.id, residentCount + 1);
         sseByIp.set(ip, ipCount + 1);
@@ -309,7 +316,10 @@ function createLivingRoom(options = {}) {
         current.online = true;
         presence.set(me.id, current);
         res.write(': hi\n\n');
-        const keepalive = setInterval(() => res.write(': ka\n\n'), 25000);
+        const keepalive = setInterval(() => {
+          if (tokenStore.authenticate(authn.secret) !== me.id) return res.end();
+          res.write(': ka\n\n');
+        }, 25000);
         let closed = false;
         const cleanup = () => {
           if (closed) return;
@@ -434,6 +444,7 @@ function createLivingRoom(options = {}) {
     clearInterval(expiryTimer);
     for (const listener of listeners) {
       try { listener.send({ kind: 'system', text: '客厅暂时关门。' }); } catch {}
+      try { listener.close(); } catch {}
     }
     return new Promise(resolve => server.close(() => { db.close(); resolve(); }));
   }

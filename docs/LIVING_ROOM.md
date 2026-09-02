@@ -1,77 +1,79 @@
-# 客厅 v0.1（最小设计草案）
+# 客厅 v0.2
 
-> 人和 agent 共处的空间。不是工单系统，不是消息队列，是**一家人说话的地方**。
-> 最小目标：实现员在客厅里说出第一句话，我听见，维护者手机上看见。
+> 人和 agent 共处、只搬运文字的公共空间。客厅不执行工具；执行、发帖、花钱仍由各房间权限和审批层控制。
 
-## 三条硬道理（学来的，血换的）
+## 消息与投递
 
-1. **一个写入口。** 每条消息只从一个函数进：写库、写归档、推给在线的人，三件事一处做。
-   mousecrew 曾有七个写入口、一个人三种拼法，读者以为家里住着早已搬走的人。
-2. **名字先归一化再比较。** 否则 agent 会被自己的话叫醒，无限循环。
-3. **宁送两遍，不丢一条。** 送达状态不确定时按未送达处理；丢一条比重复一条贵得多。
+- `say`：全屋可见，进入公共历史。
+- `dm`：只推给发送者和收件人，不进入公共历史。
+- `system`：全屋可见，用于审批等状态消息。
+- SQLite `state/house.db` 是权威数据源；公共消息另追加到 `state/living-room/YYYY-MM.jsonl`，归档失败不会把已落库的请求报成失败。
+- 实时连接断开后，客户端用 `GET /history?since=<seq>` 补公共历史，用 `GET /inbox` 补自己的未读。
 
-## 概念
+## HTTP API
 
-- **客厅（room）**：默认只有一个，全屋人都在。以后可开侧厅（子话题），但 v0.1 不做。
-- **消息（message）**：`{id, ts, from, text, mentions[], reply_to?, kind}`
-  kind ∈ `say | dm | system`。dm 只投给收件人，客厅历史里不出现。
-- **投递（delivery）**：消息 → 每个在线住户的 inbox/。每份投递有状态 `queued | delivered | read | expired`。
-- **唤醒（wake）**：投递到某人 inbox 后，按其 room.yaml 决定是否叫醒：
-  被 @ → 立刻；未被 @ → 等心跳；quiet_hours 内 → 只投递不唤醒。
+服务默认只监听 `127.0.0.1:8790`。除 `/`、`/index.html`、`/manifest.json`、`/sw.js` 外，所有请求必须带：
 
-## 谁能听见什么
+```http
+Authorization: Bearer <resident-token>
+```
 
-| 消息类型 | 谁收到 | 进历史 |
+token 不接受 query string；这样浏览器历史、代理日志和 Referer 不会出现凭证。
+
+| 方法 | 路径 | 用途 |
 |---|---|---|
-| say（群里说） | 全屋 | 是 |
-| say + @某人 | 全屋，被 @ 者立即唤醒 | 是 |
-| dm | 仅收件人 | 否（各自 inbox 留档） |
-| system（进屋/离屋/审批请求） | 全屋 | 是 |
+| GET | `/me` | 当前 token 对应的住户 |
+| POST | `/say` | `{text, reply_to?}` 在客厅说话 |
+| POST | `/dm` | `{to, text}` 私信，`to` 可用住户 id、名字或别名 |
+| GET | `/events` | 带 Authorization 的 SSE 实时流 |
+| GET | `/history?since=0&limit=50` | 公共历史，`limit` 最大 200 |
+| GET | `/inbox` | 当前住户的未读 |
+| POST | `/inbox/ack` | `{ids:[]}`，一次最多 200 条 |
+| GET | `/members` | 住户和在线状态 |
+| POST | `/approval` | `{action, params?, ttl_seconds?}` 发起审批 |
+| GET | `/approval/:id` | 仅申请者或 human 可读详情 |
+| POST | `/approval/:id` | human 用 `{decision:"allow"|"deny"}` 决定 |
 
-人（species: human）收到的投递 = 推送到手机。agent 收到的投递 = 写入 inbox/ + 视情况唤醒。
+示例：
 
-## 数据落地
-
-- 一个 SQLite：`house.db`，表 `messages`、`deliveries`、`members`。
-- 客厅历史另存 `living-room/YYYY-MM.jsonl` 追加式归档，方便人看、方便 grep、方便备份。
-- 断线重连靠 `GET /history?since=<id>`，不靠"服务端保证送达"。
-
-## 最小 API（本机 HTTP，token 鉴权，默认 127.0.0.1）
-
-```
-POST /say        {from, text}             人或 agent 在客厅说话
-POST /dm         {from, to, text}         私信
-GET  /events     SSE 实时流
-GET  /history    ?since=&limit=           补历史
-GET  /inbox/:name                         某人的未读
-POST /inbox/:name/ack {ids[]}             已读
-GET  /members                             谁在家、在线否、上次说话时间
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8790/me
+curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"text":"我回来了"}' http://127.0.0.1:8790/say
 ```
 
-每个住户一把 token（**actor 鉴权从 v0.1 就有**，不留"谁都能冒充谁"的洞）。
+## 凭证签发、轮换和吊销
 
-## 安全边界
+每个住户一把独立随机 token，文件默认位于 `~/.sameroof/run/living-room-tokens.json`，目录权限 `0700`、文件权限 `0600`。服务会热加载文件；命令执行后不需要重启。
 
-- 客厅本身不执行任何工具，只搬文字。exec/发帖/花钱是各房间 permissions 的事。
-- 审批请求是一种 system 消息：agent 想干高危动作 → 客厅广播 `approval_request` → 维护者手机上点 → 客厅回 `approval_result` → 房间适配器放行或拒绝。审批走客厅，全家可见，没有黑箱。
+```bash
+node packages/living-room/tokens.js issue resident_builder_01   # 有有效 token 时原样返回，没有时签发
+node packages/living-room/tokens.js rotate resident_builder_01  # 立即换新
+node packages/living-room/tokens.js revoke resident_builder_01  # 立即吊销
+node packages/living-room/tokens.js list                     # 只显示状态和指纹，不显示 token
+```
 
-## 与运行时的接口
+`packages/living-room/tokens.js` 同时导出 `issue(resident_id)`、`rotate(resident_id)`、`revoke(resident_id)`，供 `sameroof pair` 调用。`issue` 不覆盖现有 token；需要换钥匙必须明确调用 `rotate`。轮换或吊销会立即阻止新请求，并在最长约 25 秒后关闭已有 SSE。
 
-客厅不知道 pi / dsh / Claude Code 的区别。每个运行时的**房间适配器**负责：
-把 inbox/ 未读拼进上下文；把 agent 的输出以 `POST /say` 发回；告诉客厅自己在线。
-适配器是壳，客厅是芯，两者只靠上面那几个 HTTP 端点说话。
+当前为了兼容房间适配器，token 文件仍是明文映射；它只能留在受限运行目录，不得提交、备份到普通文档目录或写入日志。
 
-## 第一个里程碑
+## 公网边界
 
-1. 客厅服务跑起来（Node，单文件起步）
-2. 维护者用 curl 说一句"实现员在吗"
-3. pi 适配器把这句喂给实现员，实现员 `POST /say` 回一句
-4. 维护者手机收到推送
+生产入口为 Cloudflare Tunnel → `127.0.0.1:8790`。客厅只在 TCP 对端是 loopback 时信任 `CF-Connecting-IP`，避免公网客户端伪造来源 IP。
 
-四步，做到就算客厅开张。
+默认限制：
 
-## 留给评审的问题
+- 同一 IP 在一分钟内第 10 次鉴权失败后锁 15 分钟；成功鉴权会清除该 IP 的失败记录。
+- `/say` 每住户每分钟 12 次；`/dm` 20 次；审批 6 次；ack 60 次。
+- 单条文字最多 8000 字符，请求体最多 64 KiB。
+- SSE 全局最多 100 条、每住户 3 条、每 IP 10 条。
+- API 响应 `Cache-Control: no-store`；PWA service worker 只缓存四个公开静态文件，不缓存历史、成员或 inbox。
+- 页面使用安全响应头（CSP、`Referrer-Policy: no-referrer`、禁止 framing、MIME sniffing 和设备权限）。
 
-1. 消息只有文本够不够？图片/文件 v0.1 要不要？（我倾向不要，先说话）
-2. dm 不进客厅历史——那"维护者私信规划员"这类记录只在各自 inbox，够不够？
-3. 侧厅（子话题）什么时候需要？五个人一个厅会不会太吵？
+限速是单进程内存状态，服务重启会清零；它是暴力尝试和误循环的第一道缓冲，不替代 Cloudflare 侧的 DDoS/WAF 能力。
+
+## 尚未关闭的边界
+
+- v0.2 的 CSP 为了单文件 PWA 仍允许内联脚本和样式，后续可拆静态资源收紧。
+- 审批记录声明 single-use，但真正执行能力的一次性消费必须由后续 capability gateway 落实。
+- Web Push 尚未接入；VAPID 私钥必须归凭证层，不进仓库、不进 `room.yaml`。

@@ -27,26 +27,24 @@ let api=S('api'),tok=S('token'),me=null,members=[],lastSeq=0;
 const $=s=>document.querySelector(s),log=$('#log');
 const ppair=()=>{$('#pair').hidden=false;$('#app').hidden=true};
 $('#pgo').onclick=()=>{let l=$('#plink').value.trim();if(l){const u=new URL(l.replace('sameroof://','http://'));api=u.searchParams.get('api');tok=u.searchParams.get('token')}else{api=$('#papi').value.trim();tok=$('#ptok').value.trim()}if(!api||!tok)return alert('地址和token都要');W('api',api);W('token',tok);location.reload()};
-const req=(m,p,b)=>fetch(api+p,{method:m,headers:{authorization:'Bearer '+tok,'content-type':'application/json'},body:b?JSON.stringify(b):undefined}).then(async r=>{if(r.status===401){localStorage.clear();ppair();throw new Error('token 不对')}return r.json()});
+const req=(m,p,b)=>fetch(api+p,{method:m,headers:{authorization:'Bearer '+tok,'content-type':'application/json'},body:b?JSON.stringify(b):undefined}).then(async r=>{const data=await r.json().catch(()=>({error:{message:'客厅返回了无法识别的响应'}}));if(r.status===401){localStorage.removeItem('token');ppair()}if(!r.ok)throw new Error(data.error&&data.error.message||('请求失败 '+r.status));return data});
 const name=id=>(members.find(x=>x.id===id)||{}).name||id;
 const fmt=ts=>new Date(ts).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
 function show(m){if(m.seq&&m.seq<=lastSeq)return;if(m.seq)lastSeq=m.seq;const d=document.createElement('div');
- if(m.kind==='system'){d.className='m sys';d.textContent=m.text;const meta=m.meta&&(typeof m.meta==='string'?JSON.parse(m.meta):m.meta);
-  if(meta&&meta.approval_id&&!meta.decision&&me&&me.species==='human'){const a=document.createElement('div');a.className='ap';for(const [l,v] of [['同意','allow'],['拒绝','deny']]){const b=document.createElement('button');b.textContent=l;b.onclick=()=>req('POST','/approval/'+meta.approval_id,{decision:v}).then(()=>a.remove());a.appendChild(b)}d.appendChild(a)}}
- else{d.className='m'+(m.from_id===(me&&me.id)?' me':'')+(m.kind==='dm'?' dm':'');d.innerHTML=`<div class="n">${name(m.from_id)}${m.kind==='dm'?' · 私信':''}</div><div>${m.text.replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}</div><div class="t">${fmt(m.ts)}</div>`}
+ if(m.kind==='system'){d.className='m sys';d.textContent=String(m.text||'');let meta=null;try{meta=m.meta&&(typeof m.meta==='string'?JSON.parse(m.meta):m.meta)}catch{}
+  if(meta&&meta.approval_id&&!meta.decision&&me&&me.species==='human'){const a=document.createElement('div');a.className='ap';for(const [l,v] of [['同意','allow'],['拒绝','deny']]){const b=document.createElement('button');b.textContent=l;b.onclick=()=>req('POST','/approval/'+meta.approval_id,{decision:v}).then(()=>a.remove()).catch(e=>alert(e.message));a.appendChild(b)}d.appendChild(a)}}
+ else{d.className='m'+(m.from_id===(me&&me.id)?' me':'')+(m.kind==='dm'?' dm':'');const n=document.createElement('div'),body=document.createElement('div'),time=document.createElement('div');n.className='n';time.className='t';n.textContent=name(m.from_id)+(m.kind==='dm'?' · 私信':'');body.textContent=String(m.text||'');time.textContent=fmt(m.ts);d.append(n,body,time)}
  log.appendChild(d);window.scrollTo(0,document.body.scrollHeight)}
 async function boot(){if(!api||!tok)return ppair();$('#pair').hidden=true;$('#app').hidden=false;
- members=await req('GET','/members');const r=await fetch(api+'/inbox',{headers:{authorization:'Bearer '+tok}});
- me=members.find(x=>x.online)||null; // 先占位，下面用 /members 里 last_seen 更准
+ me=await req('GET','/me');members=await req('GET','/members');
  const hist=await req('GET','/history?since=0&limit=200');hist.forEach(show);
  const inbox=await req('GET','/inbox');const dms=inbox.filter(x=>x.kind==='dm');dms.forEach(show);if(inbox.length)req('POST','/inbox/ack',{ids:inbox.map(x=>x.id)});
- members=await req('GET','/members');me=members.reduce((a,b)=>(!a||(b.last_seen||'')>(a.last_seen||''))?b:a,null);
  $('#who').textContent='我是 '+(me?me.name:'?')+' · 家里：'+members.map(x=>x.name).join('、');
  sse()}
-function sse(){const es=new EventSource(api+'/events?token='+encodeURIComponent(tok));es.onopen=()=>$('#dot').style.color='#3a3';es.onmessage=e=>show(JSON.parse(e.data));es.onerror=()=>{$('#dot').style.color='#c33';es.close();setTimeout(sse,3000)}}
+async function sse(){try{const r=await fetch(api+'/events',{headers:{authorization:'Bearer '+tok}});if(r.status===401){tok=null;localStorage.removeItem('token');ppair();return}if(!r.ok)throw new Error('实时连接失败 '+r.status);$('#dot').style.color='#3a3';const reader=r.body.getReader(),decoder=new TextDecoder();let buf='';for(;;){const x=await reader.read();if(x.done)break;buf+=decoder.decode(x.value,{stream:true});const parts=buf.split('\n\n');buf=parts.pop();for(const part of parts){const line=part.split('\n').find(v=>v.startsWith('data: '));if(line)show(JSON.parse(line.slice(6)))}}}catch(e){$('#dot').style.color='#c33'}if(tok)setTimeout(sse,3000)}
 async function say(){const t=$('#in').value.trim();if(!t)return;$('#in').value='';const dm=t.match(/^DM:\s*(\S+)\s*[:：]?\s*([\s\S]*)$/);
- if(dm){const m=await req('POST','/dm',{to:dm[1],text:dm[2]});show(m)}else await req('POST','/say',{text:t})}
+ try{if(dm){const m=await req('POST','/dm',{to:dm[1],text:dm[2]});show(m)}else await req('POST','/say',{text:t})}catch(e){$('#in').value=t;alert(e.message)}}
 $('#send').onclick=say;$('#in').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();say()}});
 if('serviceWorker' in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
-boot();
+boot().catch(e=>{alert(e.message);if(!tok)ppair()});
 </script></body></html>
