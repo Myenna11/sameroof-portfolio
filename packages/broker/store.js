@@ -102,6 +102,8 @@ class BrokerStore {
       );
       CREATE INDEX IF NOT EXISTS ledger_resident_ts ON ledger(resident_id, ts);
     `);
+    const credentialColumns = this.db.prepare('PRAGMA table_info(credentials)').all().map(row => row.name);
+    if (!credentialColumns.includes('path_style')) this.db.exec("ALTER TABLE credentials ADD COLUMN path_style TEXT NOT NULL DEFAULT 'auto'");
   }
 
   close() {
@@ -115,11 +117,13 @@ class BrokerStore {
     const apiKey = String(input.apiKey || '');
     const authHeader = String(input.authHeader || 'authorization').toLowerCase();
     const authScheme = input.authScheme === undefined ? (authHeader === 'x-api-key' ? '' : 'Bearer') : String(input.authScheme);
+    const pathStyle = String(input.pathStyle || 'auto');
     if (!SAFE_NAME.test(alias)) throw new BrokerError(400, 'CRED-ALIAS-INVALID', '凭证别名格式不合法。');
     if (!SAFE_NAME.test(provider)) throw new BrokerError(400, 'CRED-PROVIDER-INVALID', 'provider 格式不合法。');
     if (!apiKey) throw new BrokerError(400, 'CRED-KEY-EMPTY', '真凭证不能为空。');
     if (/[\r\n]/.test(apiKey) || /[\r\n]/.test(authScheme)) throw new BrokerError(400, 'CRED-HEADER-INJECTION', '凭证和认证 scheme 不能包含换行。');
     if (!['authorization', 'x-api-key'].includes(authHeader)) throw new BrokerError(400, 'CRED-HEADER-INVALID', '只允许 authorization 或 x-api-key 注入。');
+    if (!['auto', 'openai', 'bare'].includes(pathStyle)) throw new BrokerError(400, 'CRED-PATH-STYLE-INVALID', 'path_style 只能是 auto、openai 或 bare。');
     let url;
     try { url = new URL(baseUrl); } catch { throw new BrokerError(400, 'CRED-URL-INVALID', 'base_url 不是合法 URL。'); }
     if (url.username || url.password || url.hash) throw new BrokerError(400, 'CRED-URL-SECRET', 'base_url 不能含用户名、密码或片段。');
@@ -129,18 +133,25 @@ class BrokerStore {
     }
     const ts = nowIso();
     try {
-      this.db.prepare(`INSERT INTO credentials(alias,provider,base_url,api_key,auth_header,auth_scheme,created_at)
-        VALUES(?,?,?,?,?,?,?)`).run(alias, provider, url.toString().replace(/\/$/, ''), apiKey, authHeader, authScheme, ts);
+      this.db.prepare(`INSERT INTO credentials(alias,provider,base_url,api_key,auth_header,auth_scheme,path_style,created_at)
+        VALUES(?,?,?,?,?,?,?,?)`).run(alias, provider, url.toString().replace(/\/$/, ''), apiKey, authHeader, authScheme, pathStyle, ts);
     } catch (error) {
       if (String(error.code).includes('CONSTRAINT')) throw new BrokerError(409, 'CRED-ALIAS-EXISTS', '凭证别名已存在；轮换请用 rotate。');
       throw error;
     }
-    return { alias, provider, base_url: url.toString().replace(/\/$/, ''), active: true, version: 1, created_at: ts };
+    return { alias, provider, base_url: url.toString().replace(/\/$/, ''), path_style: pathStyle, active: true, version: 1, created_at: ts };
   }
 
   listCredentials() {
-    return this.db.prepare('SELECT alias,provider,base_url,auth_header,active,version,created_at,rotated_at FROM credentials ORDER BY alias').all()
+    return this.db.prepare('SELECT alias,provider,base_url,auth_header,path_style,active,version,created_at,rotated_at FROM credentials ORDER BY alias').all()
       .map(row => ({ ...row, active: Boolean(row.active) }));
+  }
+
+  setCredentialPathStyle(alias, pathStyle) {
+    if (!['auto', 'openai', 'bare'].includes(pathStyle)) throw new BrokerError(400, 'CRED-PATH-STYLE-INVALID', 'path_style 只能是 auto、openai 或 bare。');
+    const result = this.db.prepare('UPDATE credentials SET path_style=? WHERE alias=?').run(pathStyle, alias);
+    if (!result.changes) throw new BrokerError(404, 'CRED-NOT-FOUND', '没有这个凭证别名。');
+    return { alias, path_style: pathStyle };
   }
 
   rotateCredential(alias, apiKey) {
@@ -181,14 +192,33 @@ class BrokerStore {
     this.db.prepare(`INSERT INTO tokens(id,token_hash,resident_id,credential_aliases,models,purposes,expires_at,max_requests,max_tokens,reason,created_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(id, hashToken(secret), residentId, JSON.stringify(credentials), JSON.stringify(models), JSON.stringify(purposes), expiresAt, maxRequests, maxTokens, input.reason || null, createdAt);
     let tokenFile = null;
+    let replacedTokenId = null;
     if (input.writeFile !== false) {
       tokenFile = path.join(this.tokenDir, residentId);
-      const temporary = tokenFile + '.tmp-' + process.pid;
-      fs.writeFileSync(temporary, secret + '\n', { mode: 0o600, flag: 'wx' });
-      fs.chmodSync(temporary, 0o600);
-      fs.renameSync(temporary, tokenFile);
+      if (fs.existsSync(tokenFile) && !input.replaceFile) {
+        this.db.prepare('DELETE FROM tokens WHERE id=?').run(id);
+        throw new BrokerError(409, 'TOKEN-FILE-EXISTS', '该住户已有 token 文件；如确认替换，请显式使用 --replace。');
+      }
+      let previousHash = null;
+      if (fs.existsSync(tokenFile)) {
+        previousHash = hashToken(fs.readFileSync(tokenFile, 'utf8').trim());
+        replacedTokenId = this.db.prepare("SELECT id FROM tokens WHERE token_hash=? AND status!='revoked'").get(previousHash)?.id || null;
+      }
+      const temporary = tokenFile + '.tmp-' + process.pid + '-' + crypto.randomBytes(4).toString('hex');
+      try {
+        fs.writeFileSync(temporary, secret + '\n', { mode: 0o600, flag: 'wx' });
+        fs.chmodSync(temporary, 0o600);
+        if (input.replaceFile) fs.renameSync(temporary, tokenFile);
+        else { fs.linkSync(temporary, tokenFile); fs.unlinkSync(temporary); }
+        if (previousHash) this.db.prepare("UPDATE tokens SET status='revoked', revoked_at=? WHERE token_hash=? AND id!=?").run(nowIso(), previousHash, id);
+      } catch (error) {
+        try { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); } catch {}
+        this.db.prepare('DELETE FROM tokens WHERE id=?').run(id);
+        if (error.code === 'EEXIST') throw new BrokerError(409, 'TOKEN-FILE-EXISTS', '该住户已有 token 文件；如确认替换，请显式使用 --replace。');
+        throw error;
+      }
     }
-    return { id, secret, resident_id: residentId, credential_aliases: credentials, models, purposes, expires_at: expiresAt, max_requests: maxRequests, max_tokens: maxTokens, token_file: tokenFile };
+    return { id, secret, resident_id: residentId, credential_aliases: credentials, models, purposes, expires_at: expiresAt, max_requests: maxRequests, max_tokens: maxTokens, token_file: tokenFile, replaced_token_id: replacedTokenId };
   }
 
   revokeToken(id) {

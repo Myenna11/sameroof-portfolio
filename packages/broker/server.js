@@ -73,14 +73,15 @@ async function readResponseLimited(response) {
   return Buffer.concat(chunks, size);
 }
 
-function buildUpstreamUrl(baseUrl, requestPath) {
+function buildUpstreamUrl(baseUrl, requestPath, pathStyle = 'auto') {
   const upstream = new URL(baseUrl);
   const queryIndex = requestPath.indexOf('?');
   const pathname = queryIndex >= 0 ? requestPath.slice(0, queryIndex) : requestPath;
   const search = queryIndex >= 0 ? requestPath.slice(queryIndex) : '';
   let basePath = upstream.pathname.replace(/\/$/, '');
   let suffix = pathname;
-  if (basePath.endsWith('/v1') && suffix.startsWith('/v1/')) suffix = suffix.slice(3);
+  const stripV1 = pathStyle === 'bare' || (pathStyle === 'auto' && /\/v\d+$/.test(basePath));
+  if (stripV1 && suffix.startsWith('/v1/')) suffix = suffix.slice(3);
   upstream.pathname = basePath + (suffix.startsWith('/') ? suffix : '/' + suffix);
   upstream.search = search;
   return upstream;
@@ -98,6 +99,8 @@ function createBroker(options = {}) {
   const store = options.store || new BrokerStore({ home: options.home, dbPath: options.dbPath });
   const ownsStore = !options.store;
   const socketPath = path.resolve(options.socketPath || process.env.SAMEROOF_BROKER_SOCKET || path.join(store.runDir, 'broker.sock'));
+  const bindPath = path.join(path.dirname(socketPath), '.' + path.basename(socketPath) + '.' + process.pid + '.' + require('crypto').randomBytes(6).toString('hex'));
+  let socketIdentity = null;
 
   const server = http.createServer(async (req, res) => {
     const started = Date.now();
@@ -130,7 +133,7 @@ function createBroker(options = {}) {
 
       let upstreamResponse;
       try {
-        upstreamResponse = await fetch(buildUpstreamUrl(reservation.credential.base_url, req.url), {
+        upstreamResponse = await fetch(buildUpstreamUrl(reservation.credential.base_url, req.url, reservation.credential.path_style), {
           method: 'POST',
           headers: safeUpstreamHeaders(req, reservation.credential),
           body: JSON.stringify(body),
@@ -177,25 +180,38 @@ function createBroker(options = {}) {
   function prepareSocket() {
     if (!socketPath.startsWith(store.runDir + path.sep)) throw new Error('broker socket 必须放在 ' + store.runDir + ' 里面。');
     fs.mkdirSync(path.dirname(socketPath), { recursive: true, mode: 0o700 });
-    if (fs.existsSync(socketPath)) {
-      const stat = fs.lstatSync(socketPath);
-      if (!stat.isSocket()) throw new Error('拒绝覆盖非 socket 路径：' + socketPath);
-      fs.unlinkSync(socketPath);
-    }
+    if (fs.existsSync(socketPath) && !fs.lstatSync(socketPath).isSocket()) throw new Error('拒绝覆盖非 socket 路径：' + socketPath);
+    if (fs.existsSync(bindPath)) throw new Error('私有 bind 路径已存在：' + bindPath);
   }
 
   function listen() {
     prepareSocket();
     return new Promise((resolve, reject) => {
-      const onError = error => { server.off('listening', onListening); reject(error); };
+      const onError = error => {
+        server.off('listening', onListening);
+        try { if (fs.existsSync(bindPath) && fs.lstatSync(bindPath).isSocket()) fs.unlinkSync(bindPath); } catch {}
+        reject(error);
+      };
       const onListening = () => {
         server.off('error', onError);
-        fs.chmodSync(socketPath, 0o600);
-        resolve({ socketPath });
+        try {
+          if (fs.existsSync(socketPath)) {
+            if (!fs.lstatSync(socketPath).isSocket()) throw new Error('拒绝覆盖非 socket 路径：' + socketPath);
+            fs.unlinkSync(socketPath);
+          }
+          fs.renameSync(bindPath, socketPath);
+          fs.chmodSync(socketPath, 0o600);
+          const stat = fs.lstatSync(socketPath);
+          socketIdentity = { dev: stat.dev, ino: stat.ino, ctimeMs: stat.ctimeMs };
+          resolve({ socketPath });
+        } catch (error) {
+          server.close(() => {});
+          reject(error);
+        }
       };
       server.once('error', onError);
       server.once('listening', onListening);
-      server.listen(socketPath);
+      server.listen(bindPath);
     });
   }
 
@@ -203,7 +219,11 @@ function createBroker(options = {}) {
     return new Promise(resolve => {
       server.close(() => {
         try {
-          if (fs.existsSync(socketPath) && fs.lstatSync(socketPath).isSocket()) fs.unlinkSync(socketPath);
+          if (fs.existsSync(socketPath) && socketIdentity) {
+            const stat = fs.lstatSync(socketPath);
+            const mine = stat.isSocket() && stat.dev === socketIdentity.dev && stat.ino === socketIdentity.ino && stat.ctimeMs === socketIdentity.ctimeMs;
+            if (mine) fs.unlinkSync(socketPath);
+          }
         } catch {}
         if (ownsStore) store.close();
         resolve();

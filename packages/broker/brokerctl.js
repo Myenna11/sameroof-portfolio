@@ -43,11 +43,12 @@ function print(value) {
 
 function usage() {
   console.log(`sameroof-broker serve
-sameroof-broker cred add <alias> --provider <id> --base-url <url> --key-file <path|->
+sameroof-broker cred add <alias> --provider <id> --base-url <url> --path-style <auto|openai|bare> --key-file <path|->
+sameroof-broker cred path-style <alias> <auto|openai|bare>
 sameroof-broker cred list
 sameroof-broker cred rotate <alias> --key-file <path|->
 sameroof-broker cred revoke <alias>
-sameroof-broker token issue <resident_id> --credential <alias[,alias]> --models <id[,id]> [--purposes interactive,heartbeat] [--ttl 12h] [--max-requests 100] [--max-tokens 200000]
+sameroof-broker token issue <resident_id> --credential <alias[,alias]> --models <id[,id]> [--purposes interactive,heartbeat] [--ttl 12h] [--max-requests 100] [--max-tokens 200000] [--replace]
 sameroof-broker token list
 sameroof-broker token revoke|quarantine|activate <token_id>
 sameroof-broker ledger [--limit 50]
@@ -72,8 +73,10 @@ async function run(argv = process.argv.slice(2)) {
       baseUrl: required(f['base-url'], '缺 --base-url。'),
       apiKey: readSecret(f),
       authHeader: f['auth-header'],
-      authScheme: f['auth-scheme']
+      authScheme: f['auth-scheme'],
+      pathStyle: f['path-style'] || 'auto'
     }));
+    if (p[0] === 'cred' && p[1] === 'path-style') return print(store.setCredentialPathStyle(required(p[2], '缺凭证别名。'), required(p[3], '缺 path style。')));
     if (p[0] === 'cred' && p[1] === 'list') return print(store.listCredentials());
     if (p[0] === 'cred' && p[1] === 'rotate') return print(store.rotateCredential(required(p[2], '缺凭证别名。'), readSecret(f)));
     if (p[0] === 'cred' && p[1] === 'revoke') return print(store.revokeCredential(required(p[2], '缺凭证别名。')));
@@ -86,7 +89,8 @@ async function run(argv = process.argv.slice(2)) {
       ttlSeconds: seconds(f.ttl),
       maxRequests: f['max-requests'] === undefined ? null : Number(f['max-requests']),
       maxTokens: f['max-tokens'] === undefined ? null : Number(f['max-tokens']),
-      reason: f.reason || null
+      reason: f.reason || null,
+      replaceFile: f.replace === true
     }));
     if (p[0] === 'token' && p[1] === 'list') return print(store.listTokens());
     if (p[0] === 'token' && p[1] === 'revoke') return print(store.revokeToken(required(p[2], '缺 token id。')));

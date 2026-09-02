@@ -9,6 +9,7 @@
 - token 文件：`~/.sameroof/run/tokens/<resident_id>`，权限 `0600`
 - API：`GET /v1/models`、`POST /v1/chat/completions`
 - 可选头：`x-sameroof-purpose`、`x-sameroof-credential`
+- 上游路径：`openai` 保留住户 `/v1`；`bare` 表示 base_url 已是 provider API 根并剥离 `/v1`；旧记录 `auto` 对末尾 `/v数字` 兼容止血
 - 错误：401 无效/过期；403 allowlist/用途/quarantine；429 配额/限流；502 上游
 - 记账：请求前预留、请求后按 provider usage 结算；不记录 prompt/response
 - 第一版明确不支持 `stream: true`，避免假装对流式 usage 做了可靠结算
@@ -22,10 +23,12 @@
 ```bash
 sameroof-broker cred add shared-cheap \
   --provider zhipu \
-  --base-url https://example.invalid/v1 \
+  --base-url https://open.bigmodel.cn/api/paas/v4 \
+  --path-style bare \
   --key-file /run/secrets/zhipu
 
 sameroof-broker cred list
+sameroof-broker cred path-style shared-cheap bare
 sameroof-broker cred rotate shared-cheap --key-file -
 sameroof-broker cred revoke shared-cheap
 ```
@@ -42,7 +45,7 @@ sameroof-broker token issue resident_researcher_01 \
   --max-tokens 200000
 ```
 
-secret 只在签发时返回一次；数据库只保存 SHA-256 hash。永久吊销由人执行，异常时先 quarantine：
+secret 只在签发时返回一次；数据库只保存 SHA-256 hash。同一住户已有 token 文件时会拒绝覆盖；只有明确加 `--replace` 才会替换文件并吊销被顶掉的旧 token。永久吊销由人执行，异常时先 quarantine：
 
 ```bash
 sameroof-broker token quarantine tok_xxx
