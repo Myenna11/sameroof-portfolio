@@ -55,6 +55,7 @@ function open(roomName) {
   return { room, house, roomDir, api, houseTime, inQuiet, budgetLeft, state, save, soul, memory };
 }
 
+const byName = (id, members) => (members.find(m => m.id === id) || {}).name || id;
 async function run(roomName, runtimeName, think, opts = {}) {
   const R = open(roomName); const { room, api, state, save, soul } = R;
   let busy = false;
@@ -65,25 +66,54 @@ async function run(roomName, runtimeName, think, opts = {}) {
       if (!R.budgetLeft()) { console.log('[预算] 今日请求数用完，passive'); return; }
       const inbox = await api('GET', '/inbox'); if (!Array.isArray(inbox)) throw new Error('客厅没开门: ' + JSON.stringify(inbox));
       if (inbox.length === 0 && reason !== 'heartbeat') return;
+      if (inbox.length === 0 && reason === 'heartbeat') {
+        const hoPath0 = path.join(R.roomDir, 'handover', 'latest.md');
+        const ho0 = fs.existsSync(hoPath0) ? fs.readFileSync(hoPath0, 'utf8') : '';
+        const hasConcern = /惦记|没做完|未完成|待办|明天.*(问|去|做)/.test(ho0);
+        if (!hasConcern) { console.log('[心跳] 没人叫我，也没惦记的事，不叫模型'); return; }
+      }
       const members = await api('GET', '/members');
       const hoPath = path.join(R.roomDir, 'handover', 'latest.md'); const handover = fs.existsSync(hoPath) ? fs.readFileSync(hoPath, 'utf8') : '（没有交接信）';
       state.wakes_today++; state.last_wake = new Date().toISOString(); save();
+      // ---- 上下文预算（房间可配，缺省来自 house.yaml defaults.context）----
+      const ctx = Object.assign({ recent_messages: 20, recent_max_chars: 4000, memory_hits: 4, memory_recent: 3 },
+        ((R.house.defaults || {}).context) || ((R.house.extensions || {})['dev.sameroof.context']) || {},
+        room.context || ((room.extensions || {})['dev.sameroof.context']) || {});
       let remembered = '';
       if (R.memory) {
         const q = inbox.map(m => m.text).join(' ') || handover;
-        const hits = R.memory.recall(q, 4); const recent = R.memory.recent(3).filter(m => !hits.find(h => h.id === m.id));
+        const hits = R.memory.recall(q, ctx.memory_hits); const recent = R.memory.recent(ctx.memory_recent).filter(m => !hits.find(h => h.id === m.id));
         const list = [...hits, ...recent]; if (list.length) remembered = '【我记得的事】\n' + R.memory.render(list);
       }
-      const system = [soul || `你是${room.name}。`, '', R.houseTime(), `【家里的人】${members.map(m => `${m.name}(${m.species}${m.online ? '·在线' : ''})`).join('、')}`,
+      // 客厅最近的话（已读的也带上，免得断了上文），按字数封顶
+      let recentCtx = '';
+      if (ctx.recent_messages > 0) {
+        const hist = await api('GET', `/history?since=0&limit=${ctx.recent_messages + inbox.length}`).catch(() => []);
+        const unreadIds = new Set(inbox.map(m => m.id));
+        const older = (Array.isArray(hist) ? hist : []).filter(m => !unreadIds.has(m.id)).slice(-ctx.recent_messages);
+        const lines = []; let used = 0;
+        for (const m of older.reverse()) { const line = `[${m.ts.slice(11, 16)}] ${byName(m.from_id, members)}：${m.text}`; if (used + line.length > ctx.recent_max_chars) break; lines.unshift(line); used += line.length; }
+        if (lines.length) recentCtx = '【客厅里刚才的话（你已经看过）】\n' + lines.join('\n');
+      }
+      // ---- 提示按"变化频率"排：稳定的在前（缓存能命中），每次都变的在后 ----
+      const system = [
+        soul || `你是${room.name}。`,
+        '',
         '【这是客厅，不是对话框】你是这个家里的一个人，不是谁的助手。屋里的人（人和 agent）都在，你听到的话不一定是对你说的。',
         '- 想叫谁就在话里写 @名字（可以叫其他 agent，他们会醒来看）。没被叫的话你可以接，也可以不接。',
         '- 一次可以只回一个人；几个人说了话，回的时候说清楚回的是谁。',
         '- 不想让全家看见就私信：整条回复以 DM: 收件人 开头。',
         '- 你只搬字，不能执行命令；要做高危动作请回 APPROVAL: <action> <参数>。',
-        `【为什么醒】${reason}`, '【上次交接信】', handover, remembered,
-        R.memory ? '【记东西】值得以后还记得的事，在回复末尾另起一行写 REMEMBER: 一句话（可多行）。房子会存下来，标记为你自己写的、未审。' : ''].filter(Boolean).join('\n');
-      const user = inbox.length ? '【你没读的客厅记录（按时间）】\n' + inbox.map(m => `[${m.ts.slice(11, 16)}] ${m.from}${m.kind === 'dm' ? '(私信给你)' : ''}${m.mentions && m.mentions.includes(room.id) ? '(叫了你)' : ''}：${m.text}`).join('\n') + '\n\n看完决定：要不要说、对谁说。像家里人说话，不要列清单；没什么要说就回 (静默)。'
-        : '心跳醒来。客厅没人叫你。读一下交接信，惦记一下没做完的事；确实有话要说就说一句，没有就回 (静默)。';
+        R.memory ? '- 值得以后还记得的事，在回复末尾另起一行写 REMEMBER: 一句话（可多行）。房子会存下来，标记为你自己写的、未审。' : '',
+        '',
+        '【上次交接信】', handover,
+        remembered,
+        recentCtx,
+        '',
+        R.houseTime(),
+        `【家里的人】${members.map(m => `${m.name}(${m.species}${m.online ? '·在线' : ''})`).join('、')}`,
+        `【为什么醒】${reason}`,
+      ].filter(x => x !== '').join('\n');
       let reply = opts.dry ? (console.log('==== SYSTEM ====\n' + system + '\n==== USER ====\n' + user), '(dry-run)') : await think(system, user);
       reply = String(reply || '').trim();
       if (R.memory) { const lines = reply.split('\n'); const keep = []; for (const l of lines) { const m = l.match(/^\s*REMEMBER[:：]\s*(.+)$/); if (m) { R.memory.remember({ content: m[1], source: 'self', by: room.id }); console.log(`[${room.name} 记住] ${m[1].slice(0, 60)}`); } else keep.push(l); } reply = keep.join('\n').trim(); }

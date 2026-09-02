@@ -146,6 +146,19 @@ heartbeat:
 
 **quiet_hours** 按 schedule.timezone 解析，支持跨午夜；人的紧急唤醒不受限。
 
+### 上下文区（可选，控开销）
+
+```yaml
+context:
+  recent_messages: 20      # 醒来时带客厅最近几条（含已读），0 = 只看未读
+  recent_max_chars: 4000   # 这部分字数封顶
+  memory_hits: 4           # 按话题召回几条记忆
+  memory_recent: 3         # 再带最近几条
+```
+
+缺省来自 house.yaml `defaults.context`。**提示按变化频率排列**：SOUL 与规矩在前（稳定，缓存可命中），
+交接信/记忆/最近对话居中，时间/在线状态/未读在最后（每次都变）。空心跳（无未读、交接信无惦记）不调用模型。
+
 ### 扩展区（可选）
 
 ```yaml
