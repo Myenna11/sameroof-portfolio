@@ -180,7 +180,7 @@ const server = http.createServer(async (req, res) => {
 // 过期审批 → deny（fail closed）
 setInterval(() => db.prepare("UPDATE approvals SET status='expired' WHERE status='pending' AND expires_ts<?").run(new Date().toISOString()), 60000);
 
-const PORT = Number(process.env.SAMEROOF_PORT || 8787);
+const PORT = Number(process.env.SAMEROOF_PORT || 8790);
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`同屋·客厅 开门 http://127.0.0.1:${PORT}  住户：${residents.map(r => r.name).join('、')}`);
   console.log(`token 在 ${tokenFile}`);
