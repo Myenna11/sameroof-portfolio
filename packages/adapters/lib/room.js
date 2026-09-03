@@ -76,6 +76,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
       if (!R.budgetLeft()) { console.log('[预算] 今日请求数用完，passive'); return; }
       const inbox = await api('GET', '/inbox'); if (!Array.isArray(inbox)) throw new Error('客厅没开门: ' + JSON.stringify(inbox));
       if (inbox.length === 0 && reason !== 'heartbeat') return;
+      if (reason !== 'heartbeat' && !inbox.some(m => m.kind === 'dm' || (m.mentions && m.mentions.includes(room.id)))) { console.log('[醒] 有新话但没叫我，留到心跳再看'); return; }
       if (inbox.length === 0 && reason === 'heartbeat') {
         if (!R.keys.concerns().length) { console.log('[心跳] 没人叫我，惦记本也是空的，不叫模型'); return; }
       }
@@ -99,8 +100,8 @@ async function run(roomName, runtimeName, think, opts = {}) {
         const unreadIds = new Set(inbox.map(m => m.id));
         const older = (Array.isArray(hist) ? hist : []).filter(m => !unreadIds.has(m.id)).slice(-ctx.recent_messages);
         const lines = []; let used = 0;
-        for (const m of older.reverse()) { const line = `[${m.ts.slice(11, 16)}] ${byName(m.from_id, members)}：${m.text}`; if (used + line.length > ctx.recent_max_chars) break; lines.unshift(line); used += line.length; }
-        if (lines.length) recentCtx = '【客厅里刚才的话（你已经看过）】\n' + lines.join('\n');
+        for (const m of older.reverse()) { const line = `[${m.ts.slice(11, 16)}] ${byName(m.from_id, members)}${m.from_id === room.id ? '（我自己）' : ''}：${m.text}`; if (used + line.length > ctx.recent_max_chars) break; lines.unshift(line); used += line.length; }
+        if (lines.length) recentCtx = '【客厅里刚才的话（你已经看过、也可能已经回过——别再回一遍）】\n' + lines.join('\n');
       }
       // ---- 提示按"变化频率"排：稳定的在前（缓存能命中），每次都变的在后 ----
       const system = [
@@ -125,7 +126,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
         `【家里的人】${members.map(m => `${m.name}(${m.species}${m.online ? '·在线' : ''})`).join('、')}`,
         `【为什么醒】${reason}`,
       ].filter(x => x !== '').join('\n');
-      const user = inbox.length ? '【你没读的客厅记录（按时间）】\n' + inbox.map(m => `[${m.ts.slice(11, 16)}] ${m.from}${m.kind === 'dm' ? '(私信给你)' : ''}${m.mentions && m.mentions.includes(room.id) ? '(叫了你)' : ''}：${m.text}`).join('\n') + '\n\n看完决定：要不要说、对谁说。像家里人说话，不要列清单；没什么要说就回 (静默)。'
+      const user = inbox.length ? '【你没读的客厅记录（按时间）】\n' + inbox.map(m => `[${m.ts.slice(11, 16)}] ${m.from}${m.kind === 'dm' ? '(私信给你)' : ''}${m.mentions && m.mentions.includes(room.id) ? '(叫了你)' : ''}：${m.text}`).join('\n') + '\n\n看完决定：要不要说、对谁说。只回新的；上面"刚才的话"里已经有人回过的、你自己说过的，不要再回一遍。像家里人说话，不要列清单；没什么要说就回 (静默)。'
         : '心跳醒来。客厅没人叫你，但交接信里有惦记的事。要是确实该对家里人说一句就说，没有就回 (静默)。';
       if (opts.dry) { console.log('==== SYSTEM ====\n' + system + '\n==== USER ====\n' + user); console.log('[dry-run] 只看不说，不发客厅、不标已读、不写记忆'); return; }
       let reply = await think(system, user);
