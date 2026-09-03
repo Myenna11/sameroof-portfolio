@@ -31,6 +31,7 @@ defaults:
     mode: minimal
     interval: adaptive
     budget: {per_day: {requests: 12, tokens: 50000}, on_exceeded: passive}
+  context: {recent_messages: 20, recent_max_chars: 4000, memory_hits: 4, memory_recent: 3}
   approve_timeout: 30m
   permissions:
     core.exec: approve
@@ -52,16 +53,45 @@ test('合法 agent 与 human 房间通过', () => {
 id: resident_researcher_01
 name: 检索员
 model: {provider: zhipu, id: glm-test, auth: {mode: broker, credential: shared-cheap}}
+context: {recent_messages: 8, memory_hits: 2}
+avatar: {emoji: "🌊"}
 `,
       维护者: `schema_version: 1
 id: resident_operator_01
 name: 维护者
 species: human
 notify: {channel: push}
+avatar: {emoji: "🦉"}
 `
     }
   });
   assert.deepEqual(validateHouse(dir), []);
+});
+
+test('context 有明确整数边界且不接受拼错字段', () => {
+  const dir = makeHouse({ house: validHouse, rooms: {
+    a: `schema_version: 1
+id: resident_agent_01
+name: 小甲
+model: {provider: zhipu, id: one, auth: {mode: broker, credential: shared-cheap}}
+context: {recent_messages: -1, memory_hit: 3}
+`
+  }});
+  const issues = validateHouse(dir);
+  assert.ok(issues.some(x => x.code === 'ROOM-SCHEMA-001'));
+  assert.ok(issues.some(x => x.code === 'ROOM-UNKNOWN-001'));
+});
+
+test('avatar image 只能指向本房间内已存在的相对文件', () => {
+  const dir = makeHouse({ house: validHouse, rooms: {
+    a: `schema_version: 1
+id: resident_agent_01
+name: 小甲
+model: {provider: zhipu, id: one, auth: {mode: broker, credential: shared-cheap}}
+avatar: {image: missing.png}
+`
+  }});
+  assert.ok(validateHouse(dir).some(x => x.code === 'ROOM-AVATAR-IMAGE-001'));
 });
 
 test('human 房间不能带 model，并给稳定人话错误码', () => {

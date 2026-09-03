@@ -18,12 +18,16 @@
     },
     "defaults": {
       "type": "object",
-      "required": ["runtime", "plugins", "heartbeat", "approve_timeout", "permissions"],
+      "required": ["runtime", "plugins", "heartbeat", "context", "approve_timeout", "permissions"],
       "additionalProperties": false,
       "properties": {
         "runtime": { "type": "string", "minLength": 1 },
         "plugins": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
         "heartbeat": { "$ref": "https://sameroof.local/schema/room-v1.json#/$defs/heartbeat" },
+        "context": {
+          "$ref": "https://sameroof.local/schema/room-v1.json#/$defs/context",
+          "required": ["recent_messages", "recent_max_chars", "memory_hits", "memory_recent"]
+        },
         "approve_timeout": { "type": "string", "pattern": "^[1-9][0-9]*(?:s|m|h|d)$" },
         "permissions": {
           "type": "object",

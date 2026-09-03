@@ -47,6 +47,7 @@ id 只给机器看，人永远用 name。目录名不是安全边界。
 name: 规划员                 # 必填。展示名 + @寻址
 aliases: [planner, 老公]      # 可选
 species: agent             # agent | human。默认 agent。人也是住户
+avatar: {emoji: "🌙"}      # 可选；emoji 或本房间内的相对 image 路径，至少一个
 ```
 
 **名字规范化（客厅统一做，适配器不许各自解释）：** Unicode NFKC → 大小写折叠 → 全半角统一 → 去首尾/连续空白。
@@ -54,6 +55,9 @@ species: agent             # agent | human。默认 agent。人也是住户
 且任意两个不得互为前缀。冲突时**启动拒绝**，不静默。
 
 **human 房间：** 无 model、无 heartbeat、无 plugins；有 `notify`（推送到哪）。其余同构。
+
+`avatar.image` 不能是 URL、绝对路径、`..` 跳出路径或 symlink，且文件必须真实存在于这间房内；
+否则房间拒绝启动。头像是展示信息，不参与身份、权限或 @ 寻址。
 
 ### 模型区（species: agent 时必填）
 
@@ -172,6 +176,8 @@ context:
 
 缺省来自 house.yaml `defaults.context`。**提示按变化频率排列**：SOUL 与规矩在前（稳定，缓存可命中），
 交接信/记忆/最近对话居中，时间/在线状态/未读在最后（每次都变）。空心跳（无未读、交接信无惦记）不调用模型。
+全屋默认必须写齐四项；房间覆盖可以只写要改的项。四项只接受非负整数，并有防止误配置撑爆上下文的上限：
+`recent_messages ≤ 500`、`recent_max_chars ≤ 200000`、`memory_hits ≤ 100`、`memory_recent ≤ 100`。
 
 ### 扩展区（可选）
 

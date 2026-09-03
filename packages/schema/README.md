@@ -22,6 +22,10 @@ validateHouse('/path/to/house');
 
 校验器不修改文件、不填充默认值。默认值仍由 `house.yaml` 解释层提供。
 
+核心 `context` 合同位于 `house.defaults.context`，房间根级 `context` 可局部覆盖；扩展字段不再承担上下文预算。
+核心 `avatar` 位于房间根级，支持 `emoji` 与房间内相对 `image`。image 的越界路径、URL、symlink 或不存在文件会以
+`ROOM-AVATAR-IMAGE-001` 拒绝。
+
 ## 运行测试
 
 ```bash

@@ -119,6 +119,13 @@ function localRoomIssues(parsed, options = {}) {
       out.push(issue(parsed.file, lineFor(parsed, '/extensions', namespace), 'ROOM-EXT-001', '扩展“' + namespace + '”没有已安装插件声明，启动拒绝。'));
     }
   }
+  if (room.avatar?.image) {
+    const roomDir = path.dirname(parsed.file);
+    const image = path.resolve(roomDir, room.avatar.image);
+    if (!image.startsWith(roomDir + path.sep) || !fs.existsSync(image) || !fs.lstatSync(image).isFile()) {
+      out.push(issue(parsed.file, lineFor(parsed, '/avatar', 'image'), 'ROOM-AVATAR-IMAGE-001', '头像 image 必须指向本房间内已存在的文件。'));
+    }
+  }
   return out;
 }
 
