@@ -29,7 +29,7 @@ const $=s=>document.querySelector(s),log=$('#log');
 const ppair=()=>{$('#pair').hidden=false;$('#app').hidden=true};
 $('#pgo').onclick=()=>{let l=$('#plink').value.trim();if(l){const u=new URL(l.replace('sameroof://','http://'));api=u.searchParams.get('api');tok=u.searchParams.get('token')}else{api=$('#papi').value.trim();tok=$('#ptok').value.trim()}if(!api||!tok)return alert('地址和token都要');W('api',api);W('token',tok);location.reload()};
 const req=(m,p,b)=>fetch(api+p,{method:m,headers:{authorization:'Bearer '+tok,'content-type':'application/json'},body:b?JSON.stringify(b):undefined}).then(async r=>{const data=await r.json().catch(()=>({error:{message:'客厅返回了无法识别的响应'}}));if(r.status===401){localStorage.removeItem('token');ppair()}if(!r.ok)throw new Error(data.error&&data.error.message||('请求失败 '+r.status));return data});
-const name=id=>(members.find(x=>x.id===id)||{}).name||id;
+const name=id=>{const m=members.find(x=>x.id===id)||{};return ((m.avatar&&m.avatar.emoji)?m.avatar.emoji+' ':'')+(m.name||id)};
 const fmt=ts=>new Date(ts).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
 function show(m){if(m.seq&&m.seq<=lastSeq)return;if(m.seq)lastSeq=m.seq;const d=document.createElement('div');
  if(m.kind==='system'){d.className='m sys';d.textContent=String(m.text||'');let meta=null;try{meta=m.meta&&(typeof m.meta==='string'?JSON.parse(m.meta):m.meta)}catch{}
