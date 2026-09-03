@@ -76,3 +76,30 @@ const cmds = {
   },
 };
 module.exports = { cmds };
+
+// ---- 备份与迁移（行李随迁）----
+Object.assign(cmds, {
+  /** sameroof backup [--out 目录] [--plain]：rooms/ + state/ + 客厅 token 打包；默认 gpg 对称加密（口令从 stdin 读） */
+  backup(args, opts) {
+    const root = h(opts); const out = path.resolve(opts.out || path.join(root, 'backups')); fs.mkdirSync(out, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 16);
+    const tar = path.join(out, `sameroof-${stamp}.tar`);
+    const items = ['rooms', 'house.yaml', 'house.lock', 'state'].filter(x => fs.existsSync(path.join(root, x)));
+    execSync(`tar -cf "${tar}" -C "${root}" ${items.map(x => `"${x}"`).join(' ')}`, { stdio: 'inherit' });
+    const tk = path.join(process.env.HOME || '/root', '.sameroof', 'run', 'living-room-tokens.json');
+    if (fs.existsSync(tk)) execSync(`tar -rf "${tar}" -C "${path.dirname(tk)}" living-room-tokens.json`);
+    if (opts.plain) { console.log(`明文备份：${tar}（高敏感！只在你自己的盘上）`); return; }
+    try { execSync(`gpg --batch --yes --symmetric --cipher-algo AES256 --passphrase-fd 0 -o "${tar}.gpg" "${tar}"`, { stdio: ['inherit', 'inherit', 'inherit'] }); }
+    catch (e) { fs.unlinkSync(tar); throw new Error('gpg 加密失败（没装 gpg？或口令没给）。想要明文加 --plain'); }
+    fs.unlinkSync(tar); console.log(`加密备份：${tar}.gpg（口令别丢，丢了全家行李打不开）`);
+  },
+  /** sameroof restore <文件.tar|.tar.gpg> [--into 目录]：解回一个空目录，不覆盖正在住的家 */
+  restore(args, opts) {
+    const src = args[0]; if (!src || !fs.existsSync(src)) throw new Error('用法：sameroof restore <备份文件> [--into 目录]');
+    const into = path.resolve(opts.into || path.join(process.cwd(), 'sameroof-restored')); if (fs.existsSync(into) && fs.readdirSync(into).length) throw new Error(`${into} 不是空目录，不往住着人的家里倒行李`);
+    fs.mkdirSync(into, { recursive: true }); let tar = src;
+    if (src.endsWith('.gpg')) { tar = path.join(into, 'restore.tar'); execSync(`gpg --batch --yes --passphrase-fd 0 -o "${tar}" -d "${src}"`, { stdio: ['inherit', 'inherit', 'inherit'] }); }
+    execSync(`tar -xf "${tar}" -C "${into}"`, { stdio: 'inherit' }); if (tar !== src) fs.unlinkSync(tar);
+    console.log(`已解到 ${into}。接着：把 rooms/ 挪进新家、living-room-tokens.json 放回 ~/.sameroof/run/、sameroof check、sameroof lock。`);
+  },
+});

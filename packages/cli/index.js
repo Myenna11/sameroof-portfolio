@@ -11,6 +11,8 @@ function usage() {
   console.log('  explain <名字>                                            每个生效值来自哪');
   console.log('  pair <名字> [--api 地址] [--rotate]                        手机配对链接');
   console.log('  status                                                    服务与锁');
+  console.log('  backup [--out 目录] [--plain]                              行李打包（默认 gpg 加密，口令从 stdin）');
+  console.log('  restore <文件> [--into 目录]                               解到空目录');
   console.log('  lock [--check]                                            生成/校验 house.lock');
 }
 function parseOpts(argv) { const args = [], opts = {}; for (let i = 0; i < argv.length; i++) { const a = argv[i]; if (a.startsWith('--')) { const k = a.slice(2); if (argv[i + 1] && !argv[i + 1].startsWith('--')) opts[k] = argv[++i]; else opts[k] = true; } else args.push(a); } return { args, opts }; }
