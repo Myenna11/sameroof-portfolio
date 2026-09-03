@@ -12,3 +12,4 @@ rooms/*/memory/
 rooms/*/concerns*.md
 rooms/*/notes.md
 backups/
+state/runs/

@@ -13,7 +13,7 @@ function think(system, user) {
   const body = JSON.stringify({ model: R.room.model.id, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], stream: false, max_tokens: 4000, thinking: { type: 'enabled', effort: 'low' } });
   return new Promise((resolve, reject) => {
     const req = http.request({ socketPath: SOCK, path: '/v1/chat/completions', method: 'POST', headers: { authorization: `Bearer ${brokerToken}`, 'content-type': 'application/json', 'x-sameroof-purpose': 'interactive', 'x-sameroof-credential': R.room.model.auth.credential } }, res => {
-      let s = ''; res.on('data', c => s += c); res.on('end', () => { try { const j = JSON.parse(s); if (res.statusCode !== 200) return reject(new Error(`broker ${res.statusCode}: ${s.slice(0, 200)}`)); const ch = j.choices[0]; fs.writeSync(2, `[broker] finish=${ch.finish_reason} usage=${JSON.stringify(j.usage || {})} content_len=${(ch.message.content || '').length} reasoning_len=${(ch.message.reasoning_content || '').length}\n`); resolve(ch.message.content); } catch (e) { reject(new Error('broker 回了怪东西: ' + s.slice(0, 200))); } });
+      let s = ''; res.on('data', c => s += c); res.on('end', () => { try { const j = JSON.parse(s); if (res.statusCode !== 200) return reject(new Error(`broker ${res.statusCode}: ${s.slice(0, 200)}`)); const ch = j.choices[0]; fs.writeSync(2, `[broker] finish=${ch.finish_reason} usage=${JSON.stringify(j.usage || {})} content_len=${(ch.message.content || '').length} reasoning_len=${(ch.message.reasoning_content || '').length}\n`); R.lastUsage = j.usage || null; resolve(ch.message.content); } catch (e) { reject(new Error('broker 回了怪东西: ' + s.slice(0, 200))); } });
     }); req.on('error', reject); req.write(body); req.end();
   });
 }

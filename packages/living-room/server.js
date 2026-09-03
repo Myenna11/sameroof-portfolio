@@ -13,6 +13,7 @@ const Database = require('better-sqlite3');
 const { TokenStore } = require('./tokens');
 const { SlidingWindowLimiter, AuthFailureLimiter } = require('./rate-limit');
 const { PushClient, PushClientError } = require('./push-client');
+const roomsApi = require('./rooms-api');
 
 const RESERVED = new Set(['system', 'all', 'everyone', 'house']);
 const MESSAGE_MAX = 8000;
@@ -149,6 +150,8 @@ function createLivingRoom(options = {}) {
 
   const residents = loadResidents(houseDir);
   const byId = new Map(residents.map(resident => [resident.id, resident]));
+  const houseCfg = yaml.load(fs.readFileSync(path.join(houseDir, 'house.yaml'), 'utf8')) || {};
+  const roomsHandle = roomsApi.mount({ houseDir, residents, byId, house: houseCfg, writeJson, HttpError });
   const byName = new Map();
   for (const resident of residents) for (const name of resident._names) byName.set(name, resident);
 
@@ -172,7 +175,8 @@ function createLivingRoom(options = {}) {
     'status TEXT, decided_by TEXT, created_ts TEXT, expires_ts TEXT, used INTEGER DEFAULT 0);',
     'CREATE TABLE IF NOT EXISTS push_subscriptions(',
     'endpoint TEXT PRIMARY KEY, resident_id TEXT NOT NULL, subscription TEXT NOT NULL, created_ts TEXT NOT NULL, updated_ts TEXT NOT NULL);',
-    'CREATE INDEX IF NOT EXISTS push_subscriptions_resident ON push_subscriptions(resident_id);'
+    'CREATE INDEX IF NOT EXISTS push_subscriptions_resident ON push_subscriptions(resident_id);',
+    'CREATE TABLE IF NOT EXISTS activity(seq INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, kind TEXT NOT NULL, actor_id TEXT, text TEXT, meta TEXT);',
   ].join('\n'));
 
   let seq = db.prepare('SELECT MAX(seq) AS value FROM messages').get().value || 0;
@@ -181,12 +185,24 @@ function createLivingRoom(options = {}) {
   const ackDelivery = db.prepare("UPDATE deliveries SET status='read', ts=? WHERE message_id=? AND resident_id=? AND status!='read'");
   const unread = db.prepare("SELECT m.* FROM deliveries d JOIN messages m ON m.id=d.message_id WHERE d.resident_id=? AND d.status!='read' ORDER BY m.seq");
   const history = db.prepare("SELECT * FROM messages WHERE kind!='dm' AND seq>? ORDER BY seq LIMIT ?");
+  const historyBefore = db.prepare("SELECT * FROM messages WHERE kind!='dm' AND seq<? ORDER BY seq DESC LIMIT ?");
+  const dmHistory = db.prepare("SELECT * FROM messages WHERE kind='dm' AND ((from_id=? AND to_id=?) OR (from_id=? AND to_id=?)) AND seq<? ORDER BY seq DESC LIMIT ?");
+  const insActivity = db.prepare('INSERT INTO activity(ts,kind,actor_id,text,meta) VALUES(?,?,?,?,?)');
+  const activityBefore = db.prepare('SELECT * FROM activity WHERE seq<? ORDER BY seq DESC LIMIT ?');
+  const ACTIVITY_KINDS = new Set(['wake', 'sleep', 'model_call', 'config_change', 'approval_request', 'approval_result', 'error', 'thread_update', 'note']);
   const pushForResident = db.prepare('SELECT endpoint,subscription FROM push_subscriptions WHERE resident_id=?');
   const upsertPush = db.prepare(`INSERT INTO push_subscriptions(endpoint,resident_id,subscription,created_ts,updated_ts) VALUES(?,?,?,?,?)
     ON CONFLICT(endpoint) DO UPDATE SET resident_id=excluded.resident_id,subscription=excluded.subscription,updated_ts=excluded.updated_ts`);
   const deletePush = db.prepare('DELETE FROM push_subscriptions WHERE endpoint=? AND resident_id=?');
 
   const listeners = new Set();
+  function emitActivity({ kind, actor_id, text, meta }) {          // 房子的呼吸：事件流，进 activity 表并推给所有 SSE
+    const ts = new Date().toISOString();
+    const info = insActivity.run(ts, kind, actor_id || null, text || '', meta ? JSON.stringify(meta) : null);
+    const ev = { type: 'activity', seq: info.lastInsertRowid, ts, kind, actor_id, text, meta: meta || null };
+    for (const listener of listeners) { try { listener.send(ev); } catch {} }
+    return ev;
+  }
   const presence = new Map();
   const sseByResident = new Map();
   const sseByIp = new Map();
@@ -388,6 +404,32 @@ function createLivingRoom(options = {}) {
         return;
       }
 
+      if (url.pathname.startsWith('/rooms/')) { if (await roomsHandle(req, url, me, res)) return; }
+
+      if (req.method === 'POST' && url.pathname === '/activity') {           // 住户（适配器）报自己的事件；actor 只认 token
+        const body = await readJson(req);
+        if (!ACTIVITY_KINDS.has(body.kind)) throw new HttpError(400, 'ACTIVITY-KIND-INVALID', '不认识这种事件。');
+        return writeJson(res, 200, emitActivity({ kind: body.kind, actor_id: me.id, text: String(body.text || '').slice(0, 500), meta: body.meta && typeof body.meta === 'object' ? body.meta : null }));
+      }
+      if (req.method === 'GET' && url.pathname === '/activity') {
+        const before = positiveInt(url.searchParams.get('before'), Number.MAX_SAFE_INTEGER, 1, Number.MAX_SAFE_INTEGER, 'ACTIVITY-BEFORE-INVALID');
+        const limit = positiveInt(url.searchParams.get('limit'), 50, 1, 200, 'ACTIVITY-LIMIT-INVALID');
+        const kind = url.searchParams.get('kind');
+        return writeJson(res, 200, activityBefore.all(before, limit).filter(r => !kind || r.kind === kind).map(r => ({ ...r, meta: r.meta ? JSON.parse(r.meta) : null, actor: byId.get(r.actor_id)?.name })));
+      }
+      if (req.method === 'GET' && url.pathname === '/dm/history') {
+        const withName = url.searchParams.get('with') || ''; const other = byId.get(withName) || byName.get(withName.normalize('NFKC').toLowerCase());
+        if (!other) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', '没这个人。');
+        const before = positiveInt(url.searchParams.get('before'), Number.MAX_SAFE_INTEGER, 1, Number.MAX_SAFE_INTEGER, 'HISTORY-BEFORE-INVALID');
+        const limit = positiveInt(url.searchParams.get('limit'), 50, 1, 200, 'HISTORY-LIMIT-INVALID');
+        return writeJson(res, 200, dmHistory.all(me.id, other.id, other.id, me.id, before, limit).reverse().map(row => ({ ...row, mentions: JSON.parse(row.mentions) })));
+      }
+      if (req.method === 'GET' && url.pathname === '/history' && url.searchParams.has('before')) {
+        const before = positiveInt(url.searchParams.get('before'), Number.MAX_SAFE_INTEGER, 1, Number.MAX_SAFE_INTEGER, 'HISTORY-BEFORE-INVALID');
+        const limit = positiveInt(url.searchParams.get('limit'), 50, 1, 200, 'HISTORY-LIMIT-INVALID');
+        return writeJson(res, 200, historyBefore.all(before, limit).reverse().map(row => ({ ...row, mentions: JSON.parse(row.mentions) })));
+      }
+
       if (req.method === 'GET' && url.pathname === '/history') {
         const since = positiveInt(url.searchParams.get('since'), 0, 0, Number.MAX_SAFE_INTEGER, 'HISTORY-SINCE-INVALID');
         const limit = positiveInt(url.searchParams.get('limit'), 50, 1, 200, 'HISTORY-LIMIT-INVALID');
@@ -451,6 +493,7 @@ function createLivingRoom(options = {}) {
         db.prepare('INSERT INTO approvals(id,resident_id,action,params_digest,params,status,created_ts,expires_ts) VALUES(?,?,?,?,?,?,?,?)')
           .run(id, me.id, body.action, digest, paramsJson, 'pending', new Date(now).toISOString(), new Date(now + ttl * 1000).toISOString());
         post({ kind: 'system', from_id: me.id, text: me.name + ' 想 ' + body.action + '，等审批。', meta: { approval_id: id, action: body.action, params_digest: digest } });
+        emitActivity({ kind: 'approval_request', actor_id: me.id, text: me.name + ' 想 ' + body.action + '，等审批。', meta: { approval_id: id, action: body.action, waiting_on: 'human' } });
         return writeJson(res, 200, { approval_id: id, params_digest: digest, expires_in: ttl });
       }
 
@@ -466,6 +509,7 @@ function createLivingRoom(options = {}) {
         const decision = body.decision === 'allow' ? 'allowed' : 'denied';
         db.prepare('UPDATE approvals SET status=?, decided_by=? WHERE id=?').run(decision, me.id, approval.id);
         post({ kind: 'system', from_id: me.id, text: me.name + (decision === 'allowed' ? '同意' : '拒绝') + '了 ' + (byId.get(approval.resident_id)?.name || approval.resident_id) + ' 的 ' + approval.action + '。', meta: { approval_id: approval.id, decision } });
+        emitActivity({ kind: 'approval_result', actor_id: me.id, text: me.name + (decision === 'allowed' ? '同意' : '拒绝') + '了 ' + (byId.get(approval.resident_id)?.name || approval.resident_id) + ' 的 ' + approval.action + '。', meta: { approval_id: approval.id, decision, resident_id: approval.resident_id } });
         return writeJson(res, 200, { approval_id: approval.id, decision, params_digest: approval.params_digest, expires_at: approval.expires_ts, single_use: true });
       }
 
