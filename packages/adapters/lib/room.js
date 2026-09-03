@@ -116,7 +116,8 @@ async function run(roomName, runtimeName, think, opts = {}) {
       ].filter(x => x !== '').join('\n');
       const user = inbox.length ? '【你没读的客厅记录（按时间）】\n' + inbox.map(m => `[${m.ts.slice(11, 16)}] ${m.from}${m.kind === 'dm' ? '(私信给你)' : ''}${m.mentions && m.mentions.includes(room.id) ? '(叫了你)' : ''}：${m.text}`).join('\n') + '\n\n看完决定：要不要说、对谁说。像家里人说话，不要列清单；没什么要说就回 (静默)。'
         : '心跳醒来。客厅没人叫你，但交接信里有惦记的事。要是确实该对家里人说一句就说，没有就回 (静默)。';
-      let reply = opts.dry ? (console.log('==== SYSTEM ====\n' + system + '\n==== USER ====\n' + user), '(dry-run)') : await think(system, user);
+      if (opts.dry) { console.log('==== SYSTEM ====\n' + system + '\n==== USER ====\n' + user); console.log('[dry-run] 只看不说，不发客厅、不标已读、不写记忆'); return; }
+      let reply = await think(system, user);
       reply = String(reply || '').trim();
       if (R.memory) { const lines = reply.split('\n'); const keep = []; for (const l of lines) { const m = l.match(/^\s*REMEMBER[:：]\s*(.+)$/); if (m) { R.memory.remember({ content: m[1], source: 'self', by: room.id }); console.log(`[${room.name} 记住] ${m[1].slice(0, 60)}`); } else keep.push(l); } reply = keep.join('\n').trim(); }
       if (inbox.length) await api('POST', '/inbox/ack', { ids: inbox.map(m => m.id) });
