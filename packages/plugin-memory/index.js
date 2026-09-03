@@ -18,16 +18,24 @@ function open(roomDir) {
         reviewed: source === 'human', tags, weight: 1, hits: 0 };
       fs.appendFileSync(file, JSON.stringify(rec) + '\n'); return rec;
     },
-    recent(n = 5) { return load().slice(-n); },
+    recent(n = 5) { return load().filter(m => !m.archived).slice(-n); },
     /** 按 2-gram 重叠召回；命中会加热（写回 hits） */
     recall(query, n = 5) {
       const all = load(); if (!all.length) return [];
-      const q = grams(query); const scored = all.map(m => { const g = grams(m.content); let hit = 0; for (const x of q) if (g.has(x)) hit++; return { m, s: hit / Math.sqrt(g.size + 1) * (0.5 + m.confidence) }; })
+      const q = grams(query); const scored = all.filter(m => !m.archived).map(m => { const g = grams(m.content); let hit = 0; for (const x of q) if (g.has(x)) hit++; return { m, s: hit / Math.sqrt(g.size + 1) * (0.5 + m.confidence) }; })
         .filter(x => x.s > 0.15).sort((a, b) => b.s - a.s).slice(0, n);
       if (scored.length) { const ids = new Set(scored.map(x => x.m.id)); fs.writeFileSync(file, all.map(m => JSON.stringify(ids.has(m.id) ? { ...m, hits: (m.hits || 0) + 1, last_hit: new Date().toISOString() } : m)).join('\n') + '\n'); }
       return scored.map(x => x.m);
     },
-    count() { return load().length; },
+    /** 冷藏：不删，标 archived，召回不再看它 */
+    forget(query) {
+      const all = load(); const q = grams(query); let best = null, bs = 0;
+      for (const m of all) { if (m.archived) continue; const g = grams(m.content); let hit = 0; for (const x of q) if (g.has(x)) hit++; const sc = hit / Math.sqrt(g.size + 1); if (sc > bs) { bs = sc; best = m; } }
+      if (!best || bs < 0.2) return null;
+      fs.writeFileSync(file, all.map(m => JSON.stringify(m.id === best.id ? { ...m, archived: true, archived_at: new Date().toISOString() } : m)).join('\n') + '\n');
+      return best;
+    },
+    count() { return load().filter(m => !m.archived).length; },
     render(list) { return list.map(m => `- (${m.ts.slice(0, 10)}·${m.source}${m.reviewed ? '' : '·未审'}) ${m.content}`).join('\n'); },
   };
 }

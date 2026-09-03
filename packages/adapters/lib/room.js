@@ -50,9 +50,19 @@ function open(roomName) {
     const cap = (((room.heartbeat || {}).budget || {}).per_day) || ((((house.defaults || {}).heartbeat || {}).budget || {}).per_day) || {};
     return !cap.requests || state.wakes_today < cap.requests;
   };
+  // 住户自己房间的钥匙（软装）：惦记本、给自己的备注
+  const concernsPath = path.join(roomDir, 'concerns.md'), notesPath = path.join(roomDir, 'notes.md');
+  const readLines = f => fs.existsSync(f) ? fs.readFileSync(f, 'utf8').split('\n').filter(l => l.trim()) : [];
+  const keys = {
+    concerns: () => readLines(concernsPath),
+    concern: t => { fs.appendFileSync(concernsPath, `- ${t}\n`); },
+    done: t => { const g = s0 => new Set(s0.replace(/^-\s*/, '').split('')); const q = g(t); const lines = readLines(concernsPath); let best = -1, bs = 0; lines.forEach((l, i) => { const w = g(l); let hit = 0; for (const c of q) if (w.has(c)) hit++; const sc = hit / Math.sqrt(w.size + 1); if (sc > bs) { bs = sc; best = i; } }); if (best < 0 || bs < 0.5) return null; const [gone] = lines.splice(best, 1); fs.writeFileSync(concernsPath, lines.map(l => l + '\n').join('')); fs.appendFileSync(path.join(roomDir, 'concerns.done.md'), `- ${new Date().toISOString().slice(0, 10)} ${gone.replace(/^-\s*/, '')}\n`); return gone; },
+    note: t => { fs.appendFileSync(notesPath, `- ${new Date().toISOString().slice(0, 10)} ${t}\n`); },
+    notes: (n = 8) => readLines(notesPath).slice(-n),
+  };
   const plugins = room.plugins || (house.defaults || {}).plugins || [];
   const memory = plugins.includes('memory') ? memoryPlugin.open(roomDir) : null;
-  return { room, house, roomDir, api, houseTime, inQuiet, budgetLeft, state, save, soul, memory };
+  return { room, house, roomDir, api, houseTime, inQuiet, budgetLeft, state, save, soul, memory, keys };
 }
 
 const byName = (id, members) => (members.find(m => m.id === id) || {}).name || id;
@@ -67,10 +77,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
       const inbox = await api('GET', '/inbox'); if (!Array.isArray(inbox)) throw new Error('客厅没开门: ' + JSON.stringify(inbox));
       if (inbox.length === 0 && reason !== 'heartbeat') return;
       if (inbox.length === 0 && reason === 'heartbeat') {
-        const hoPath0 = path.join(R.roomDir, 'handover', 'latest.md');
-        const ho0 = fs.existsSync(hoPath0) ? fs.readFileSync(hoPath0, 'utf8') : '';
-        const hasConcern = /惦记|没做完|未完成|待办|明天.*(问|去|做)/.test(ho0);
-        if (!hasConcern) { console.log('[心跳] 没人叫我，也没惦记的事，不叫模型'); return; }
+        if (!R.keys.concerns().length) { console.log('[心跳] 没人叫我，惦记本也是空的，不叫模型'); return; }
       }
       const members = await api('GET', '/members');
       const hoPath = path.join(R.roomDir, 'handover', 'latest.md'); const handover = fs.existsSync(hoPath) ? fs.readFileSync(hoPath, 'utf8') : '（没有交接信）';
@@ -105,8 +112,11 @@ async function run(roomName, runtimeName, think, opts = {}) {
         '- 不想让全家看见就私信：整条回复以 DM: 收件人 开头。',
         '- 你只搬字，不能执行命令；要做高危动作请回 APPROVAL: <action> <参数>。',
         R.memory ? '- 值得以后还记得的事，在回复末尾另起一行写 REMEMBER: 一句话（可多行）。房子会存下来，标记为你自己写的、未审。' : '',
+        '- 你自己房间的钥匙（同样另起一行）：CONCERN: 一句话 记进惦记本；DONE: 一句话 划掉做完的；NOTE: 一句话 记在自己的小本上；' + (R.memory ? 'FORGET: 一句话 把记忆里对上的那条冷藏（不删）。' : ''),
         '',
         '【上次交接信】', handover,
+        R.keys.concerns().length ? '【我惦记的事】\n' + R.keys.concerns().join('\n') : '',
+        R.keys.notes().length ? '【我自己的小本】\n' + R.keys.notes().join('\n') : '',
         remembered,
         recentCtx,
         '',
@@ -119,7 +129,16 @@ async function run(roomName, runtimeName, think, opts = {}) {
       if (opts.dry) { console.log('==== SYSTEM ====\n' + system + '\n==== USER ====\n' + user); console.log('[dry-run] 只看不说，不发客厅、不标已读、不写记忆'); return; }
       let reply = await think(system, user);
       reply = String(reply || '').trim();
-      if (R.memory) { const lines = reply.split('\n'); const keep = []; for (const l of lines) { const m = l.match(/^\s*REMEMBER[:：]\s*(.+)$/); if (m) { R.memory.remember({ content: m[1], source: 'self', by: room.id }); console.log(`[${room.name} 记住] ${m[1].slice(0, 60)}`); } else keep.push(l); } reply = keep.join('\n').trim(); }
+      { const lines = reply.split('\n'); const keep = [];
+        for (const l of lines) { const m = l.match(/^\s*(REMEMBER|CONCERN|DONE|NOTE|FORGET)[:：]\s*(.+)$/);
+          if (!m) { keep.push(l); continue; } const [, k, t] = m;
+          if (k === 'REMEMBER' && R.memory) { R.memory.remember({ content: t, source: 'self', by: room.id }); console.log(`[${room.name} 记住] ${t.slice(0, 60)}`); }
+          else if (k === 'CONCERN') { R.keys.concern(t); console.log(`[${room.name} 惦记] ${t.slice(0, 60)}`); }
+          else if (k === 'DONE') { const g = R.keys.done(t); console.log(`[${room.name} 划掉] ${g ? g.slice(0, 60) : '（没对上）'}`); }
+          else if (k === 'NOTE') { R.keys.note(t); console.log(`[${room.name} 备注] ${t.slice(0, 60)}`); }
+          else if (k === 'FORGET' && R.memory) { const f = R.memory.forget(t); console.log(`[${room.name} 冷藏] ${f ? f.content.slice(0, 60) : '（没对上）'}`); }
+          else keep.push(l); }
+        reply = keep.join('\n').trim(); }
       if (inbox.length) await api('POST', '/inbox/ack', { ids: inbox.map(m => m.id) });
       if (!reply || reply === '(静默)') { console.log('[静默]'); return; }
       if (reply.startsWith('DM:')) { const m = reply.match(/^DM:\s*(\S+)\s*[:：]?\s*([\s\S]*)$/); if (m) { await api('POST', '/dm', { to: m[1], text: m[2] }); return; } }

@@ -146,6 +146,20 @@ heartbeat:
 
 **quiet_hours** 按 schedule.timezone 解析，支持跨午夜；人的紧急唤醒不受限。
 
+### 住户自己房间的钥匙（软装，不经审批）
+
+回复末尾另起一行，房子替他落盘，不进客厅：
+
+| 指令 | 落在哪 | 意义 |
+|---|---|---|
+| `REMEMBER: …` | memory/ | 自写未审记忆 |
+| `FORGET: …` | memory/（标 archived） | 冷藏不删；删是承重墙 |
+| `CONCERN: …` | concerns.md | 惦记本，醒来看得到；心跳"有没有事"看它 |
+| `DONE: …` | concerns.md → concerns.done.md | 划掉做完的 |
+| `NOTE: …` | notes.md | 给自己的小本，不进召回 |
+
+装修（加插件、提预算、改作息）走审批；承重墙（SOUL 核心、权限上限）不动。
+
 ### 上下文区（可选，控开销）
 
 ```yaml
