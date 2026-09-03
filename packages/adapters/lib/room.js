@@ -130,6 +130,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
       if (opts.dry) { console.log('==== SYSTEM ====\n' + system + '\n==== USER ====\n' + user); console.log('[dry-run] 只看不说，不发客厅、不标已读、不写记忆'); return; }
       let reply = await think(system, user);
       reply = String(reply || '').trim();
+      if (!reply && inbox.some(m => m.mentions && m.mentions.includes(room.id))) { fs.writeSync(2, `[${room.name}] 被叫了却回空，再试一次\n`); reply = String(await think(system, user + '\n\n（上一次你回了空白。被叫了至少应一声。）') || '').trim(); }
       fs.writeSync(2, `[${room.name} 原始回复] ${reply.slice(0, 80).replace(/\n/g, ' ')}\n`);
       { const lines = reply.split('\n'); const keep = [];
         for (const l of lines) { const m = l.match(/^\s*(REMEMBER|CONCERN|DONE|NOTE|FORGET)[:：]\s*(.+)$/);
