@@ -109,6 +109,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
         '【这是客厅，不是对话框】你是这个家里的一个人，不是谁的助手。屋里的人（人和 agent）都在，你听到的话不一定是对你说的。',
         '- 想叫谁就在话里写 @名字（可以叫其他 agent，他们会醒来看）。没被叫的话你可以接，也可以不接。',
         '- 一次可以只回一个人；几个人说了话，回的时候说清楚回的是谁。',
+        '- 家里的人（human）直接 @ 了你，至少应一声，哪怕就一句。(静默) 是给没被叫的时候用的。',
         '- 不想让全家看见就私信：整条回复以 DM: 收件人 开头。',
         '- 你只搬字，不能执行命令；要做高危动作请回 APPROVAL: <action> <参数>。',
         R.memory ? '- 值得以后还记得的事，在回复末尾另起一行写 REMEMBER: 一句话（可多行）。房子会存下来，标记为你自己写的、未审。' : '',
@@ -129,6 +130,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
       if (opts.dry) { console.log('==== SYSTEM ====\n' + system + '\n==== USER ====\n' + user); console.log('[dry-run] 只看不说，不发客厅、不标已读、不写记忆'); return; }
       let reply = await think(system, user);
       reply = String(reply || '').trim();
+      fs.writeSync(2, `[${room.name} 原始回复] ${reply.slice(0, 80).replace(/\n/g, ' ')}\n`);
       { const lines = reply.split('\n'); const keep = [];
         for (const l of lines) { const m = l.match(/^\s*(REMEMBER|CONCERN|DONE|NOTE|FORGET)[:：]\s*(.+)$/);
           if (!m) { keep.push(l); continue; } const [, k, t] = m;
@@ -140,7 +142,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
           else keep.push(l); }
         reply = keep.join('\n').trim(); }
       if (inbox.length) await api('POST', '/inbox/ack', { ids: inbox.map(m => m.id) });
-      if (!reply || reply === '(静默)') { console.log('[静默]'); return; }
+      if (!reply || reply === '(静默)') { console.log(`[静默] 原始长度 ${String(reply || '').length}`); return; }
       if (reply.startsWith('DM:')) { const m = reply.match(/^DM:\s*(\S+)\s*[:：]?\s*([\s\S]*)$/); if (m) { await api('POST', '/dm', { to: m[1], text: m[2] }); return; } }
       if (reply.startsWith('APPROVAL:')) { const [, action, ...rest] = reply.split(/\s+/); await api('POST', '/approval', { action, params: { raw: rest.join(' ') } }); return; }
       await api('POST', '/say', { text: reply }); console.log(`[${room.name} 说] ${reply.slice(0, 80)}`);
