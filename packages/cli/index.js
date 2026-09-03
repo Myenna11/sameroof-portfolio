@@ -5,8 +5,15 @@ const path = require('node:path');
 const { LockError, writeLock, verifyLock } = require('./lock');
 
 function usage() {
-  console.log('用法：sameroof lock [--check] [--house <目录>]');
+  console.log('用法：sameroof <命令>');
+  console.log('  new <名字> [--model provider/id] [--runtime ..] [--human]   建一间屋');
+  console.log('  check                                                     全屋校验');
+  console.log('  explain <名字>                                            每个生效值来自哪');
+  console.log('  pair <名字> [--api 地址] [--rotate]                        手机配对链接');
+  console.log('  status                                                    服务与锁');
+  console.log('  lock [--check]                                            生成/校验 house.lock');
 }
+function parseOpts(argv) { const args = [], opts = {}; for (let i = 0; i < argv.length; i++) { const a = argv[i]; if (a.startsWith('--')) { const k = a.slice(2); if (argv[i + 1] && !argv[i + 1].startsWith('--')) opts[k] = argv[++i]; else opts[k] = true; } else args.push(a); } return { args, opts }; }
 
 function flags(argv) {
   const out = { check: false, house: process.cwd() };
@@ -20,6 +27,8 @@ function flags(argv) {
 
 function run(argv = process.argv.slice(2)) {
   const command = argv.shift();
+  const { cmds } = require('./house');
+  if (command && cmds[command]) { const { args, opts } = parseOpts(argv); cmds[command](args, opts); return process.exitCode || 0; }
   if (command !== 'lock') { usage(); return command ? 2 : 0; }
   const options = flags(argv);
   const root = path.resolve(options.house);
