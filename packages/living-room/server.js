@@ -411,7 +411,7 @@ function createLivingRoom(options = {}) {
       }
 
       if (req.method === 'GET' && url.pathname === '/members') {
-        return writeJson(res, 200, residents.map(resident => ({ id: resident.id, name: resident.name, species: resident.species, ...(presence.get(resident.id) || {}) })));
+        return writeJson(res, 200, residents.map(resident => ({ id: resident.id, name: resident.name, species: resident.species, avatar: (resident.avatar || ((resident.extensions || {})['dev.sameroof.avatar']) || null), ...(presence.get(resident.id) || {}) })));
       }
 
       if (req.method === 'GET' && url.pathname === '/push/vapid-public-key') {
