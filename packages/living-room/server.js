@@ -282,6 +282,21 @@ function createLivingRoom(options = {}) {
     return row;
   }
 
+  // 投递模式与跳数（维护者 9/6 定的：默认之外，发消息的人可以选"现在就说"还是"等他忙完"）
+  const DELIVER_MODES = new Set(['interrupt', 'after_turn', 'inject']);
+  function deliveryMeta(body) {
+    const meta = {};
+    if (body.deliver != null) {
+      if (typeof body.deliver !== 'string' || !DELIVER_MODES.has(body.deliver)) throw new HttpError(400, 'DELIVER-INVALID', 'deliver 只能是 interrupt / after_turn / inject。');
+      meta.deliver = body.deliver;
+    }
+    if (body.hop != null) {
+      if (!Number.isInteger(body.hop) || body.hop < 0 || body.hop > 99) throw new HttpError(400, 'HOP-INVALID', 'hop 是 0-99 的整数。');
+      meta.hop = body.hop;
+    }
+    return Object.keys(meta).length ? meta : null;
+  }
+
   function rateOrThrow(limiter, key, label) {
     const result = limiter.take(key);
     if (!result.allowed) {
@@ -348,7 +363,7 @@ function createLivingRoom(options = {}) {
         const text = textField(body, 'text');
         const replyTo = body.reply_to == null ? null : String(body.reply_to);
         if (replyTo && !/^msg_[a-f0-9]{16,24}$/.test(replyTo)) throw new HttpError(400, 'REPLY-ID-INVALID', 'reply_to 不是合法消息 id。');
-        return writeJson(res, 200, post({ kind: 'say', from_id: me.id, text, reply_to: replyTo }));
+        return writeJson(res, 200, post({ kind: 'say', from_id: me.id, text, reply_to: replyTo, meta: deliveryMeta(body) }));
       }
 
       if (req.method === 'POST' && url.pathname === '/dm') {
@@ -358,7 +373,7 @@ function createLivingRoom(options = {}) {
         if (typeof body.to !== 'string' || body.to.length > 100) throw new HttpError(400, 'RECIPIENT-INVALID', '要有合法收件人。');
         const to = byName.get(norm(body.to)) || byId.get(body.to);
         if (!to) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', '没这个人。');
-        return writeJson(res, 200, post({ kind: 'dm', from_id: me.id, to_id: to.id, text }));
+        return writeJson(res, 200, post({ kind: 'dm', from_id: me.id, to_id: to.id, text, meta: deliveryMeta(body) }));
       }
 
       if (req.method === 'GET' && url.pathname === '/events') {
@@ -422,22 +437,22 @@ function createLivingRoom(options = {}) {
         if (!other) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', '没这个人。');
         const before = positiveInt(url.searchParams.get('before'), Number.MAX_SAFE_INTEGER, 1, Number.MAX_SAFE_INTEGER, 'HISTORY-BEFORE-INVALID');
         const limit = positiveInt(url.searchParams.get('limit'), 50, 1, 200, 'HISTORY-LIMIT-INVALID');
-        return writeJson(res, 200, dmHistory.all(me.id, other.id, other.id, me.id, before, limit).reverse().map(row => ({ ...row, mentions: JSON.parse(row.mentions) })));
+        return writeJson(res, 200, dmHistory.all(me.id, other.id, other.id, me.id, before, limit).reverse().map(row => ({ ...row, mentions: JSON.parse(row.mentions), meta: row.meta ? JSON.parse(row.meta) : null })));
       }
       if (req.method === 'GET' && url.pathname === '/history' && url.searchParams.has('before')) {
         const before = positiveInt(url.searchParams.get('before'), Number.MAX_SAFE_INTEGER, 1, Number.MAX_SAFE_INTEGER, 'HISTORY-BEFORE-INVALID');
         const limit = positiveInt(url.searchParams.get('limit'), 50, 1, 200, 'HISTORY-LIMIT-INVALID');
-        return writeJson(res, 200, historyBefore.all(before, limit).reverse().map(row => ({ ...row, mentions: JSON.parse(row.mentions) })));
+        return writeJson(res, 200, historyBefore.all(before, limit).reverse().map(row => ({ ...row, mentions: JSON.parse(row.mentions), meta: row.meta ? JSON.parse(row.meta) : null })));
       }
 
       if (req.method === 'GET' && url.pathname === '/history') {
         const since = positiveInt(url.searchParams.get('since'), 0, 0, Number.MAX_SAFE_INTEGER, 'HISTORY-SINCE-INVALID');
         const limit = positiveInt(url.searchParams.get('limit'), 50, 1, 200, 'HISTORY-LIMIT-INVALID');
-        return writeJson(res, 200, history.all(since, limit).map(row => ({ ...row, mentions: JSON.parse(row.mentions) })));
+        return writeJson(res, 200, history.all(since, limit).map(row => ({ ...row, mentions: JSON.parse(row.mentions), meta: row.meta ? JSON.parse(row.meta) : null })));
       }
 
       if (req.method === 'GET' && url.pathname === '/inbox') {
-        return writeJson(res, 200, unread.all(me.id).map(row => ({ ...row, mentions: JSON.parse(row.mentions), from: byId.get(row.from_id)?.name })));
+        return writeJson(res, 200, unread.all(me.id).map(row => ({ ...row, mentions: JSON.parse(row.mentions), meta: row.meta ? JSON.parse(row.meta) : null, from: byId.get(row.from_id)?.name })));
       }
 
       if (req.method === 'POST' && url.pathname === '/inbox/ack') {

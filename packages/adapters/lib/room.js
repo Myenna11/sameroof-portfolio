@@ -71,13 +71,62 @@ function open(roomName) {
 }
 
 const byName = (id, members) => (members.find(m => m.id === id) || {}).name || id;
+const DELIVER_MODES = ['interrupt', 'after_turn', 'inject'];
+const LANE = { human: 3, agent: 2, heartbeat: 1 };          // 车道优先级：人 > agent > 心跳
+const abortable = (promise, signal) => new Promise((resolve, reject) => {
+  if (signal.aborted) return reject(signal.reason);
+  const onAbort = () => reject(signal.reason);
+  signal.addEventListener('abort', onAbort, { once: true });
+  promise.then(v => { signal.removeEventListener('abort', onAbort); resolve(v); }, e => { signal.removeEventListener('abort', onAbort); reject(e); });
+});
+
 async function run(roomName, runtimeName, think, opts = {}) {
   const R = open(roomName); const { room, api, state, save, soul } = R;
-  let busy = false;
-  const shift = []; // 这一班窗口里发生的事，睡前写进交接信
-  async function wake(reason) {
-    if (busy) return; busy = true;
-    const run = { id: 'run_' + Date.now().toString(36), resident_id: room.id, ts: new Date().toISOString(), reason, status: 'started' };
+  // ---- 地基配置（先放 extensions.dev.sameroof.*，等审查员升核心字段）----
+  const ext = k => (((R.house.extensions || {})['dev.sameroof.' + k]) || {});
+  const rext = k => (((room.extensions || {})['dev.sameroof.' + k]) || {});
+  const limits = Object.assign({ run_timeout_ms: 180000, agent_hops: 6 }, ext('limits'), rext('limits'));
+  const deliverCfg = Object.assign({ human: 'after_turn', agent: 'after_turn', from: {} }, ext('deliver'), rext('deliver'),
+    { from: Object.assign({}, (ext('deliver').from || {}), (rext('deliver').from || {})) });
+  let members = [];
+  const refreshMembers = async () => { try { const m = await api('GET', '/members'); if (Array.isArray(m)) members = m; } catch {} return members; };
+  const memberById = id => members.find(m => m.id === id);
+  const isHuman = id => (memberById(id) || {}).species === 'human';
+  // 投递模式解析：消息自带 > 房间对这个人的设定 > 房间按人/agent 的默认 > 房子默认 > after_turn
+  const resolveDeliver = m => {
+    const explicit = m.meta && m.meta.deliver; if (DELIVER_MODES.includes(explicit)) return explicit;
+    const s = memberById(m.from_id) || {};
+    const per = deliverCfg.from[s.name] || deliverCfg.from[s.id]; if (DELIVER_MODES.includes(per)) return per;
+    const byKind = deliverCfg[s.species === 'human' ? 'human' : 'agent']; return DELIVER_MODES.includes(byKind) ? byKind : 'after_turn';
+  };
+  // ---- 运行队列：每住户一条，三车道，同时只跑一个 run ----
+  const pending = { human: null, agent: null, heartbeat: null };   // 每车道最多记一个待醒原因（一次醒来读全部未读，合并即可）
+  let active = null;                                                // { lane, reason, ctrl, startedAt }
+  let hb = null;                                                    // 心跳调度句柄
+  const shift = [];                                                 // 这一班发生的事，睡前写进交接信
+  function requestWake(lane, reason, deliver = 'after_turn') {
+    if (active) {
+      pending[lane] = pending[lane] || reason;
+      if (deliver === 'interrupt' && LANE[lane] >= LANE[active.lane]) {
+        fs.writeSync(2, `[${room.name}] 打断当前一轮（${active.reason}）：${reason}\n`);
+        active.ctrl.abort(new Error(`被打断：${reason}`));
+      } else fs.writeSync(2, `[${room.name}] 正忙（${active.reason}），${reason} 排在 ${lane} 车道等这轮结束\n`);
+      return Promise.resolve();
+    }
+    return runOnce(lane, reason);
+  }
+  function pump() { for (const lane of ['human', 'agent', 'heartbeat']) if (pending[lane]) { const r = pending[lane]; pending[lane] = null; runOnce(lane, r); return; } }
+  async function runOnce(lane, reason) {
+    const ctrl = new AbortController();
+    active = { lane, reason, ctrl, startedAt: Date.now() };
+    state.last_run_at = new Date().toISOString(); save();
+    const wd = setTimeout(() => ctrl.abort(new Error(`看门狗：一轮超过 ${limits.run_timeout_ms}ms`)), limits.run_timeout_ms);
+    try { await wake(reason, lane, ctrl.signal); }
+    finally { clearTimeout(wd); active = null; if (hb) hb.reschedule(); pump(); }
+  }
+
+  async function wake(reason, lane, signal) {
+    const run = { id: 'run_' + Date.now().toString(36), resident_id: room.id, ts: new Date().toISOString(), reason, lane, status: 'started' };
     const t0 = Date.now();
     try {
       if (!R.budgetLeft()) { console.log('[预算] 今日请求数用完，passive'); run.status = 'passive_budget'; return; }
@@ -87,7 +136,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
       if (inbox.length === 0 && reason === 'heartbeat') {
         if (!R.keys.concerns().length) { console.log('[心跳] 没人叫我，惦记本也是空的，不叫模型'); run.status = 'passive_idle'; return; }
       }
-      const members = await api('GET', '/members');
+      await refreshMembers();
       const hoPath = path.join(R.roomDir, 'handover', 'latest.md'); const handover = fs.existsSync(hoPath) ? fs.readFileSync(hoPath, 'utf8') : '（没有交接信）';
       state.wakes_today++; state.last_wake = new Date().toISOString(); save();
       // ---- 上下文预算（房间可配，缺省来自 house.yaml defaults.context）----
@@ -102,9 +151,9 @@ async function run(roomName, runtimeName, think, opts = {}) {
       }
       // 客厅最近的话（已读的也带上，免得断了上文），按字数封顶
       let recentCtx = '';
+      const unreadIds = new Set(inbox.map(m => m.id));
       if (ctx.recent_messages > 0) {
         const hist = await api('GET', `/history?before=${Number.MAX_SAFE_INTEGER}&limit=${ctx.recent_messages + inbox.length}`).catch(() => []);  // 最近的 N 条（不是最早的）
-        const unreadIds = new Set(inbox.map(m => m.id));
         const older = (Array.isArray(hist) ? hist : []).filter(m => !unreadIds.has(m.id)).slice(-ctx.recent_messages);
         const lines = []; let used = 0;
         for (const m of older.reverse()) { const line = `[${m.ts.slice(11, 16)}] ${byName(m.from_id, members)}${m.from_id === room.id ? '（我自己）' : ''}：${m.text}`; if (used + line.length > ctx.recent_max_chars) break; lines.unshift(line); used += line.length; }
@@ -114,7 +163,6 @@ async function run(roomName, runtimeName, think, opts = {}) {
       let dmCtx = '';
       {
         const partners = [...new Set(inbox.filter(m => m.kind === 'dm').map(m => m.from_id))].filter(Boolean);
-        const unreadIds = new Set(inbox.map(m => m.id));
         const blocks = [];
         for (const pid of partners.slice(0, 3)) {
           const h = await api('GET', `/dm/history?with=${encodeURIComponent(pid)}&limit=${ctx.dm_recent || 10}`).catch(() => []);
@@ -154,12 +202,15 @@ async function run(roomName, runtimeName, think, opts = {}) {
         : '心跳醒来。客厅没人叫你，但交接信里有惦记的事。要是确实该对家里人说一句就说，没有就回 (静默)。';
       run.heard = inbox.map(m => ({ id: m.id, from: m.from, kind: m.kind, text: m.text.slice(0, 300), mentioned: !!(m.mentions && m.mentions.includes(room.id)) }));
       run.context = { system_chars: system.length, user_chars: user.length, memories_recalled: remembered ? remembered.split('\n').length - 1 : 0, recent_lines: recentCtx ? recentCtx.split('\n').length - 1 : 0, dm_lines: dmCtx ? dmCtx.split('\n').length : 0, system_preview: system.slice(0, 1200), user_preview: user.slice(0, 1200) };
+      // 跳数：人说的话 hop=0；agent 回话 = 听到的 agent 消息里最大 hop + 1。超过上限的链只写不叫醒（防两个 agent 无限对聊）
+      const hopIn = inbox.filter(m => !isHuman(m.from_id)).reduce((a, m) => Math.max(a, Number((m.meta || {}).hop) || 0), 0);
+      const hopOut = room.species === 'human' ? 0 : hopIn + 1;
       if (opts.dry) { console.log('==== SYSTEM ====\n' + system + '\n==== USER ====\n' + user); console.log('[dry-run] 只看不说，不发客厅、不标已读、不写记忆'); run.status = 'dry'; return; }
       run.model_calls = 1;
-      let reply = await think(system, user);
+      let reply = await abortable(Promise.resolve(think(system, user, signal)), signal);
       reply = String(reply || '').trim();
       run.raw_reply = reply.slice(0, 2000);
-      if (!reply && inbox.some(m => m.mentions && m.mentions.includes(room.id))) { fs.writeSync(2, `[${room.name}] 被叫了却回空，再试一次\n`); reply = String(await think(system, user + '\n\n（上一次你回了空白。被叫了至少应一声。）') || '').trim(); run.model_calls = 2; run.raw_reply = reply.slice(0, 2000); }
+      if (!reply && inbox.some(m => m.mentions && m.mentions.includes(room.id))) { fs.writeSync(2, `[${room.name}] 被叫了却回空，再试一次\n`); reply = String(await abortable(Promise.resolve(think(system, user + '\n\n（上一次你回了空白。被叫了至少应一声。）', signal)), signal) || '').trim(); run.model_calls = 2; run.raw_reply = reply.slice(0, 2000); }
       fs.writeSync(2, `[${room.name} 原始回复] ${reply.slice(0, 80).replace(/\n/g, ' ')}\n`);
       run.directives = [];
       { const lines = reply.split('\n'); const keep = [];
@@ -174,12 +225,18 @@ async function run(roomName, runtimeName, think, opts = {}) {
         reply = keep.join('\n').trim(); }
       if (inbox.length) { const a = await api('POST', '/inbox/ack', { ids: inbox.map(m => m.id) }); if (!a || typeof a.acked !== 'number') { run.ack_error = JSON.stringify(a).slice(0, 300); fs.writeSync(2, `[${room.name}] 标已读失败，下次会重复读到这些话：${run.ack_error}\n`); } }
       if (!reply || reply === '(静默)') { console.log(`[静默] 原始长度 ${String(reply || '').length}`); run.status = 'silent'; return; }
-      if (reply.startsWith('DM:')) { const m = reply.match(/^DM:\s*(\S+)\s*[:：]?\s*([\s\S]*)$/); if (m) { await api('POST', '/dm', { to: m[1], text: m[2] }); run.status = 'dm'; run.said = m[2].slice(0, 500); run.to = m[1]; return; } }
+      if (reply.startsWith('DM:')) { const m = reply.match(/^DM:\s*(\S+)\s*[:：]?\s*([\s\S]*)$/); if (m) { await api('POST', '/dm', { to: m[1], text: m[2], hop: hopOut }); run.status = 'dm'; run.said = m[2].slice(0, 500); run.to = m[1]; return; } }
       if (reply.startsWith('APPROVAL:')) { const [, action, ...rest] = reply.split(/\s+/); await api('POST', '/approval', { action, params: { raw: rest.join(' ') } }); run.status = 'approval'; run.said = reply.slice(0, 500); return; }
-      await api('POST', '/say', { text: reply }); console.log(`[${room.name} 说] ${reply.slice(0, 80)}`); run.status = 'said'; run.said = reply.slice(0, 500);
+      await api('POST', '/say', { text: reply, hop: hopOut }); console.log(`[${room.name} 说] ${reply.slice(0, 80)}`); run.status = 'said'; run.said = reply.slice(0, 500);
       shift.push({ at: new Date().toISOString(), heard: inbox.map(m => `${m.from}：${m.text}`), said: reply });
-    } catch (e) { console.error('[醒来失败]', e.message); run.status = 'error'; run.error = String(e.message || e).slice(0, 300); }
-    finally { run.ms = Date.now() - t0; if (R.lastUsage) { run.usage = R.lastUsage; R.lastUsage = null; } R.recordRun(run); busy = false; }
+    } catch (e) {
+      if (signal && signal.aborted) { run.status = 'interrupted'; run.error = String((signal.reason && signal.reason.message) || signal.reason || e.message).slice(0, 300); console.log(`[打断] ${run.error}（这轮不标已读，下轮重读）`); }
+      else { console.error('[醒来失败]', e.message); run.status = 'error'; run.error = String(e.message || e).slice(0, 300); }
+    }
+    finally {
+      run.ms = Date.now() - t0; if (R.lastUsage) { run.usage = R.lastUsage; R.lastUsage = null; } R.recordRun(run);
+      if (hb) hb.backoff(reason === 'heartbeat' && ['passive_idle', 'silent', 'nothing', 'passive_budget'].includes(run.status));
+    }
   }
   async function writeHandover() {
     const hoDir = path.join(R.roomDir, 'handover'); fs.mkdirSync(hoDir, { recursive: true });
@@ -200,15 +257,38 @@ async function run(roomName, runtimeName, think, opts = {}) {
   const sleep = async () => { if (sleeping) return; sleeping = true; try { await writeHandover(); } catch (e) { fs.writeSync(2, `[交接信失败] ${e.message}\n`); } state.last_sleep = new Date().toISOString(); save(); try { await api('POST', '/activity', { kind: 'sleep', text: `${room.name}：睡了，交接信已写`, meta: { wakes_today: state.wakes_today } }); } catch {} };
   process.on('SIGINT', async () => { await sleep(); process.exit(0); }); process.on('SIGTERM', async () => { await sleep(); process.exit(0); });
   console.log(`[${room.name}] 适配器上线，runtime=${runtimeName}，客厅=${LR}${opts.dry ? '，dry-run' : ''}`);
-  await wake('启动时看看有没有人找我');
+  await refreshMembers();
+  await requestWake('human', '启动时看看有没有人找我');
   if (opts.once || opts.dry) { await sleep(); return; }
   const u = new URL('/events', LR);
   const sub = () => { const req = http.request({ hostname: u.hostname, port: u.port, path: u.pathname, headers: { authorization: `Bearer ${JSON.parse(fs.readFileSync(path.join(RUN, 'living-room-tokens.json'), 'utf8'))[room.id]}` } }, res => {
-    let buf = ''; res.on('data', c => { buf += c; let i; while ((i = buf.indexOf('\n\n')) >= 0) { const chunk = buf.slice(0, i); buf = buf.slice(i + 2); if (!chunk.startsWith('data:')) continue; try { const m = JSON.parse(chunk.slice(5)); if (m.from_id !== room.id && (m.mentions.includes(room.id) || m.kind === 'dm')) wake(`${m.from_id} 叫我`); } catch {} } });
+    let buf = ''; res.on('data', c => { buf += c; let i; while ((i = buf.indexOf('\n\n')) >= 0) { const chunk = buf.slice(0, i); buf = buf.slice(i + 2); if (!chunk.startsWith('data:')) continue; try { const m = JSON.parse(chunk.slice(5)); onMessage(m); } catch {} } });
     res.on('end', () => setTimeout(sub, 3000)); }); req.on('error', () => setTimeout(sub, 5000)); req.end(); };
+  function onMessage(m) {
+    if (!m || m.type === 'activity' || m.from_id === room.id) return;
+    if (!((m.mentions || []).includes(room.id) || m.kind === 'dm')) return;
+    if (!memberById(m.from_id)) refreshMembers();                                   // 新面孔，下轮再认
+    const human = isHuman(m.from_id); const who = byName(m.from_id, members);
+    const hop = Number((m.meta || {}).hop) || 0;
+    if (!human && hop >= limits.agent_hops) { fs.writeSync(2, `[${room.name}] ${who} 叫我，但这条 agent 链已 ${hop} 跳，只记不醒（上限 ${limits.agent_hops}）\n`); return; }
+    requestWake(human ? 'human' : 'agent', `${who} 叫我`, resolveDeliver(m));
+  }
   sub();
-  const hb = room.heartbeat || (R.house.defaults || {}).heartbeat || {};
-  // 心跳基准：房间 heartbeat.interval 可写分钟数；adaptive/没写 = 60 分钟起步，×1.5 退避到 4 小时
-  if (hb.enabled !== false) { let iv = (Number(hb.interval) > 0 ? Number(hb.interval) : 60) * 60000; const tick = async () => { if (!R.inQuiet()) await wake('heartbeat'); iv = Math.min(iv * 1.5, 4 * 3600000); setTimeout(tick, iv); }; setTimeout(tick, iv); }
+  // ---- 心跳：下次 = 上次醒来（任何原因）+ 间隔；连续空心跳才退避（×1.5 到 4 小时），有真事就归位；忙则推迟不叠加；安静时段跳过 ----
+  const hbCfg = room.heartbeat || (R.house.defaults || {}).heartbeat || {};
+  if (hbCfg.enabled !== false) {
+    const base = (Number(hbCfg.interval) > 0 ? Number(hbCfg.interval) : 60) * 60000; let iv = base; let timer = null;
+    const due = () => (state.last_run_at ? new Date(state.last_run_at).getTime() : Date.now()) + iv;
+    const tick = () => {
+      if (active) { hb.reschedule(); return; }
+      if (R.inQuiet()) { hb.backoff(true); hb.reschedule(); return; }
+      requestWake('heartbeat', 'heartbeat');
+    };
+    hb = {
+      reschedule() { clearTimeout(timer); const wait = Math.max(5000, due() - Date.now()); timer = setTimeout(tick, wait); if (timer.unref) timer.unref(); },
+      backoff(empty) { iv = empty ? Math.min(iv * 1.5, 4 * 3600000) : base; },
+    };
+    hb.reschedule();
+  }
 }
 module.exports = { open, run, HOUSE, RUN };

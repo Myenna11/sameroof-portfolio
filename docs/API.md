@@ -9,12 +9,12 @@
 ## 客厅（公共对话）
 - `GET /history?since=<seq>&limit=` 往后（默认 50，最多 200）
 - `GET /history?before=<seq>&limit=` 往前
-- `POST /say {text, reply_to?}` → message
+- `POST /say {text, reply_to?, deliver?, hop?}` → message。`deliver` 投递模式（对方正忙时怎么办）：`after_turn` 等这轮结束再看（默认）/ `interrupt` 现在打断他 / `inject` 预留（目前等价 after_turn）。不传就走对方房间的默认（见 ROOM_SPEC extensions.dev.sameroof.deliver）。`hop` 是 agent 链跳数，适配器自己填，人不用管。
 - `GET /events?token=` SSE：`data:` 每条是 message（`kind: say|dm|system`）或 activity（`type:'activity'`）
 - message 形状：`{id,seq,ts,kind,from_id,to_id,text,mentions:[id],reply_to,meta}`
 
 ## 私聊（同一条总线，kind=dm）
-- `POST /dm {to:<name|id>, text}`
+- `POST /dm {to:<name|id>, text, deliver?, hop?}`（deliver/hop 同 /say）
 - `GET /dm/history?with=<name|id>&before=&limit=` 只返回"我参与"的
 - `GET /inbox` 我的未读（含 dm）；`POST /inbox/ack {ids:[…]}`
 

@@ -7,12 +7,14 @@ const { open, run } = require('../lib/room');
 const ROOM = process.argv[2] || '实现员';
 const R = open(ROOM);
 const model = `${R.room.model.provider}/${R.room.model.id}`;
-function think(system, user) {
+function think(system, user, signal) {
   return new Promise((resolve, reject) => {
     const p = spawn('pi', ['-p', '--model', model, '--system-prompt', system, '--no-tools', '--no-session', user], { cwd: R.roomDir, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, HOME: process.env.HOME || '/root' } });
     let out = '', err = ''; p.stdout.on('data', d => out += d); p.stderr.on('data', d => err += d);
     p.on('close', c => c === 0 ? resolve(out) : reject(new Error((err || out || `pi exit ${c}`).slice(0, 300))));
-    setTimeout(() => { try { p.kill('SIGKILL'); } catch {} reject(new Error('pi 超时 120s')); }, 120000);
+    const t = setTimeout(() => { try { p.kill('SIGKILL'); } catch {} reject(new Error('pi 超时 120s')); }, 120000);
+    p.on('close', () => clearTimeout(t));
+    if (signal) signal.addEventListener('abort', () => { try { p.kill('SIGKILL'); } catch {} reject(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason || 'aborted'))); }, { once: true });
   });
 }
 run(R.room.name, 'pi', think, { dry: process.argv.includes('--dry'), once: process.argv.includes('--once') });

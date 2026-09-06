@@ -189,6 +189,7 @@ summary{cursor:pointer;color:var(--mute);font-size:13px}
 #pair h2{font-family:var(--serif)}
 #pair input{width:100%;padding:10px;margin:6px 0 12px;border:1px solid var(--line);border-radius:10px;font:inherit;background:var(--paper)}
 #pair button{width:100%;padding:12px;border:0;border-radius:12px;background:var(--ink);color:#fff}
+.bar .dlv{flex:0 0 auto;font-size:12px;padding:6px 8px;border-radius:12px;border:1px solid var(--line,#ccc);background:transparent;color:inherit;opacity:.8}.bar .dlv.on{background:#ffb347;color:#000;border-color:#ffb347;opacity:1}
 </style></head><body>
 <div id="pair" hidden><h2>进门</h2><p>粘上户主给你的配对链接，或者分别填地址和 token。</p>
 <input id="plink" placeholder="sameroof://pair?api=...&token=..."><input id="papi" placeholder="http://192.168.1.5:8790"><input id="ptok" placeholder="token"><button id="pgo">进屋</button></div>
@@ -219,7 +220,7 @@ summary{cursor:pointer;color:var(--mute);font-size:13px}
  <section class="view" id="view-lounge">
   <div class="hd"><h1>客厅</h1><span class="sub" id="loungesub"></span><span class="sp"></span></div>
   <div id="log"></div>
-  <div class="bar" id="loungebar" hidden><textarea id="in" rows="1" placeholder="说点什么，@名字 叫人"></textarea><button id="send">发送</button></div>
+  <div class="bar" id="loungebar" hidden><textarea id="in" rows="1" placeholder="说点什么，@名字 叫人"></textarea><button class="dlv" id="dlv" title="对方正忙时：等他忙完再看，还是现在打断他" type="button">等他忙完</button><button id="send">发送</button></div>
  </section>
  <!-- 房间 -->
  <section class="view" id="view-rooms">
@@ -233,7 +234,7 @@ summary{cursor:pointer;color:var(--mute);font-size:13px}
   </div>
   <div class="rpane on dmview" id="rp-dm">
    <div id="roomlog"></div>
-   <div class="bar" id="roombar" hidden><textarea id="dmin" rows="1" placeholder=""></textarea><button id="dmsend">发送</button></div>
+   <div class="bar" id="roombar" hidden><textarea id="dmin" rows="1" placeholder=""></textarea><button class="dlv" id="dmdlv" title="对方正忙时：等他忙完再看，还是现在打断他" type="button">等他忙完</button><button id="dmsend">发送</button></div>
   </div>
   <div class="rpane pad" id="rp-memory"></div>
   <div class="rpane pad" id="rp-handover"></div>
@@ -500,10 +501,15 @@ function receive(m,silent){
  else if(!silent){loungeState.unread++;updateBadges()}}
 
 /* ===== 发送 ===== */
+// 投递模式（维护者 9/6）：默认“等他忙完”（after_turn），点一下变“现在就说”（interrupt）；记在本机，随消息带 deliver 字段
+let _dlv='after_turn';try{_dlv=localStorage.getItem('deliver')||'after_turn'}catch{}
+function deliverMode(){return _dlv}
+function paintDlv(){for(const b of document.querySelectorAll('.dlv')){b.textContent=_dlv==='interrupt'?'现在就说':'等他忙完';b.classList.toggle('on',_dlv==='interrupt')}}
+for(const b of document.querySelectorAll('.dlv'))b.addEventListener('click',()=>{_dlv=_dlv==='interrupt'?'after_turn':'interrupt';try{localStorage.setItem('deliver',_dlv)}catch{}paintDlv()});paintDlv();
 async function sendLounge(){const t=$('#in').value.trim();if(!t)return;$('#in').value='';grow($('#in'));hideAt();
- try{const m=await req('POST','/say',{text:t});receive(m,true)}catch(e){$('#in').value=t;grow($('#in'));alert(e.message)}}
+ try{const m=await req('POST','/say',{text:t,deliver:deliverMode()});receive(m,true)}catch(e){$('#in').value=t;grow($('#in'));alert(e.message)}}
 async function sendDm(){const t=$('#dmin').value.trim();if(!t||!roomId)return;$('#dmin').value='';grow($('#dmin'));
- try{const m=await req('POST','/dm',{to:roomId,text:t});receive(m,true)}catch(e){$('#dmin').value=t;grow($('#dmin'));alert(e.message)}}
+ try{const m=await req('POST','/dm',{to:roomId,text:t,deliver:deliverMode()});receive(m,true)}catch(e){$('#dmin').value=t;grow($('#dmin'));alert(e.message)}}
 $('#send').onclick=sendLounge;$('#dmsend').onclick=sendDm;
 function grow(ta){ta.style.height='auto';ta.style.height=Math.min(ta.scrollHeight,120)+'px'}
 
