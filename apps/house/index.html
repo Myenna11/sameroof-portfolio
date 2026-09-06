@@ -1,54 +1,849 @@
 <!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>同屋</title><link rel="manifest" href="./manifest.json"><meta name="theme-color" content="#faf7f2">
+<title>同屋</title><link rel="manifest" href="./manifest.json"><meta name="theme-color" content="#f6f1e9">
 <style>
-:root{--bg:#faf7f2;--ink:#2b2622;--mute:#8a817a;--me:#dfe9ff;--them:#fff;--sys:#f1ece4;--line:#e8e1d8}
-*{box-sizing:border-box}html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:16px/1.5 -apple-system,"PingFang SC","Noto Sans SC",sans-serif}
-#top{position:sticky;top:0;background:var(--bg);border-bottom:1px solid var(--line);padding:calc(10px + env(safe-area-inset-top)) 14px 10px;display:flex;align-items:center;gap:10px}
-#top b{font-size:17px}#who{color:var(--mute);font-size:13px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#notify{border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);padding:3px 8px;font:inherit;font-size:12px}
-#log{padding:12px 12px 90px;display:flex;flex-direction:column;gap:8px}
-.m{max-width:82%;padding:8px 12px;border-radius:14px;background:var(--them);box-shadow:0 1px 0 rgba(0,0,0,.04);white-space:pre-wrap;word-break:break-word}
-.m .n{font-size:12px;color:var(--mute);margin-bottom:2px}.m .t{font-size:11px;color:var(--mute);margin-top:2px;text-align:right}
-.me{align-self:flex-end;background:var(--me)}.sys{align-self:center;background:var(--sys);color:var(--mute);font-size:13px;max-width:92%;text-align:center}
-.dm{border:1px dashed #c9b8ff}
-#bar{position:fixed;left:0;right:0;bottom:0;background:var(--bg);border-top:1px solid var(--line);padding:8px 10px calc(8px + env(safe-area-inset-bottom));display:flex;gap:8px}
-#bar textarea{flex:1;resize:none;border:1px solid var(--line);border-radius:12px;padding:8px 10px;font:inherit;background:#fff;max-height:120px}
-#bar button{border:0;border-radius:12px;padding:0 16px;background:var(--ink);color:#fff;font:inherit}
-#pair{padding:24px 18px;max-width:420px;margin:0 auto}#pair input{width:100%;padding:10px;margin:6px 0 12px;border:1px solid var(--line);border-radius:10px;font:inherit}
-#pair button{width:100%;padding:12px;border:0;border-radius:12px;background:var(--ink);color:#fff;font:inherit}
-.ap{display:flex;gap:8px;justify-content:center;margin-top:6px}.ap button{border:1px solid var(--line);background:#fff;border-radius:10px;padding:4px 12px;font:inherit}
+:root{
+ --bg:#f6f1e9;--paper:#fffdf9;--ink:#2e2a25;--mute:#94897c;--line:#e7dfd2;--line2:#efe8db;
+ --accent:#4a7c59;--accent-soft:#e6efe7;--me:#b9e4b3;--dm:#f4eefc;--dmline:#b9a6e8;
+ --at:#b8892d;--red:#cf5a4e;--amber:#c98f2d;--fact:#f0ebe1;
+ --serif:"Noto Serif SC","Songti SC",serif;
+ --sans:-apple-system,"PingFang SC","Noto Sans SC",sans-serif;
+ --mono:ui-monospace,"SF Mono",Consolas,monospace;
+}
+*{box-sizing:border-box}html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:16px/1.55 var(--sans)}
+button{font:inherit;cursor:pointer}
+[hidden]{display:none!important}
+h1,h2,h3{font-family:var(--serif)}
+/* ===== 骨架：PC 左栏 / 手机底栏 ===== */
+#app{display:flex;min-height:100%}
+#rail{display:none}
+#tabbar{position:fixed;left:0;right:0;bottom:0;z-index:8;background:var(--paper);border-top:1px solid var(--line);display:flex;padding-bottom:env(safe-area-inset-bottom)}
+#tabbar.hidetab{display:none}
+#tabbar .tb{flex:1;display:flex;flex-direction:column;align-items:center;gap:1px;padding:7px 0 5px;color:var(--mute);font-size:11px;cursor:pointer;position:relative;border:0;background:none}
+#tabbar .tb .ic{font-size:20px}
+#tabbar .tb.on{color:var(--accent)}
+#tabbar .tb .badge{position:absolute;top:3px;left:calc(50% + 6px)}
+@media(min-width:860px){
+ #tabbar{display:none}
+ #rail{display:flex;flex-direction:column;width:216px;flex:0 0 216px;position:sticky;top:0;height:100vh;background:var(--paper);border-right:1px solid var(--line);padding:20px 12px}
+ #rail .logo{font-family:var(--serif);font-size:20px;font-weight:600;padding:0 10px 16px;display:flex;align-items:center;gap:8px}
+ #rail .nav{display:flex;flex-direction:column;gap:2px}
+ #rail .nav button{display:flex;align-items:center;gap:10px;border:0;background:none;border-radius:10px;padding:10px 12px;font-size:15px;color:var(--ink);text-align:left;position:relative}
+ #rail .nav button.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
+ #rail .nav button .badge{margin-left:auto;position:static}
+ #rail .foot{margin-top:auto;padding:8px 10px;font-size:12px;color:var(--mute);display:flex;gap:8px;align-items:center}
+ main{flex:1;min-width:0;max-width:860px}
+}
+main{flex:1;min-width:0;width:100%}
+.view{display:none;padding-bottom:76px}.view.on{display:block}
+@media(min-width:860px){.view{padding-bottom:40px}}
+/* ===== 页头 ===== */
+.hd{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:calc(12px + env(safe-area-inset-top)) 16px 12px;display:flex;align-items:center;gap:10px}
+.hd h1{font-size:19px;margin:0;font-weight:600}
+.hd .sp{flex:1}
+.hd .sub{font-size:12px;color:var(--mute)}
+.back{border:0;background:none;font-size:24px;color:var(--ink);padding:0 8px 0 0;line-height:1}
+#dot{font-size:10px;color:#c33}
+/* ===== 通用 ===== */
+.badge{min-width:18px;height:18px;border-radius:9px;background:var(--red);color:#fff;font-size:11px;display:inline-flex;align-items:center;justify-content:center;padding:0 5px}
+.pill{display:inline-block;font-size:11px;border-radius:6px;padding:1px 7px;border:1px solid var(--line);color:var(--mute);background:var(--paper)}
+.pill.ok{color:var(--accent);border-color:var(--accent)}
+.pill.warn{color:var(--amber);border-color:var(--amber)}
+.pill.bad{color:var(--red);border-color:var(--red)}
+.fact{font-family:var(--mono);font-size:12.5px;background:var(--fact);border-radius:8px;padding:8px 10px;color:#5d564c;white-space:pre-wrap;word-break:break-word}
+.card{background:var(--paper);border:1px solid var(--line);border-radius:14px;box-shadow:0 1px 2px rgba(80,66,40,.05)}
+.secttl{font-family:var(--serif);font-size:14px;color:var(--mute);margin:18px 4px 8px;display:flex;align-items:center;gap:8px}
+.secttl::after{content:"";flex:1;height:1px;background:var(--line2)}
+.empty{color:var(--mute);font-size:13px;text-align:center;padding:28px 0}
+details{background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+summary{cursor:pointer;color:var(--mute);font-size:13px}
+/* ===== 现在 ===== */
+#whostrip{display:flex;gap:14px;overflow-x:auto;padding:14px 16px 4px;scrollbar-width:none}
+#whostrip::-webkit-scrollbar{display:none}
+.who{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:4px;cursor:pointer}
+.who .avw{position:relative;width:52px;height:52px}
+.who .av{width:52px;height:52px;border-radius:16px;background:var(--paper);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:26px}
+.who .st{position:absolute;right:-1px;bottom:-1px;width:13px;height:13px;border-radius:50%;background:#cfc7bc;border:2.5px solid var(--bg)}
+.who.on .st{background:#46b35a}
+.who .nm{font-size:12px;color:var(--ink)}
+.who.off .nm{color:var(--mute)}
+#pending{margin:10px 12px 0}
+#feed{padding:6px 12px}
+.chips{display:flex;gap:8px;padding:12px 16px 6px;overflow-x:auto;scrollbar-width:none}
+.chips::-webkit-scrollbar{display:none}
+.chip-f{flex:0 0 auto;border:1px solid var(--line);background:var(--paper);border-radius:14px;padding:4px 13px;font-size:13px;color:var(--mute)}
+.chip-f.on{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.ev{display:flex;gap:11px;padding:11px 4px;border-bottom:1px solid var(--line2)}
+.ev .ic{flex:0 0 auto;width:34px;height:34px;border-radius:10px;background:var(--paper);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:16px}
+.ev.err .ic{border-color:var(--red)}
+.ev .bd{flex:1;min-width:0}
+.ev .tt{font-size:14px;word-break:break-word}
+.ev .mt{font-size:12px;color:var(--mute);margin-top:2px;display:flex;gap:8px;flex-wrap:wrap}
+.ev .tm{flex:0 0 auto;font-size:11px;color:var(--mute);padding-top:3px}
+/* ===== 客厅 / 私聊 ===== */
+#log{padding:12px 12px 170px;display:flex;flex-direction:column;gap:10px}
+#roomlog{padding:12px 12px 96px;display:flex;flex-direction:column;gap:10px}
+@media(min-width:860px){#log{padding-bottom:100px}}
+.loadmore{align-self:center;border:1px solid var(--line);background:var(--paper);color:var(--mute);border-radius:14px;padding:4px 14px;font-size:13px}
+.ts{align-self:center;font-size:12px;color:var(--mute);margin:2px 0}
+.msg{display:flex;gap:8px;align-items:flex-start;max-width:100%}
+.msg.mine{flex-direction:row-reverse}
+.av{flex:0 0 auto;width:38px;height:38px;border-radius:10px;background:var(--paper);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:20px;overflow:hidden}
+.wrap{max-width:74%;display:flex;flex-direction:column;align-items:flex-start}
+.mine .wrap{align-items:flex-end}
+.n{font-size:12px;color:var(--mute);margin:0 2px 2px}
+.b{position:relative;background:var(--paper);border-radius:6px;padding:8px 11px;box-shadow:0 1px 0 rgba(0,0,0,.04);white-space:pre-wrap;word-break:break-word}
+.msg:not(.mine) .b::before{content:"";position:absolute;left:-5px;top:12px;border:6px solid transparent;border-right-color:var(--paper);border-left:0}
+.mine .b{background:var(--me)}
+.mine .b::after{content:"";position:absolute;right:-5px;top:12px;border:6px solid transparent;border-left-color:var(--me);border-right:0}
+.dmview .b{background:var(--dm);box-shadow:inset 0 0 0 1px var(--dmline)}
+.dmview .msg:not(.mine) .b::before{border-right-color:var(--dmline)}
+.dmview .mine .b::after{border-left-color:var(--dmline)}
+.b.atme{box-shadow:inset 0 0 0 1.5px var(--at)}
+.at{color:var(--at);font-weight:600}
+.sys{align-self:center;color:var(--mute);font-size:13px;max-width:92%;text-align:center}
+.bar{position:fixed;left:0;right:0;bottom:calc(56px + env(safe-area-inset-bottom));z-index:7;background:var(--bg);border-top:1px solid var(--line);padding:8px 10px;display:flex;gap:8px;align-items:flex-end}
+#view-room .bar{bottom:calc(0px + env(safe-area-inset-bottom))}
+@media(min-width:860px){.bar{left:216px;bottom:0;padding-bottom:8px}#view-room .bar{bottom:0}}
+.bar textarea{flex:1;resize:none;border:1px solid var(--line);border-radius:12px;padding:8px 10px;font:inherit;background:var(--paper);max-height:120px}
+.bar button{border:0;border-radius:12px;padding:0 18px;height:38px;background:var(--ink);color:#fff}
+#atpop{position:fixed;left:10px;right:10px;bottom:64px;z-index:9;background:var(--paper);border:1px solid var(--line);border-radius:12px;box-shadow:0 4px 16px rgba(0,0,0,.12);overflow:hidden}
+@media(min-width:860px){#atpop{left:226px;max-width:480px}}
+#atpop .opt{padding:10px 14px;font-size:15px;display:flex;gap:8px;align-items:center}
+#atpop .opt.hi,#atpop .opt:active{background:var(--fact)}
+#atpop .opt .e{font-size:18px}
+/* ===== 审批卡片 ===== */
+.apcard{margin:4px 0;background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:13px 14px;box-shadow:0 1px 3px rgba(80,66,40,.07)}
+.apcard .apt{font-weight:600;margin-bottom:4px;font-family:var(--serif)}
+.apcard .apb{white-space:pre-wrap;word-break:break-word;font-size:14.5px}
+.apcard .apm{font-size:12px;color:var(--mute);margin-top:5px}
+.apbtns{display:flex;gap:10px;margin-top:10px}
+.apbtns button{flex:1;border:0;border-radius:10px;padding:8px 0;font-size:15px}
+.apbtns .ok{background:var(--accent);color:#fff}
+.apbtns .no{background:#f6ecec;color:#a33}
+.apdone{margin-top:10px;font-size:14px;font-weight:600}
+/* ===== 房间列表 ===== */
+#roomlist{padding:12px;display:grid;gap:10px}
+@media(min-width:700px){#roomlist{grid-template-columns:1fr 1fr}}
+.door{display:flex;gap:13px;align-items:center;background:var(--paper);border:1px solid var(--line);border-radius:16px;padding:14px;cursor:pointer;box-shadow:0 1px 2px rgba(80,66,40,.05);position:relative}
+.door:active{background:#faf6ee}
+.door .av{width:50px;height:50px;border-radius:14px;background:var(--bg);display:flex;align-items:center;justify-content:center;font-size:25px;border:1px solid var(--line2)}
+.door .mid{flex:1;min-width:0}
+.door .nm{font-size:16px;font-weight:600;display:flex;gap:7px;align-items:center}
+.door .st{font-size:12px;color:var(--mute);margin-top:2px}
+.door i{width:8px;height:8px;border-radius:50%;background:#cfc7bc;display:inline-block;margin-right:5px}
+.door.on i{background:#46b35a}
+.door .badge{position:absolute;top:10px;right:12px}
+/* ===== 房间详情 ===== */
+.roomhead{display:flex;gap:12px;align-items:center;padding:14px 16px;border-bottom:1px solid var(--line);background:var(--bg)}
+.roomhead .av{width:48px;height:48px;border-radius:14px;background:var(--paper);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:24px}
+.roomhead .nm{font-size:17px;font-weight:600;font-family:var(--serif)}
+.roomhead .st{font-size:12px;color:var(--mute)}
+.pills{position:sticky;top:calc(54px + env(safe-area-inset-top));display:flex;gap:7px;overflow-x:auto;padding:10px 12px;background:var(--bg);border-bottom:1px solid var(--line);z-index:4;scrollbar-width:none}
+.pills::-webkit-scrollbar{display:none}
+.pill-tab{flex:0 0 auto;border:1px solid var(--line);background:var(--paper);border-radius:16px;padding:5px 14px;font-size:13.5px;color:var(--mute)}
+.pill-tab.on{border-color:var(--accent);color:var(--accent);background:var(--accent-soft);font-weight:600}
+.rpane{display:none}.rpane.on{display:block}
+.rpane.pad{padding:12px}
+/* 记忆 */
+.mem{background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:11px 12px;margin-bottom:9px}
+.mem.arch{opacity:.55}
+.mem .ct{font-size:14.5px;white-space:pre-wrap;word-break:break-word}
+.mem .mt{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px;align-items:center;font-size:11px;color:var(--mute)}
+.cbar{width:52px;height:5px;border-radius:3px;background:var(--line2);overflow:hidden;display:inline-block;vertical-align:middle}
+.cbar i{display:block;height:100%;background:var(--accent)}
+/* 交接 */
+.ho{white-space:pre-wrap;word-break:break-word;font-size:14px}
+/* 惦记 */
+.li{display:flex;gap:9px;padding:10px 4px;border-bottom:1px solid var(--line2);font-size:14.5px}
+.li::before{content:"·";color:var(--accent);font-weight:700}
+/* 运行 */
+.run{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:12px;margin-bottom:10px}
+.run .rh{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.run .rt{font-size:12px;color:var(--mute)}
+.run .rs{font-size:14px;font-weight:600}
+.run .meta{font-size:12px;color:var(--mute);margin-top:3px;display:flex;gap:10px;flex-wrap:wrap}
+.run .reply{margin-top:9px;background:var(--accent-soft);border-radius:10px;padding:9px 11px;font-size:14px;white-space:pre-wrap;word-break:break-word}
+.run .reply .lb,.run .heard .lb{font-size:11px;color:var(--mute);display:block;margin-bottom:3px}
+.run details{margin-top:9px}
+.dg{display:block;font-size:12.5px;border-radius:8px;padding:5px 9px;margin:4px 0 0;background:var(--accent-soft);color:var(--ink)}
+.dg b{color:var(--accent);font-size:11px}
+/* 配置 */
+.kv{display:flex;gap:10px;padding:9px 4px;border-bottom:1px solid var(--line2);font-size:14px;align-items:baseline}
+.kv .k{flex:0 0 96px;color:var(--mute);font-size:13px}
+.kv .v{flex:1;min-width:0;word-break:break-word}
+.kv .from{font-size:11px;color:var(--mute)}
+.perm-allow{color:var(--accent)}.perm-approve{color:var(--amber)}.perm-deny{color:var(--red)}
+.gbar{height:7px;border-radius:4px;background:var(--line2);overflow:hidden;margin-top:5px}
+.gbar i{display:block;height:100%;background:var(--accent)}
+/* ===== 房子 ===== */
+.housewrap{padding:12px;display:flex;flex-direction:column;gap:10px}
+.hrow{display:flex;gap:10px;align-items:center;padding:12px 14px}
+.hrow .ic{font-size:20px}
+.hrow .mid{flex:1;min-width:0}
+.hrow .tt{font-size:15px}
+.hrow .ss{font-size:12px;color:var(--mute);margin-top:1px}
+.hrow button.act{border:1px solid var(--accent);border-radius:12px;background:var(--paper);color:var(--accent);padding:5px 14px;font-size:14px}
+.hrow button.act:disabled{border-color:var(--line);color:var(--mute)}
+/* 配对页 */
+#pair{padding:24px 18px;max-width:420px;margin:0 auto}
+#pair h2{font-family:var(--serif)}
+#pair input{width:100%;padding:10px;margin:6px 0 12px;border:1px solid var(--line);border-radius:10px;font:inherit;background:var(--paper)}
+#pair button{width:100%;padding:12px;border:0;border-radius:12px;background:var(--ink);color:#fff}
 </style></head><body>
 <div id="pair" hidden><h2>进门</h2><p>粘上户主给你的配对链接，或者分别填地址和 token。</p>
 <input id="plink" placeholder="sameroof://pair?api=...&token=..."><input id="papi" placeholder="http://192.168.1.5:8790"><input id="ptok" placeholder="token"><button id="pgo">进屋</button></div>
-<div id="app" hidden><div id="top"><b>同屋</b><span id="who"></span><button id="notify" type="button">开通知</button><span id="dot" style="color:#c33">●</span></div><div id="log"></div>
-<div id="bar"><textarea id="in" rows="1" placeholder="说点什么，@名字 叫人"></textarea><button id="send">说</button></div></div>
+<div id="app" hidden>
+<aside id="rail">
+ <div class="logo">同屋 <span id="dot" title="实时连接">●</span></div>
+ <nav class="nav">
+  <button data-tab="now" class="on">🌅 现在</button>
+  <button data-tab="lounge">🛋️ 客厅<span class="badge" id="nb-lounge" hidden></span></button>
+  <button data-tab="rooms">🚪 房间<span class="badge" id="nb-rooms" hidden></span></button>
+  <button data-tab="house">🏗️ 房子</button>
+ </nav>
+ <div class="foot"><span id="railme"></span></div>
+</aside>
+<main>
+ <!-- 现在 -->
+ <section class="view on" id="view-now">
+  <div class="hd"><h1>现在</h1><span class="sub">房子的呼吸</span><span class="sp"></span><span id="dot-m" style="font-size:10px;color:#c33">●</span></div>
+  <div id="whostrip"></div>
+  <div id="pending"></div>
+  <div class="chips" id="feedchips">
+   <button class="chip-f on" data-f="">全部</button><button class="chip-f" data-f="wake,sleep">起居</button><button class="chip-f" data-f="model_call">模型</button><button class="chip-f" data-f="approval_request,approval_result">审批</button><button class="chip-f" data-f="error">错误</button>
+  </div>
+  <div id="feed"></div>
+  <div style="text-align:center;padding:8px 0 20px"><button class="loadmore" id="feedmore" type="button" hidden>更早的动静</button></div>
+ </section>
+ <!-- 客厅 -->
+ <section class="view" id="view-lounge">
+  <div class="hd"><h1>客厅</h1><span class="sub" id="loungesub"></span><span class="sp"></span></div>
+  <div id="log"></div>
+  <div class="bar" id="loungebar" hidden><textarea id="in" rows="1" placeholder="说点什么，@名字 叫人"></textarea><button id="send">发送</button></div>
+ </section>
+ <!-- 房间 -->
+ <section class="view" id="view-rooms">
+  <div class="hd"><h1>房间</h1><span class="sub">推门进去</span><span class="sp"></span></div>
+  <div id="roomlist"></div>
+ </section>
+ <section class="view" id="view-room">
+  <div class="hd"><button class="back" id="roomback" type="button">‹</button><h1 id="roomtitle">房间</h1><span class="sub" id="roomsub"></span><span class="sp"></span></div>
+  <div class="pills" id="roompills">
+   <button class="pill-tab on" data-p="dm">私聊</button><button class="pill-tab" data-p="memory">记忆</button><button class="pill-tab" data-p="handover">交接</button><button class="pill-tab" data-p="care">惦记</button><button class="pill-tab" data-p="runs">运行</button><button class="pill-tab" data-p="config">配置</button>
+  </div>
+  <div class="rpane on dmview" id="rp-dm">
+   <div id="roomlog"></div>
+   <div class="bar" id="roombar" hidden><textarea id="dmin" rows="1" placeholder=""></textarea><button id="dmsend">发送</button></div>
+  </div>
+  <div class="rpane pad" id="rp-memory"></div>
+  <div class="rpane pad" id="rp-handover"></div>
+  <div class="rpane pad" id="rp-care"></div>
+  <div class="rpane pad" id="rp-runs"></div>
+  <div class="rpane pad" id="rp-config"></div>
+ </section>
+ <!-- 房子 -->
+ <section class="view" id="view-house">
+  <div class="hd"><h1>房子</h1><span class="sub">底层</span><span class="sp"></span></div>
+  <div class="housewrap" id="housewrap"></div>
+ </section>
+</main>
+<nav id="tabbar">
+ <button class="tb on" data-tab="now"><span class="ic">🌅</span>现在</button>
+ <button class="tb" data-tab="lounge"><span class="ic">🛋️</span>客厅<span class="badge" id="tb-lounge" hidden></span></button>
+ <button class="tb" data-tab="rooms"><span class="ic">🚪</span>房间<span class="badge" id="tb-rooms" hidden></span></button>
+ <button class="tb" data-tab="house"><span class="ic">🏗️</span>房子</button>
+</nav>
+</div>
+<div id="atpop" hidden></div>
 <script>
+'use strict';
 const S=k=>localStorage.getItem(k),W=(k,v)=>localStorage.setItem(k,v);
-let api=S('api'),tok=S('token'),me=null,members=[],lastSeq=0;
-const $=s=>document.querySelector(s),log=$('#log');
+let api=S('api'),tok=S('token'),me=null,members=[],byId={};
+const $=s=>document.querySelector(s);
+const seen=new Set();let lastSeq=0,lastActSeq=0;
+const cards={};const pending=new Map();
+const dmStore={};           // memberId -> {msgs:[],firstSeq,exhausted,unread}
+let loungeState={msgs:[],firstSeq:0,exhausted:false,unread:0};
+let curView='now',roomId=null,roomTab='dm',feedFilter='';
+const feedSeen=new Set();const feedItems=[];
+const FIVE_MIN=5*60*1000,MAXSEQ=Number.MAX_SAFE_INTEGER;
+
+/* ===== 配对 ===== */
 const ppair=()=>{$('#pair').hidden=false;$('#app').hidden=true};
 $('#pgo').onclick=()=>{let l=$('#plink').value.trim();if(l){const u=new URL(l.replace('sameroof://','http://'));api=u.searchParams.get('api');tok=u.searchParams.get('token')}else{api=$('#papi').value.trim();tok=$('#ptok').value.trim()}if(!api||!tok)return alert('地址和token都要');W('api',api);W('token',tok);location.reload()};
-const req=(m,p,b)=>fetch(api+p,{method:m,headers:{authorization:'Bearer '+tok,'content-type':'application/json'},body:b?JSON.stringify(b):undefined}).then(async r=>{const data=await r.json().catch(()=>({error:{message:'客厅返回了无法识别的响应'}}));if(r.status===401){localStorage.removeItem('token');ppair()}if(!r.ok)throw new Error(data.error&&data.error.message||('请求失败 '+r.status));return data});
-const name=id=>{const m=members.find(x=>x.id===id)||{};return ((m.avatar&&m.avatar.emoji)?m.avatar.emoji+' ':'')+(m.name||id)};
+
+/* ===== 请求 ===== */
+const req=(m,p,b)=>fetch(api+p,{method:m,headers:{authorization:'Bearer '+tok,'content-type':'application/json'},body:b?JSON.stringify(b):undefined}).then(async r=>{const data=await r.json().catch(()=>({error:{message:'客厅返回了无法识别的响应'}}));if(r.status===401){localStorage.removeItem('token');ppair();throw new Error('钥匙失效了，重新配对进门')}if(!r.ok)throw new Error(data.error&&data.error.message||('请求失败 '+r.status));return data});
+
+/* ===== 人 ===== */
+const member=id=>byId[id]||{};
+const name=id=>member(id).name||id||'？';
+const emoji=id=>{const a=member(id).avatar;return (a&&a.emoji)||((member(id).name||'?').slice(0,1))};
+
+/* ===== 时间 ===== */
 const fmt=ts=>new Date(ts).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
-function show(m){if(m.seq&&m.seq<=lastSeq)return;if(m.seq)lastSeq=m.seq;const d=document.createElement('div');
- if(m.kind==='system'){d.className='m sys';d.textContent=String(m.text||'');let meta=null;try{meta=m.meta&&(typeof m.meta==='string'?JSON.parse(m.meta):m.meta)}catch{}
-  if(meta&&meta.approval_id&&!meta.decision&&me&&me.species==='human'){const a=document.createElement('div');a.className='ap';for(const [l,v] of [['同意','allow'],['拒绝','deny']]){const b=document.createElement('button');b.textContent=l;b.onclick=()=>req('POST','/approval/'+meta.approval_id,{decision:v}).then(()=>a.remove()).catch(e=>alert(e.message));a.appendChild(b)}d.appendChild(a)}}
- else{d.className='m'+(m.from_id===(me&&me.id)?' me':'')+(m.kind==='dm'?' dm':'');const n=document.createElement('div'),body=document.createElement('div'),time=document.createElement('div');n.className='n';time.className='t';n.textContent=name(m.from_id)+(m.kind==='dm'?' · 私信':'');body.textContent=String(m.text||'');time.textContent=fmt(m.ts);d.append(n,body,time)}
- log.appendChild(d);window.scrollTo(0,document.body.scrollHeight)}
-async function boot(){if(!api||!tok)return ppair();$('#pair').hidden=true;$('#app').hidden=false;
- me=await req('GET','/me');members=await req('GET','/members');
- const hist=await req('GET','/history?since=0&limit=200');hist.forEach(show);
- const inbox=await req('GET','/inbox');const dms=inbox.filter(x=>x.kind==='dm');dms.forEach(show);if(inbox.length)req('POST','/inbox/ack',{ids:inbox.map(x=>x.id)});
- $('#who').textContent='我是 '+(me?me.name:'?')+' · 家里：'+members.map(x=>x.name).join('、');
- sse()}
-async function sse(){try{const r=await fetch(api+'/events',{headers:{authorization:'Bearer '+tok}});if(r.status===401){tok=null;localStorage.removeItem('token');ppair();return}if(!r.ok)throw new Error('实时连接失败 '+r.status);$('#dot').style.color='#3a3';const reader=r.body.getReader(),decoder=new TextDecoder();let buf='';for(;;){const x=await reader.read();if(x.done)break;buf+=decoder.decode(x.value,{stream:true});const parts=buf.split('\n\n');buf=parts.pop();for(const part of parts){const line=part.split('\n').find(v=>v.startsWith('data: '));if(line)show(JSON.parse(line.slice(6)))}}}catch(e){$('#dot').style.color='#c33'}if(tok)setTimeout(sse,3000)}
-async function say(){const t=$('#in').value.trim();if(!t)return;$('#in').value='';const dm=t.match(/^DM:\s*(\S+)\s*[:：]?\s*([\s\S]*)$/);
- try{if(dm){const m=await req('POST','/dm',{to:dm[1],text:dm[2]});show(m)}else await req('POST','/say',{text:t})}catch(e){$('#in').value=t;alert(e.message)}}
+const fmtFull=ts=>{const d=new Date(ts),today=new Date().toDateString()===d.toDateString();return (today?'':(d.getMonth()+1)+'月'+d.getDate()+'日 ')+fmt(ts)};
+const divider=ts=>{const d=document.createElement('div');d.className='ts';d.textContent=fmtFull(ts);return d};
+
+/* ===== 气泡 ===== */
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function highlightAt(html){for(const m of [...members].sort((a,b)=>b.name.length-a.name.length)){html=html.split('@'+esc(m.name)).join('<span class="at">@'+esc(m.name)+'</span>')}return html}
+function build(m){
+ if(m.kind==='system'){
+  let meta=null;try{meta=m.meta&&(typeof m.meta==='string'?JSON.parse(m.meta):m.meta)}catch(e){}
+  if(meta&&meta.approval_id){
+   if(meta.decision){const c=cards[meta.approval_id];if(c)c.settled(meta.decision,name(m.from_id));
+    pending.delete(meta.approval_id);renderPending();
+    const d=document.createElement('div');d.className='sys';d.textContent=String(m.text||'');return d}
+   if(!pending.has(meta.approval_id)){pending.set(meta.approval_id,{m,meta});renderPending()}
+   return approvalCard(m,meta)}
+  const d=document.createElement('div');d.className='sys';d.textContent=String(m.text||'');return d}
+ const mine=me&&m.from_id===me.id;
+ const d=document.createElement('div');d.className='msg'+(mine?' mine':'');
+ const av=document.createElement('div');av.className='av';av.textContent=emoji(m.from_id);
+ const wrap=document.createElement('div');wrap.className='wrap';
+ let nt=mine?'':name(m.from_id);
+ if(nt){const n=document.createElement('div');n.className='n';n.textContent=nt;wrap.appendChild(n)}
+ const b=document.createElement('div');b.className='b'+((m.mentions||[]).includes(me&&me.id)&&!mine?' atme':'');
+ b.innerHTML=highlightAt(esc(String(m.text||'')));
+ wrap.appendChild(b);d.append(av,wrap);return d}
+function approvalCard(m,meta){
+ const card=document.createElement('div');card.className='apcard';
+ const t=document.createElement('div');t.className='apt';t.textContent='🙋 审批请求';
+ const b=document.createElement('div');b.className='apb';b.textContent=String(m.text||'');
+ const mi=document.createElement('div');mi.className='apm';mi.textContent='编号 '+meta.approval_id;
+ card.append(t,b,mi);
+ const state={decision:null,settled:(decision,by)=>{state.decision=decision;pending.delete(meta.approval_id);
+  for(const el of state.els){const btns=el.querySelector('.apbtns');if(btns)btns.remove();if(el.querySelector('.apdone'))continue;const r=document.createElement('div');r.className='apdone';r.textContent=decision==='allowed'?('✅ '+(by?by+' ':'')+'已同意'):decision==='expired'?'⌛ 已过期':('❌ '+(by?by+' ':'')+'已拒绝');el.appendChild(r)}}};
+ state.els=[card];
+ const prior=cards[meta.approval_id];
+ if(prior){prior.els.push(card);if(prior.decision)state.decision=prior.decision;cards[meta.approval_id]=prior;state.settled=prior.settled;if(state.decision)state.settled(state.decision)}
+ else cards[meta.approval_id]=state;
+ const st=cards[meta.approval_id];
+ if(!st.decision){
+  if(me&&me.species==='human'){
+   const btns=document.createElement('div');btns.className='apbtns';
+   for(const [label,v,cls] of [['同意','allow','ok'],['拒绝','deny','no']]){const btn=document.createElement('button');btn.textContent=label;btn.className=cls;
+    btn.onclick=()=>{for(const x of btns.children)x.disabled=true;req('POST','/approval/'+meta.approval_id,{decision:v}).then(()=>st.settled(v==='allow'?'allowed':'denied','我')).catch(e=>{alert(e.message);for(const x of btns.children)x.disabled=false})};
+    btns.appendChild(btn)}
+   card.appendChild(btns);
+   req('GET','/approval/'+meta.approval_id).then(d=>{if(d.expires_ts)mi.textContent+=' · 有效期至 '+fmtFull(d.expires_ts);if(d.status&&d.status!=='pending')st.settled(d.status,d.decided_by&&name(d.decided_by))}).catch(()=>{});
+  }else{const w=document.createElement('div');w.className='apm';w.textContent='等维护者决定…';card.appendChild(w)}
+ }else st.settled(st.decision);
+ return card}
+
+/* ===== 审批·等维护者 ===== */
+function renderPending(){
+ const box=$('#pending');box.innerHTML='';
+ if(!pending.size)return;
+ const t=document.createElement('div');t.className='secttl';t.textContent=me&&me.species==='human'?'等你拿主意':'等维护者拿主意';
+ box.appendChild(t);
+ for(const {m,meta} of pending.values())box.appendChild(approvalCard(m,meta))}
+
+/* ===== 视图切换 ===== */
+function showView(v){curView=v;
+ for(const x of document.querySelectorAll('.view'))x.classList.toggle('on',x.id==='view-'+v);
+ const navKey=v==='room'?'rooms':v;
+ for(const x of document.querySelectorAll('[data-tab]'))x.classList.toggle('on',x.dataset.tab===navKey);
+ const inLounge=v==='lounge',inRoomDm=v==='room'&&roomTab==='dm';
+ $('#loungebar').hidden=!inLounge;
+ $('#roombar').hidden=!inRoomDm;
+ $('#tabbar').classList.toggle('hidetab',v==='room');
+ if(inLounge){loungeState.unread=0;requestAnimationFrame(()=>window.scrollTo(0,document.body.scrollHeight))}
+ if(inRoomDm){const d=dmStore[roomId];if(d){d.unread=0;ackDm(d)}requestAnimationFrame(()=>window.scrollTo(0,document.body.scrollHeight))}
+ window.scrollTo(0,inLounge||inRoomDm?document.body.scrollHeight:0);
+ updateBadges();
+ if(v==='now')loadFeed();
+ if(v==='rooms')renderRoomList();
+ if(v==='house')renderHouse()}
+for(const tb of document.querySelectorAll('[data-tab]'))tb.onclick=()=>showView(tb.dataset.tab);
+function updateBadges(){
+ const dmTotal=Object.values(dmStore).reduce((s,c)=>s+(c.unread||0),0);
+ for(const id of['#nb-lounge','#tb-lounge']){const e=$(id);e.hidden=!loungeState.unread;e.textContent=loungeState.unread}
+ for(const id of['#nb-rooms','#tb-rooms']){const e=$(id);e.hidden=!dmTotal;e.textContent=dmTotal}
+ const total=loungeState.unread+dmTotal;
+ document.title=total?('('+total+') 同屋'):'同屋'}
+
+/* ===== 现在：谁在家 ===== */
+function renderWho(){
+ const s=$('#whostrip');s.innerHTML='';
+ for(const m of sortedMembers()){
+  const d=document.createElement('div');d.className='who'+(m.online?' on':' off');
+  const avw=document.createElement('div');avw.className='avw';
+  const av=document.createElement('div');av.className='av';av.textContent=emoji(m.id);
+  const st=document.createElement('span');st.className='st';
+  avw.append(av,st);
+  const nm=document.createElement('div');nm.className='nm';nm.textContent=m.name;
+  d.append(avw,nm);
+  d.title=(m.online?'在线':('离线'+(m.last_seen?' · 上次 '+fmtFull(m.last_seen):'')));
+  d.onclick=()=>openRoom(m.id);
+  s.appendChild(d)}}
+const sortedMembers=()=>[...members].sort((a,b)=>(a.species==='human'?0:1)-(b.species==='human'?0:1));
+
+/* ===== 现在：事件流 ===== */
+const EVICON={wake:'🌅',sleep:'🌙',model_call:'🧠',config_change:'🔧',approval_request:'🙋',approval_result:'✅',error:'⚠️',thread_update:'🧵',note:'📌'};
+function evItem(a){
+ const d=document.createElement('div');d.className='ev'+(a.kind==='error'?' err':'');
+ const ic=document.createElement('div');ic.className='ic';ic.textContent=EVICON[a.kind]||'·';
+ const bd=document.createElement('div');bd.className='bd';
+ const tt=document.createElement('div');tt.className='tt';tt.textContent=String(a.text||'');
+ bd.appendChild(tt);
+ const bits=[];
+ if(a.kind==='model_call'&&a.meta){const mt=a.meta;if(mt.ms)bits.push((mt.ms/1000).toFixed(1)+'s');if(mt.usage&&mt.usage.total_tokens)bits.push(mt.usage.total_tokens+' tok');if(mt.model_calls>1)bits.push(mt.model_calls+' 次调用')}
+ if(a.kind==='wake'&&a.meta&&a.meta.reason)bits.push(String(a.meta.reason));
+ if(a.kind==='sleep'&&a.meta&&a.meta.wakes_today!=null)bits.push('今天第 '+a.meta.wakes_today+' 次醒');
+ if(a.meta&&a.meta.error)bits.push('⚠️ '+String(a.meta.error));
+ if(bits.length){const mt=document.createElement('div');mt.className='mt';mt.textContent=bits.join(' · ');bd.appendChild(mt)}
+ const tm=document.createElement('div');tm.className='tm';tm.textContent=fmt(a.ts);
+ d.append(ic,bd,tm);return d}
+let feedLoaded=false,feedOldest=null,feedExhausted=false;
+async function loadFeed(){
+ if(feedLoaded)return;feedLoaded=true;
+ try{const list=await req('GET','/activity?limit=60');
+  for(const a of list)feedPush(a,true);
+  if(list.length)feedOldest=list[list.length-1].seq;
+  feedExhausted=list.length<60;
+  renderFeed()}catch(e){$('#feed').innerHTML='<div class="empty">事件流还没接上：'+esc(e.message)+'</div>'}}
+function feedPush(a,defer){
+ if(feedSeen.has(a.seq))return;feedSeen.add(a.seq);
+ if(a.seq>lastActSeq)lastActSeq=a.seq;
+ feedItems.push(a);
+ if(feedOldest===null||a.seq<feedOldest)feedOldest=a.seq;
+ if(!defer)renderFeed()}
+function renderFeed(){
+ const box=$('#feed');box.innerHTML='';
+ const filter=feedFilter?feedFilter.split(','):null;
+ const items=feedItems.filter(a=>!filter||filter.includes(a.kind)).sort((a,b)=>b.seq-a.seq);
+ if(!items.length){box.innerHTML='<div class="empty">还没有动静，房子刚醒来</div>';return}
+ for(const a of items)box.appendChild(evItem(a));
+ const more=$('#feedmore');more.hidden=feedExhausted}
+for(const c of document.querySelectorAll('#feedchips .chip-f'))c.onclick=()=>{
+ for(const x of document.querySelectorAll('#feedchips .chip-f'))x.classList.toggle('on',x===c);
+ feedFilter=c.dataset.f;renderFeed()};
+$('#feedmore').onclick=async()=>{
+ try{const list=await req('GET','/activity?limit=60&before='+feedOldest);
+  if(!list.length){feedExhausted=true;renderFeed();return}
+  for(const a of list)feedPush(a,true);
+  if(list.length<60)feedExhausted=true;
+  renderFeed()}catch(e){alert(e.message)}};
+
+/* ===== 客厅 ===== */
+function loungeRender(msgs){const log=$('#log');log.innerHTML='';
+ if(!loungeState.exhausted){const lm=document.createElement('button');lm.className='loadmore';lm.id='loungemore';lm.type='button';lm.textContent='加载更早的消息';lm.onclick=loungeMore;log.appendChild(lm)}
+ if(!msgs.length){const e=document.createElement('div');e.className='empty';e.textContent='客厅里还静悄悄的';log.appendChild(e)}
+ let prev=0;for(const m of msgs){const ts=Date.parse(m.ts)||0;if(prev&&ts-prev>FIVE_MIN)log.appendChild(divider(m.ts));prev=ts;log.appendChild(build(m))}
+ loungeState.lastTs=prev;loungeState.firstSeq=msgs.length?msgs[0].seq:0}
+async function loungeMore(){
+ try{const older=await req('GET','/history?before='+(loungeState.firstSeq||MAXSEQ)+'&limit=50');
+  if(!older.length){loungeState.exhausted=true;const lm=$('#loungemore');if(lm)lm.hidden=true;return}
+  for(const m of older){if(m.id)seen.add(m.id)}
+  loungeState.msgs=[...older.filter(m=>!loungeState.msgs.some(x=>x.id===m.id)),...loungeState.msgs];
+  loungeState.firstSeq=loungeState.msgs[0].seq;
+  const log=$('#log'),lm=$('#loungemore');
+  const frag=document.createDocumentFragment();let prev=0;
+  for(const m of older){const ts=Date.parse(m.ts)||0;if(prev&&ts-prev>FIVE_MIN)frag.appendChild(divider(m.ts));prev=ts;frag.appendChild(build(m))}
+  if(prev&&loungeState.msgs[older.length]){const nxt=Date.parse(loungeState.msgs[older.length].ts);if(nxt-prev>FIVE_MIN)frag.appendChild(divider(loungeState.msgs[older.length].ts))}
+  const h0=document.body.scrollHeight,y0=window.scrollY;
+  log.insertBefore(frag,lm.nextSibling);
+  window.scrollTo(0,y0+(document.body.scrollHeight-h0));
+ }catch(e){alert(e.message)}}
+const nearBottom=()=>window.innerHeight+window.scrollY>=document.body.scrollHeight-140;
+function loungeAppend(m){
+ const log=$('#log');const empty=log.querySelector('.empty');if(empty)empty.remove();
+ const ts=Date.parse(m.ts)||Date.now();
+ if(loungeState.lastTs&&ts-loungeState.lastTs>FIVE_MIN)log.appendChild(divider(m.ts));
+ loungeState.lastTs=ts;
+ const mine=me&&m.from_id===me.id,stay=nearBottom()||mine;
+ log.appendChild(build(m));
+ if(stay)window.scrollTo(0,document.body.scrollHeight)}
+
+/* ===== 私信（房间·私聊页） ===== */
+function dmGet(id){if(!dmStore[id])dmStore[id]={msgs:[],firstSeq:0,exhausted:false,unread:0,loaded:false};return dmStore[id]}
+async function dmLoad(id){const d=dmGet(id);if(d.loaded)return;d.loaded=true;
+ const list=await req('GET','/dm/history?with='+encodeURIComponent(id)+'&limit=50');
+ for(const m of list)if(!d.msgs.some(x=>x.id===m.id))d.msgs.push(m);
+ d.msgs.sort((a,b)=>a.seq-b.seq);d.firstSeq=d.msgs.length?d.msgs[0].seq:0;d.exhausted=list.length<50}
+function dmRender(id){const d=dmGet(id),log=$('#roomlog');log.innerHTML='';
+ if(!d.exhausted){const lm=document.createElement('button');lm.className='loadmore';lm.type='button';lm.textContent='加载更早的悄悄话';lm.onclick=()=>dmMore(id);log.appendChild(lm)}
+ if(!d.msgs.length){const e=document.createElement('div');e.className='empty';e.textContent='和 '+name(id)+' 的悄悄话从这里开始';log.appendChild(e)}
+ let prev=0;for(const m of d.msgs){const ts=Date.parse(m.ts)||0;if(prev&&ts-prev>FIVE_MIN)log.appendChild(divider(m.ts));prev=ts;log.appendChild(build(m))}
+ d.lastTs=prev}
+async function dmMore(id){const d=dmGet(id);
+ try{const older=await req('GET','/dm/history?with='+encodeURIComponent(id)+'&before='+(d.firstSeq||MAXSEQ)+'&limit=50');
+  if(!older.length){d.exhausted=true;dmRender(id);return}
+  for(const m of older){if(m.id)seen.add(m.id);if(!d.msgs.some(x=>x.id===m.id))d.msgs.unshift(m)}
+  d.msgs.sort((a,b)=>a.seq-b.seq);d.firstSeq=d.msgs[0].seq;
+  if(older.length<50)d.exhausted=true;
+  const h0=document.body.scrollHeight,y0=window.scrollY;
+  dmRender(id);
+  window.scrollTo(0,y0+(document.body.scrollHeight-h0))}catch(e){alert(e.message)}}
+function dmAppend(id,m){const d=dmGet(id);d.msgs.push(m);
+ if(curView==='room'&&roomId===id&&roomTab==='dm'){
+  const log=$('#roomlog');const empty=log.querySelector('.empty');if(empty)empty.remove();
+  const ts=Date.parse(m.ts)||Date.now();
+  if(d.lastTs&&ts-d.lastTs>FIVE_MIN)log.appendChild(divider(m.ts));
+  d.lastTs=ts;
+  const mine=me&&m.from_id===me.id,stay=nearBottom()||mine;
+  log.appendChild(build(m));
+  if(stay)window.scrollTo(0,document.body.scrollHeight)}
+ else if(me&&m.from_id!==me.id){d.unread++;updateBadges();if(curView==='rooms')renderRoomList()}}
+function ackDm(d){const ids=d.msgs.filter(m=>m.kind==='dm'&&me&&m.from_id!==me.id).map(m=>m.id).filter(Boolean);if(ids.length)req('POST','/inbox/ack',{ids}).catch(()=>{})}
+
+/* ===== 收消息总线 ===== */
+function receive(m,silent){
+ if(m.type==='activity')return feedPush(m);
+ if(m.id){if(seen.has(m.id))return;seen.add(m.id)}
+ if(m.seq&&m.seq>lastSeq)lastSeq=m.seq;
+ if(m.kind==='dm'){const other=me&&m.from_id===me.id?m.to_id:m.from_id;dmAppend(other,m);return}
+ loungeState.msgs.push(m);
+ if(curView==='lounge'){loungeAppend(m)}
+ else if(!silent){loungeState.unread++;updateBadges()}}
+
+/* ===== 发送 ===== */
+async function sendLounge(){const t=$('#in').value.trim();if(!t)return;$('#in').value='';grow($('#in'));hideAt();
+ try{const m=await req('POST','/say',{text:t});receive(m,true)}catch(e){$('#in').value=t;grow($('#in'));alert(e.message)}}
+async function sendDm(){const t=$('#dmin').value.trim();if(!t||!roomId)return;$('#dmin').value='';grow($('#dmin'));
+ try{const m=await req('POST','/dm',{to:roomId,text:t});receive(m,true)}catch(e){$('#dmin').value=t;grow($('#dmin'));alert(e.message)}}
+$('#send').onclick=sendLounge;$('#dmsend').onclick=sendDm;
+function grow(ta){ta.style.height='auto';ta.style.height=Math.min(ta.scrollHeight,120)+'px'}
+
+/* ===== @ 补全（仅客厅） ===== */
+let atList=[],atHi=0;
+const atEnd=/@[^\s@，,。！!？?：:；;]*$/;
+function onAt(){const ta=$('#in');const mm=ta.value.slice(0,ta.selectionStart).match(atEnd);
+ if(!mm)return hideAt();
+ const frag=mm[0].slice(1);
+ atList=members.filter(x=>(!me||x.id!==me.id)&&(!frag||x.name.includes(frag)));
+ if(!atList.length)return hideAt();
+ atHi=0;const pop=$('#atpop');pop.innerHTML='';
+ atList.forEach((m,i)=>{const o=document.createElement('div');o.className='opt'+(i===atHi?' hi':'');
+  const e=document.createElement('span');e.className='e';e.textContent=emoji(m.id);
+  o.append(e,document.createTextNode(m.name+(m.online?'':'（不在线）')));
+  o.onmousedown=ev=>{ev.preventDefault();pick(i)};pop.appendChild(o)});
+ pop.hidden=false}
+function paintHi(){[...$('#atpop').children].forEach((o,i)=>o.classList.toggle('hi',i===atHi))}
+function hideAt(){$('#atpop').hidden=true;atList=[]}
+function pick(i){const m=atList[i];if(!m)return;const ta=$('#in');const upto=ta.value.slice(0,ta.selectionStart);
+ const head=upto.replace(atEnd,'');const nv=head+'@'+m.name+' ';
+ ta.value=nv+ta.value.slice(ta.selectionStart);ta.selectionStart=ta.selectionEnd=nv.length;hideAt();ta.focus()}
+$('#in').addEventListener('input',()=>{grow($('#in'));onAt()});
+$('#in').addEventListener('keydown',e=>{
+ if(!$('#atpop').hidden){
+  if(e.key==='ArrowDown'){atHi=(atHi+1)%atList.length;paintHi();e.preventDefault();return}
+  if(e.key==='ArrowUp'){atHi=(atHi-1+atList.length)%atList.length;paintHi();e.preventDefault();return}
+  if(e.key==='Enter'||e.key==='Tab'){pick(atHi);e.preventDefault();return}
+  if(e.key==='Escape'){hideAt();return}}
+ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendLounge()}});
+$('#dmin').addEventListener('input',()=>grow($('#dmin')));
+$('#dmin').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendDm()}});
+
+/* ===== 房间列表 ===== */
+function renderRoomList(){
+ const list=$('#roomlist');list.innerHTML='';
+ for(const m of sortedMembers()){
+  const d=document.createElement('div');d.className='door'+(m.online?' on':'');
+  const av=document.createElement('div');av.className='av';av.textContent=emoji(m.id);
+  const mid=document.createElement('div');mid.className='mid';
+  const nm=document.createElement('div');nm.className='nm';nm.textContent=m.name;
+  const tag=document.createElement('span');tag.className='pill';tag.textContent=m.species==='human'?'人类':'AI';nm.appendChild(tag);
+  const st=document.createElement('div');st.className='st';
+  const dot=document.createElement('i');st.appendChild(dot);
+  st.appendChild(document.createTextNode(m.online?'在线':('离线'+(m.last_seen?' · 上次 '+fmtFull(m.last_seen):''))));
+  mid.append(nm,st);d.append(av,mid);
+  const un=dmGet(m.id).unread;
+  if(un){const bg=document.createElement('span');bg.className='badge';bg.textContent=un;d.appendChild(bg)}
+  d.onclick=()=>openRoom(m.id);
+  list.appendChild(d)}}
+
+/* ===== 房间详情 ===== */
+async function openRoom(id){
+ roomId=id;roomTab='dm';
+ const m=member(id);
+ $('#roomtitle').textContent=m.name||id;
+ $('#roomsub').textContent=(m.online?'🟢 在线':'⚪ 离线')+' · '+(m.species==='human'?'人类':'AI');
+ $('#dmin').placeholder='悄悄对 '+(m.name||id)+' 说…';
+ for(const x of document.querySelectorAll('#roompills .pill-tab'))x.classList.toggle('on',x.dataset.p==='dm');
+ for(const x of document.querySelectorAll('.rpane'))x.classList.toggle('on',x.id==='rp-dm');
+ showView('room');
+ for(const x of document.querySelectorAll('.view'))x.classList.toggle('on',x.id==='view-room');
+ try{await dmLoad(id);dmRender(id);
+  const d=dmGet(id);d.unread=0;ackDm(d);updateBadges();
+  requestAnimationFrame(()=>window.scrollTo(0,document.body.scrollHeight));
+ }catch(e){$('#roomlog').innerHTML='<div class="empty">'+esc(e.message)+'</div>'}
+ roomDataCache={};
+ }
+$('#roomback').onclick=()=>{showView('rooms')};
+let roomDataCache={};
+async function roomData(sub){
+ const k=roomId+':'+sub;
+ if(roomDataCache[k])return roomDataCache[k];
+ const d=await req('GET','/rooms/'+encodeURIComponent(roomId)+(sub?'/'+sub:'')+'?limit=80');
+ roomDataCache[k]=d;return d}
+for(const p of document.querySelectorAll('#roompills .pill-tab'))p.onclick=async()=>{
+ roomTab=p.dataset.p;
+ for(const x of document.querySelectorAll('#roompills .pill-tab'))x.classList.toggle('on',x===p);
+ for(const x of document.querySelectorAll('.rpane'))x.classList.toggle('on',x.id==='rp-'+roomTab);
+ $('#roombar').hidden=roomTab!=='dm';
+ window.scrollTo(0,roomTab==='dm'?document.body.scrollHeight:0);
+ if(roomTab==='dm')return;
+ const box=$('#rp-'+roomTab);
+ if(box.dataset.done)return;
+ box.innerHTML='<div class="empty">拉开抽屉…</div>';
+ try{
+  if(roomTab==='memory')renderMemory(box,await roomData('memory'));
+  else if(roomTab==='handover')renderHandover(box,await roomData('handover'));
+  else if(roomTab==='care')renderCare(box,await roomData('concerns'),await roomData('notes'));
+  else if(roomTab==='runs')renderRuns(box,await roomData('runs'));
+  else if(roomTab==='config')renderConfig(box,await roomData(''),await roomData('budget'));
+  box.dataset.done='1';
+ }catch(e){box.innerHTML='<div class="empty">'+esc(e.message)+'</div>'}};
+
+/* ----- 记忆 ----- */
+function renderMemory(box,rows){
+ box.innerHTML='';
+ if(!rows.length){box.innerHTML='<div class="empty">记忆箱子还是空的</div>';return}
+ const t=document.createElement('div');t.className='secttl';t.textContent='记忆（'+rows.length+' 条）';box.appendChild(t);
+ for(const m of rows.slice().reverse()){
+  const d=document.createElement('div');d.className='mem'+(m.archived?' arch':'');
+  const ct=document.createElement('div');ct.className='ct';ct.textContent=m.content;
+  const mt=document.createElement('div');mt.className='mt';
+  const src=document.createElement('span');src.className='pill'+(m.source==='human'?' ok':'');
+  src.textContent=m.source==='human'?'家人说的':m.source==='self'?'TA 自己记的':'听来的';
+  mt.appendChild(src);
+  const conf=document.createElement('span');
+  conf.innerHTML='置信 '+Math.round((m.confidence||0)*100)+'% <span class="cbar"><i style="width:'+Math.round((m.confidence||0)*100)+'%"></i></span>';
+  mt.appendChild(conf);
+  const rv=document.createElement('span');rv.textContent=m.reviewed?'✓ 已审':'未审';mt.appendChild(rv);
+  if(m.archived){const ar=document.createElement('span');ar.className='pill warn';ar.textContent='冷藏';mt.appendChild(ar)}
+  if(m.hits){const h=document.createElement('span');h.textContent='被想起 '+m.hits+' 次';mt.appendChild(h)}
+  for(const tg of (m.tags||[])){const g=document.createElement('span');g.className='pill';g.textContent='#'+tg;mt.appendChild(g)}
+  const tm=document.createElement('span');tm.textContent=fmtFull(m.ts);mt.appendChild(tm);
+  d.append(ct,mt);box.appendChild(d)}}
+/* ----- 交接 ----- */
+function renderHandover(box,d){
+ box.innerHTML='';
+ const t=document.createElement('div');t.className='secttl';t.textContent='这一班的交接信';box.appendChild(t);
+ const card=document.createElement('div');card.className='card';card.style.padding='12px 14px';
+ const ho=document.createElement('div');ho.className='ho';ho.textContent=d.latest||'（还没写）';
+ card.appendChild(ho);box.appendChild(card);
+ if(d.history&&d.history.length){
+  const det=document.createElement('details');det.style.marginTop='10px';
+  const sm=document.createElement('summary');sm.textContent='以前的交接（'+d.history.length+'）';det.appendChild(sm);
+  for(const h of d.history.slice().reverse()){const p=document.createElement('div');p.className='ho';p.style.cssText='padding:10px 0;border-top:1px solid var(--line2)';p.textContent=h;det.appendChild(p)}
+  box.appendChild(det)}}
+/* ----- 惦记 / 小本 ----- */
+function renderCare(box,concerns,notes){
+ box.innerHTML='';
+ const t1=document.createElement('div');t1.className='secttl';t1.textContent='惦记着的';box.appendChild(t1);
+ if(!concerns.open.length)box.appendChild(Object.assign(document.createElement('div'),{className:'empty',textContent:'没有惦记的事，心很宽'}));
+ for(const c of concerns.open){const d=document.createElement('div');d.className='li';d.textContent=c;box.appendChild(d)}
+ const t2=document.createElement('div');t2.className='secttl';t2.textContent='小本';box.appendChild(t2);
+ if(!notes.length)box.appendChild(Object.assign(document.createElement('div'),{className:'empty',textContent:'小本还空着'}));
+ for(const n of notes){const d=document.createElement('div');d.className='li';d.textContent=n;box.appendChild(d)}
+ if(concerns.done&&concerns.done.length){
+  const det=document.createElement('details');det.style.marginTop='10px';
+  const sm=document.createElement('summary');sm.textContent='已经了的心事（'+concerns.done.length+'）';det.appendChild(sm);
+  for(const c of concerns.done){const d=document.createElement('div');d.className='li';d.style.color='var(--mute)';d.textContent=c;det.appendChild(d)}
+  box.appendChild(det)}}
+/* ----- 运行 ----- */
+const RUNST={said:'💬 说了话',dm:'💌 发了私信',silent:'🤫 看了看没说',nothing:'😴 没事',passive:'🪶 轻醒',deferred:'🪶 压后了',error:'⚠️ 出错'};
+function renderRuns(box,rows){
+ box.innerHTML='';
+ if(!rows.length){box.innerHTML='<div class="empty">还没醒过，或者运行记录还没落盘</div>';return}
+ const t=document.createElement('div');t.className='secttl';t.textContent='每一次醒来（'+rows.length+'）';box.appendChild(t);
+ for(const r of rows){
+  const d=document.createElement('div');d.className='run';
+  const h=document.createElement('div');h.className='rh';
+  const rs=document.createElement('span');rs.className='rs';rs.textContent=RUNST[r.status]||('· '+r.status);
+  const rt=document.createElement('span');rt.className='rt';rt.textContent=fmtFull(r.ts)+' · '+String(r.reason||'');
+  h.append(rs,rt);d.appendChild(h);
+  const meta=document.createElement('div');meta.className='meta';
+  const bits=[];
+  if(r.ms)bits.push((r.ms/1000).toFixed(1)+'s');
+  if(r.model_calls)bits.push('模型 ×'+r.model_calls);
+  if(r.usage&&r.usage.total_tokens)bits.push(r.usage.total_tokens+' tok');
+  if(r.context)bits.push('上下文 '+Math.round(((r.context.system_chars||0)+(r.context.user_chars||0))/100)/10+'k 字 · 记起 '+(r.context.memories_recalled||0)+' 条');
+  if(bits.length){meta.textContent=bits.join(' · ');d.appendChild(meta)}
+  const spoken=String(r.raw_reply||'').split('\n').filter(l=>!/^\s*(REMEMBER|CONCERN|NOTE|THREAD|NEXT|BLOCKED|DONE-THREAD|LOG):/.test(l)).join('\n').replace(/[（(]静默[）)]/g,'').trim();
+  if(spoken){
+   const rp=document.createElement('div');rp.className='reply';
+   const lb=document.createElement('span');lb.className='lb';lb.textContent='TA 回的（TA 说的）';
+   rp.appendChild(lb);rp.appendChild(document.createTextNode(spoken));d.appendChild(rp)}
+  if(r.directives&&r.directives.length){
+   const dg=document.createElement('div');dg.style.marginTop='7px';
+   for(const x of r.directives){const g=document.createElement('div');g.className='dg';const kk=document.createElement('b');kk.textContent=(x.k||'?')+' ';const tt=document.createElement('span');tt.textContent=String(x.t||x);g.append(kk,tt);dg.appendChild(g)}
+   d.appendChild(dg)}
+  if(r.heard&&r.heard.length){
+   const det=document.createElement('details');
+   const sm=document.createElement('summary');sm.textContent='房子给 TA 看的（'+r.heard.length+' 条 · 记录）';det.appendChild(sm);
+   const f=document.createElement('div');f.className='fact';f.style.marginTop='6px';
+   f.textContent=r.heard.map(x=>'['+(x.kind||'?')+'] '+(x.from||'?')+': '+String(x.text||'')).join('\n');
+   det.appendChild(f);d.appendChild(det)}
+  box.appendChild(d)}}
+/* ----- 配置 ----- */
+function renderConfig(box,cfg,budget){
+ box.innerHTML='';
+ const kv=(k,v,from)=>{const d=document.createElement('div');d.className='kv';
+  const a=document.createElement('span');a.className='k';a.textContent=k;
+  const b=document.createElement('span');b.className='v';b.textContent=v;
+  d.append(a,b);
+  if(from){const f=document.createElement('span');f.className='from';f.textContent=from==='room'?'房间定的':'全家默认';d.appendChild(f)}
+  return d};
+ const sect=t=>{const d=document.createElement('div');d.className='secttl';d.textContent=t;box.appendChild(d)};
+ sect('模型与凭证');
+ if(cfg.model){
+  box.appendChild(kv('模型',cfg.model.provider+' / '+cfg.model.id));
+  if(cfg.model.auth){const a=cfg.model.auth;
+   box.appendChild(kv('凭证',(a.registered?'✅ 已登记':'⚠️ 未登记')+' · '+a.alias+' · '+a.mode+(a.provider?' · '+a.provider:'')))}
+  if(cfg.model.fallback&&cfg.model.fallback.length)box.appendChild(kv('备用',cfg.model.fallback.map(f=>f.provider+'/'+f.id).join('、')))}
+ box.appendChild(kv('运行时',String(cfg.runtime&&cfg.runtime.value||'—'),cfg.runtime&&cfg.runtime.from));
+ box.appendChild(kv('插件',(cfg.plugins&&cfg.plugins.value||[]).join('、')||'—',cfg.plugins&&cfg.plugins.from));
+ sect('作息与心跳');
+ const hb=cfg.heartbeat&&cfg.heartbeat.value||{};
+ box.appendChild(kv('心跳',hb.enabled===false?'关':('开 · '+(hb.mode||'')+' · '+(hb.interval||'')),cfg.heartbeat&&cfg.heartbeat.from));
+ if(cfg.schedule){if(cfg.schedule.quiet_hours)box.appendChild(kv('免打扰',cfg.schedule.quiet_hours));if(cfg.schedule.timezone)box.appendChild(kv('时区',cfg.schedule.timezone))}
+ if(budget&&budget.cap){
+  sect('今日预算（'+String(budget.day||'—')+'）');
+  for(const [k,label] of [['requests','请求'],['tokens','tokens']]){
+   const cap=budget.cap[k],used=(budget.used||{})[k]||0;
+   if(!cap)continue;
+   const d=document.createElement('div');d.className='kv';
+   const a=document.createElement('span');a.className='k';a.textContent=label;
+   const b=document.createElement('span');b.className='v';
+   b.textContent=used+' / '+cap;
+   const bar=document.createElement('div');bar.className='gbar';
+   const i=document.createElement('i');i.style.width=Math.min(100,Math.round(used/cap*100))+'%';if(used/cap>0.85)i.style.background='var(--red)';
+   bar.appendChild(i);b.appendChild(bar);d.append(a,b);box.appendChild(d)}
+  const u=budget.used||{};
+  box.appendChild(kv('今天','醒了 '+(u.wakes||0)+' 次 · 说话 '+(u.said||0)+' · 静默 '+(u.silent||0)+' · 轻醒 '+(u.passive||0)));
+  if(budget.estimate){const p=document.createElement('div');p.className='fact';p.style.marginTop='8px';p.textContent=budget.estimate;box.appendChild(p)}}
+ sect('权限');
+ for(const [k,v] of Object.entries(cfg.permissions||{})){
+  const d=document.createElement('div');d.className='kv';
+  const a=document.createElement('span');a.className='k';a.textContent=k;
+  const b=document.createElement('span');b.className='v perm-'+v.value;b.textContent=v.value==='allow'?'✓ 放手':v.value==='approve'?'🙋 要审批':'✕ 不行';
+  const f=document.createElement('span');f.className='from';f.textContent=v.from==='room'?'房间定的':'全家的上限';
+  d.append(a,b,f);box.appendChild(d)}
+ sect('上下文窗口');
+ for(const [k,v] of Object.entries(cfg.context||{}))box.appendChild(kv(k,String(v)));
+ if(cfg.relations&&Object.keys(cfg.relations).length){
+  sect('关系');
+  for(const [k,v] of Object.entries(cfg.relations))box.appendChild(kv(k,(v&&v.kind)||''))}
+ if(cfg.soul){
+  sect('SOUL（身份锚 · 只读）');
+  const det=document.createElement('details');
+  const sm=document.createElement('summary');sm.textContent='展开看 TA 是谁';det.appendChild(sm);
+  const pre=document.createElement('div');pre.className='fact';pre.style.marginTop='8px';pre.textContent=cfg.soul;
+  det.appendChild(pre);box.appendChild(det)}}
+
+/* ===== 房子 ===== */
+async function renderHouse(){
+ const box=$('#housewrap');box.innerHTML='';
+ const row=(ic,tt,ss)=>{const d=document.createElement('div');d.className='card hrow';
+  const i=document.createElement('span');i.className='ic';i.textContent=ic;
+  const mid=document.createElement('div');mid.className='mid';
+  const t=document.createElement('div');t.className='tt';t.textContent=tt;
+  mid.appendChild(t);
+  if(ss){const s=document.createElement('div');s.className='ss';s.textContent=ss;mid.appendChild(s)}
+  d.append(i,mid);box.appendChild(d);return d};
+ const t1=document.createElement('div');t1.className='secttl';t1.textContent='服务';box.appendChild(t1);
+ const online=members.filter(m=>m.online).length;
+ row('🛋️','客厅','连着呢 · '+online+' / '+members.length+' 在家');
+ const pr=row('🔔','网页推送','查看中…');
+ const btn=document.createElement('button');btn.className='act';btn.textContent='…';btn.disabled=true;pr.appendChild(btn);
+ refreshNotify(btn,pr.querySelector('.ss'));
+ const t2=document.createElement('div');t2.className='secttl';t2.textContent='凭证状态（只有状态，没有本体）';box.appendChild(t2);
+ try{
+  const visible=members.filter(m=>me&&(me.species==='human'||m.id===me.id));
+  for(const m of visible){
+   try{const cfg=await req('GET','/rooms/'+encodeURIComponent(m.id));
+    if(!cfg.model){row(m.species==='human'?'🦉':'❓',m.name,m.species==='human'?'人类，不用钥匙':'没有模型配置');continue}
+    const a=cfg.model.auth;
+    row(a&&a.registered?'🔑':'🚫',m.name+' 的钥匙',a?((a.registered?'已登记':'未登记')+' · '+a.alias+' · '+a.mode):'没有凭证配置');
+   }catch(e){row('❓',m.name+' 的钥匙','看不了：'+e.message)}}
+ }catch(e){}
+ const t3=document.createElement('div');t3.className='secttl';t3.textContent='底层';box.appendChild(t3);
+ row('🧾','账本 / broker / 锁','等 /house/status 口子；现在可以在服务器上跑 sameroof status 看');
+ const rp=row('🚪','换一把钥匙（重新配对）','换完要用新的配对链接才能回来');
+ const rb=document.createElement('button');rb.className='act';rb.textContent='换钥匙';
+ rb.onclick=()=>{if(confirm('换掉现在的钥匙？需要户主重新给你配对链接才能回来。')){localStorage.removeItem('token');location.reload()}};
+ rp.appendChild(rb);
+ row('🌸','同屋 · 壳 v1','现在 / 客厅 / 房间 / 房子 · 壳里只有 token')}
+
+/* ===== 推送 ===== */
 const vapidBytes=value=>{const s=(value+'='.repeat((4-value.length%4)%4)).replace(/-/g,'+').replace(/_/g,'/'),raw=atob(s),out=new Uint8Array(raw.length);for(let i=0;i<raw.length;i++)out[i]=raw.charCodeAt(i);return out};
-async function enablePush(){try{if(!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window))throw new Error('这台设备暂不支持网页通知');const permission=await Notification.requestPermission();if(permission!=='granted')throw new Error('通知权限没有打开');const reg=await navigator.serviceWorker.ready,key=await req('GET','/push/vapid-public-key');let sub=await reg.pushManager.getSubscription();if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:vapidBytes(key.public_key)});await req('POST','/push/subscribe',sub.toJSON());$('#notify').textContent='通知已开';$('#notify').disabled=true}catch(e){alert(e.message)}}
-$('#notify').onclick=enablePush;
-$('#send').onclick=say;$('#in').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();say()}});
+async function refreshNotify(btn,hint){
+ const supported=('serviceWorker' in navigator)&&('PushManager' in window)&&('Notification' in window);
+ if(!me||me.species!=='human'){btn.disabled=true;btn.textContent='—';hint.textContent='只有人类能绑推送';return}
+ if(!supported){btn.disabled=true;btn.textContent='—';hint.textContent='这台设备不支持网页通知';return}
+ if(Notification.permission==='denied'){btn.disabled=true;btn.textContent='被拦';hint.textContent='浏览器拦了通知，要去设置里打开';return}
+ let sub=null;
+ try{const reg=await navigator.serviceWorker.ready;sub=await reg.pushManager.getSubscription()}catch(e){}
+ if(sub){btn.disabled=true;btn.textContent='已开';hint.textContent='有人找你或要你审批时，手机会响';return}
+ btn.disabled=false;btn.textContent='开启';hint.textContent='有人找你或要你审批时，手机会响';
+ btn.onclick=async()=>{btn.disabled=true;
+  try{
+   if(Notification.permission!=='granted'){const p=await Notification.requestPermission();if(p!=='granted')throw new Error('通知权限没有打开')}
+   const reg=await navigator.serviceWorker.ready,key=await req('GET','/push/vapid-public-key');
+   let s2=await reg.pushManager.getSubscription();
+   if(!s2)s2=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:vapidBytes(key.public_key)});
+   await req('POST','/push/subscribe',s2.toJSON());
+  }catch(e){alert(e.message)}
+  renderHouse()}}
+
+/* ===== 历史 / 未读 / 补漏 ===== */
+async function gapFill(){
+ try{
+  let page=await req('GET','/history?since='+lastSeq+'&limit=200');
+  for(const m of page)receive(m);
+  const inbox=await req('GET','/inbox');
+  const pubIds=[];
+  for(const m of inbox){if(m.kind==='dm')receive(m);else{receive(m,true);if(m.id)pubIds.push(m.id)}}
+  if(pubIds.length)req('POST','/inbox/ack',{ids:pubIds}).catch(()=>{});
+  const acts=await req('GET','/activity?limit=60');
+  for(const a of acts)feedPush(a,true);
+  renderFeed();
+ }catch(e){}}
+
+/* ===== 实时 ===== */
+function setDot(ok){for(const id of['#dot','#dot-m']){const e=$(id);if(e){e.style.color=ok?'#46b35a':'#c33';e.title=ok?'实时连接正常':'实时连接断了，3 秒后重连'}}}
+async function sse(){try{
+ const r=await fetch(api+'/events',{headers:{authorization:'Bearer '+tok}});
+ if(r.status===401){tok=null;localStorage.removeItem('token');ppair();return}
+ if(!r.ok)throw new Error('实时连接失败 '+r.status);
+ setDot(true);
+ await gapFill();
+ const reader=r.body.getReader(),decoder=new TextDecoder();let buf='';
+ for(;;){const x=await reader.read();if(x.done)break;buf+=decoder.decode(x.value,{stream:true});
+  const parts=buf.split('\n\n');buf=parts.pop();
+  for(const part of parts){const line=part.split('\n').find(v=>v.startsWith('data: '));if(line){try{receive(JSON.parse(line.slice(6)))}catch(e){}}}}
+}catch(e){}
+ if(tok){setDot(false);setTimeout(sse,3000)}}
+
+/* ===== 启动 ===== */
+async function boot(){if(!api||!tok)return ppair();
+ $('#pair').hidden=true;$('#app').hidden=false;
+ me=await req('GET','/me');members=await req('GET','/members');byId=Object.fromEntries(members.map(m=>[m.id,m]));
+ $('#loungesub').textContent=members.map(m=>m.name).join('、');
+ $('#railme').textContent=(me?(emoji(me.id)+' '+me.name):'');
+ renderWho();
+ setInterval(async()=>{try{members=await req('GET','/members');byId=Object.fromEntries(members.map(m=>[m.id,m]));
+  renderWho();
+  if(curView==='rooms')renderRoomList();
+  if(curView==='room'&&roomId){const m=member(roomId);$('#roomsub').textContent=(m.online?'🟢 在线':'⚪ 离线')+' · '+(m.species==='human'?'人类':'AI')}}catch(e){}},30000);
+ const latest=await req('GET','/history?before='+MAXSEQ+'&limit=50');
+ for(const m of latest)if(m.id)seen.add(m.id);
+ loungeState.msgs=latest;loungeState.firstSeq=latest.length?latest[0].seq:0;
+ if(loungeState.firstSeq)lastSeq=latest[latest.length-1].seq;
+ for(const m of latest){if(m.kind==='system')build(m)}
+ loungeRender(latest);
+ const inbox=await req('GET','/inbox');
+ const pubIds=[];
+ for(const m of inbox){if(m.kind==='dm'){const d=dmGet(m.from_id);if(!d.msgs.some(x=>x.id===m.id)){d.msgs.push(m);d.msgs.sort((a,b)=>a.seq-b.seq);d.unread++}if(m.id)seen.add(m.id)}else{receive(m,true);if(m.id)pubIds.push(m.id)}}
+ if(pubIds.length)req('POST','/inbox/ack',{ids:pubIds}).catch(()=>{});
+ updateBadges();
+ loadFeed();
+ sse()}
 if('serviceWorker' in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
 boot().catch(e=>{alert(e.message);if(!tok)ppair()});
 </script></body></html>
