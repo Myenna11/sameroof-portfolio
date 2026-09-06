@@ -191,6 +191,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
     res.on('end', () => setTimeout(sub, 3000)); }); req.on('error', () => setTimeout(sub, 5000)); req.end(); };
   sub();
   const hb = room.heartbeat || (R.house.defaults || {}).heartbeat || {};
-  if (hb.enabled !== false) { let iv = 10 * 60000; const tick = async () => { if (!R.inQuiet()) await wake('heartbeat'); iv = Math.min(iv * 1.5, 4 * 3600000); setTimeout(tick, iv); }; setTimeout(tick, iv); }
+  // 心跳基准：房间 heartbeat.interval 可写分钟数；adaptive/没写 = 60 分钟起步，×1.5 退避到 4 小时
+  if (hb.enabled !== false) { let iv = (Number(hb.interval) > 0 ? Number(hb.interval) : 60) * 60000; const tick = async () => { if (!R.inQuiet()) await wake('heartbeat'); iv = Math.min(iv * 1.5, 4 * 3600000); setTimeout(tick, iv); }; setTimeout(tick, iv); }
 }
 module.exports = { open, run, HOUSE, RUN };
