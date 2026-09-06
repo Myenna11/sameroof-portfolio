@@ -103,12 +103,28 @@ async function run(roomName, runtimeName, think, opts = {}) {
       // 客厅最近的话（已读的也带上，免得断了上文），按字数封顶
       let recentCtx = '';
       if (ctx.recent_messages > 0) {
-        const hist = await api('GET', `/history?since=0&limit=${ctx.recent_messages + inbox.length}`).catch(() => []);
+        const hist = await api('GET', `/history?before=${Number.MAX_SAFE_INTEGER}&limit=${ctx.recent_messages + inbox.length}`).catch(() => []);  // 最近的 N 条（不是最早的）
         const unreadIds = new Set(inbox.map(m => m.id));
         const older = (Array.isArray(hist) ? hist : []).filter(m => !unreadIds.has(m.id)).slice(-ctx.recent_messages);
         const lines = []; let used = 0;
         for (const m of older.reverse()) { const line = `[${m.ts.slice(11, 16)}] ${byName(m.from_id, members)}${m.from_id === room.id ? '（我自己）' : ''}：${m.text}`; if (used + line.length > ctx.recent_max_chars) break; lines.unshift(line); used += line.length; }
         if (lines.length) recentCtx = '【客厅里刚才的话（你已经看过、也可能已经回过——别再回一遍）】\n' + lines.join('\n');
+      }
+      // 私信往来：谁私信了我，就把和他最近的来回带上（含我自己回过的），免得每次都从头答一遍
+      let dmCtx = '';
+      {
+        const partners = [...new Set(inbox.filter(m => m.kind === 'dm').map(m => m.from_id))].filter(Boolean);
+        const unreadIds = new Set(inbox.map(m => m.id));
+        const blocks = [];
+        for (const pid of partners.slice(0, 3)) {
+          const h = await api('GET', `/dm/history?with=${encodeURIComponent(pid)}&limit=${ctx.dm_recent || 10}`).catch(() => []);
+          const rows = (Array.isArray(h) ? h : []).filter(m => !unreadIds.has(m.id));
+          if (!rows.length) continue;
+          const ls = []; let used = 0;
+          for (const m of rows.reverse()) { const line = `[${m.ts.slice(5, 16).replace('T', ' ')}] ${byName(m.from_id, members)}${m.from_id === room.id ? '（我自己）' : ''}：${m.text}`; if (used + line.length > (ctx.dm_max_chars || 3000)) break; ls.unshift(line); used += line.length; }
+          if (ls.length) blocks.push(`【和 ${byName(pid, members)} 的私信往来（你已经回过的，别再回一遍）】\n` + ls.join('\n'));
+        }
+        dmCtx = blocks.join('\n');
       }
       // ---- 提示按"变化频率"排：稳定的在前（缓存能命中），每次都变的在后 ----
       const system = [
@@ -128,6 +144,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
         R.keys.notes().length ? '【我自己的小本】\n' + R.keys.notes().join('\n') : '',
         remembered,
         recentCtx,
+        dmCtx,
         '',
         R.houseTime(),
         `【家里的人】${members.map(m => `${m.name}(${m.species}${m.online ? '·在线' : ''})`).join('、')}`,
@@ -136,7 +153,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
       const user = inbox.length ? '【你没读的客厅记录（按时间）】\n' + inbox.map(m => `[${m.ts.slice(11, 16)}] ${m.from}${m.kind === 'dm' ? '(私信给你)' : ''}${m.mentions && m.mentions.includes(room.id) ? '(叫了你)' : ''}：${m.text}`).join('\n') + '\n\n看完决定：要不要说、对谁说。只回新的；上面"刚才的话"里已经有人回过的、你自己说过的，不要再回一遍。像家里人说话，不要列清单；没什么要说就回 (静默)。'
         : '心跳醒来。客厅没人叫你，但交接信里有惦记的事。要是确实该对家里人说一句就说，没有就回 (静默)。';
       run.heard = inbox.map(m => ({ id: m.id, from: m.from, kind: m.kind, text: m.text.slice(0, 300), mentioned: !!(m.mentions && m.mentions.includes(room.id)) }));
-      run.context = { system_chars: system.length, user_chars: user.length, memories_recalled: remembered ? remembered.split('\n').length - 1 : 0, recent_lines: recentCtx ? recentCtx.split('\n').length - 1 : 0, system_preview: system.slice(0, 1200), user_preview: user.slice(0, 1200) };
+      run.context = { system_chars: system.length, user_chars: user.length, memories_recalled: remembered ? remembered.split('\n').length - 1 : 0, recent_lines: recentCtx ? recentCtx.split('\n').length - 1 : 0, dm_lines: dmCtx ? dmCtx.split('\n').length : 0, system_preview: system.slice(0, 1200), user_preview: user.slice(0, 1200) };
       if (opts.dry) { console.log('==== SYSTEM ====\n' + system + '\n==== USER ====\n' + user); console.log('[dry-run] 只看不说，不发客厅、不标已读、不写记忆'); run.status = 'dry'; return; }
       run.model_calls = 1;
       let reply = await think(system, user);
@@ -155,7 +172,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
           else if (k === 'FORGET' && R.memory) { const f = R.memory.forget(t); console.log(`[${room.name} 冷藏] ${f ? f.content.slice(0, 60) : '（没对上）'}`); }
           else keep.push(l); }
         reply = keep.join('\n').trim(); }
-      if (inbox.length) await api('POST', '/inbox/ack', { ids: inbox.map(m => m.id) });
+      if (inbox.length) { const a = await api('POST', '/inbox/ack', { ids: inbox.map(m => m.id) }); if (!a || typeof a.acked !== 'number') { run.ack_error = JSON.stringify(a).slice(0, 300); fs.writeSync(2, `[${room.name}] 标已读失败，下次会重复读到这些话：${run.ack_error}\n`); } }
       if (!reply || reply === '(静默)') { console.log(`[静默] 原始长度 ${String(reply || '').length}`); run.status = 'silent'; return; }
       if (reply.startsWith('DM:')) { const m = reply.match(/^DM:\s*(\S+)\s*[:：]?\s*([\s\S]*)$/); if (m) { await api('POST', '/dm', { to: m[1], text: m[2] }); run.status = 'dm'; run.said = m[2].slice(0, 500); run.to = m[1]; return; } }
       if (reply.startsWith('APPROVAL:')) { const [, action, ...rest] = reply.split(/\s+/); await api('POST', '/approval', { action, params: { raw: rest.join(' ') } }); run.status = 'approval'; run.said = reply.slice(0, 500); return; }

@@ -347,7 +347,7 @@ function createLivingRoom(options = {}) {
         const body = await readJson(req);
         const text = textField(body, 'text');
         const replyTo = body.reply_to == null ? null : String(body.reply_to);
-        if (replyTo && !/^msg_[a-f0-9]{24}$/.test(replyTo)) throw new HttpError(400, 'REPLY-ID-INVALID', 'reply_to 不是合法消息 id。');
+        if (replyTo && !/^msg_[a-f0-9]{16,24}$/.test(replyTo)) throw new HttpError(400, 'REPLY-ID-INVALID', 'reply_to 不是合法消息 id。');
         return writeJson(res, 200, post({ kind: 'say', from_id: me.id, text, reply_to: replyTo }));
       }
 
@@ -443,7 +443,7 @@ function createLivingRoom(options = {}) {
       if (req.method === 'POST' && url.pathname === '/inbox/ack') {
         rateOrThrow(ackLimiter, me.id, '确认消息');
         const body = await readJson(req);
-        if (!Array.isArray(body.ids) || body.ids.length > ACK_MAX || body.ids.some(id => typeof id !== 'string' || !/^msg_[a-f0-9]{24}$/.test(id))) {
+        if (!Array.isArray(body.ids) || body.ids.length > ACK_MAX || body.ids.some(id => typeof id !== 'string' || !/^msg_[a-f0-9]{16,24}$/.test(id))) {
           throw new HttpError(400, 'ACK-IDS-INVALID', 'ids 必须是最多 200 个合法消息 id。');
         }
         const ts = new Date().toISOString();
