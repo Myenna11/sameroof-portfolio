@@ -16,6 +16,7 @@ const { PushClient, PushClientError } = require('./push-client');
 const roomsApi = require('./rooms-api');
 const memoryApi = require('./memory-api');
 const blackboardApi = require('./blackboard-api');
+const quota = require('@sameroof/quota');
 const { resolveHouseRoot } = require('@sameroof/house-root');
 const jcs = require('@sameroof/jcs');
 
@@ -392,6 +393,8 @@ function createLivingRoom(options = {}) {
   }
 
   // ---- 网关内部接口（GATEWAY.md §3.2 / §3.3）：仅 loopback + 网关 service token；token 从文件读，文件没有就整个关着（fail closed）----
+  let quotaMemo = null, quotaInflight = null;
+  const houseTz = () => { try { return yaml.load(fs.readFileSync(path.join(houseDir, 'house.yaml'), 'utf8')).timezone || 'UTC'; } catch { return 'UTC'; } };
   const gatewayTokenFile = path.resolve(options.gatewayServiceTokenFile || process.env.SAMEROOF_GATEWAY_SERVICE_TOKEN_FILE || path.join(runDir, 'gateway-service.token'));
   function gatewayAuth(req) {
     const remote = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
@@ -559,6 +562,15 @@ function createLivingRoom(options = {}) {
         const limit = positiveInt(url.searchParams.get('limit'), 50, 1, 200, 'ACTIVITY-LIMIT-INVALID');
         const kind = url.searchParams.get('kind');
         return writeJson(res, 200, activityBefore.all(before, limit).filter(r => !kind || r.kind === kind).map(r => ({ ...r, meta: r.meta ? JSON.parse(r.meta) : null, actor: byId.get(r.actor_id)?.name })));
+      }
+      if (req.method === 'GET' && url.pathname === '/quota') {                // V2-Q：配额气象台，只给家人；60 秒内重复问直接给上次的，?fresh=1 强刷
+        if (me.species !== 'human') throw new HttpError(403, 'QUOTA-HUMAN-ONLY', '只有家人能看配额。');
+        const fresh = url.searchParams.get('fresh') === '1';
+        if (!fresh && quotaMemo && Date.now() - quotaMemo.at < 60000) return writeJson(res, 200, quotaMemo.body);
+        if (!quotaInflight) quotaInflight = quota.snapshot({ residents, tz: houseTz(), cachePath: path.join(dataDir, 'quota-cache.json'), env: process.env, providers: options.quotaProviders, timeoutMs: options.quotaTimeoutMs || 15000 }).finally(() => { quotaInflight = null; });
+        const body = await quotaInflight;
+        quotaMemo = { at: Date.now(), body };
+        return writeJson(res, 200, body);
       }
       if (req.method === 'GET' && url.pathname === '/runs') {                 // V2-4A：运行记录（state/runs/<resident>.jsonl）；只给家人看
         if (me.species !== 'human') throw new HttpError(403, 'RUNS-HUMAN-ONLY', '只有家人能看运行记录。');

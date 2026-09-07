@@ -9,6 +9,8 @@ Restart=always
 RestartSec=3
 Environment=HOME=/root
 Environment=SAMEROOF_PORT=8790
+# 配额气象台读的本机登录态（只读）：Codex 的 auth.json 在 worker 用户家里
+Environment=SAMEROOF_QUOTA_CODEX_AUTH=/home/worker/.codex/auth.json
 NoNewPrivileges=yes
 PrivateTmp=yes
 [Install]

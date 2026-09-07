@@ -1,0 +1,13 @@
+{
+  "name": "@sameroof/quota",
+  "version": "0.1.0",
+  "private": true,
+  "description": "同屋配额气象台：各家 provider 的额度窗口，压成一个 schema，凭据不出后端",
+  "main": "index.js",
+  "scripts": { "test": "node --test" },
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "js-yaml": "^5.4.1"
+  }
+}

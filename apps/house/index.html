@@ -158,6 +158,23 @@ summary{cursor:pointer;color:var(--mute);font-size:13px}
 .li{display:flex;gap:9px;padding:10px 4px;border-bottom:1px solid var(--line2);font-size:14.5px}
 .li::before{content:"·";color:var(--accent);font-weight:700}
 /* 运行 */
+.qgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;margin:14px 12px}
+.qcard{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:12px 14px}
+.qcard.err{border-color:#e6c9c5}.qcard.stale{border-style:dashed}
+.qcard .qh{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.qcard .qn{font-family:var(--serif);font-size:16px;font-weight:600}
+.qcard .qw{font-size:12px;color:var(--mute)}
+.qcard .qb{margin-left:auto;font-size:11px;padding:1px 8px;border-radius:999px;background:var(--accent-soft);color:var(--accent)}
+.qcard.err .qb{background:#f8e6e3;color:var(--red)}.qcard.stale .qb{background:#f6ecd6;color:var(--amber)}
+.qcard .qm{font-size:12px;color:var(--mute);margin-top:6px;line-height:1.5;word-break:break-word}
+.qcard.err .qm.reason{color:var(--red)}
+.qwin{margin-top:10px}
+.qwin .ql{display:flex;justify-content:space-between;font-size:12px;gap:8px}.qwin .ql .qp{font-family:var(--mono)}
+.qwin .bar{height:8px;border-radius:999px;background:var(--line2);margin-top:4px;overflow:hidden}
+.qwin .bar i{display:block;height:100%;background:var(--accent);border-radius:999px}
+.qwin .bar i.warn{background:var(--amber)}.qwin .bar i.hot{background:var(--red)}
+.qcard.stale .qwin .bar i{opacity:.45}
+.qwin .qr{font-size:11px;color:var(--mute);margin-top:3px}
 .runstats{display:flex;gap:10px;flex-wrap:wrap;margin:14px 12px 0}
 .runstats .st{flex:1 1 120px;background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:10px 12px}
 .runstats .st .lb{font-size:11px;color:var(--mute)}
@@ -216,6 +233,7 @@ summary{cursor:pointer;color:var(--mute);font-size:13px}
   <button data-tab="rooms">🚪 房间<span class="badge" id="nb-rooms" hidden></span></button>
   <button data-tab="house">🏗️ 房子</button>
   <button data-tab="runs">📈 运行</button>
+  <button data-tab="quota">🌤️ 配额</button>
  </nav>
  <div class="foot"><span id="railme"></span></div>
 </aside>
@@ -267,6 +285,10 @@ summary{cursor:pointer;color:var(--mute);font-size:13px}
   <div class="runstats" id="runstats"></div>
   <div class="runtbl" id="runstbl"></div>
  </section>
+ <section class="view" id="view-quota">
+  <div class="hd"><h1>配额</h1><span class="sub" id="quotasub">各家还剩多少</span><span class="sp"></span><button class="loadmore" id="quotarefresh" type="button">刷新</button></div>
+  <div class="qgrid" id="qgrid"></div>
+ </section>
 </main>
 <nav id="tabbar">
  <button class="tb on" data-tab="now"><span class="ic">🌅</span>现在</button>
@@ -274,6 +296,7 @@ summary{cursor:pointer;color:var(--mute);font-size:13px}
  <button class="tb" data-tab="rooms"><span class="ic">🚪</span>房间<span class="badge" id="tb-rooms" hidden></span></button>
  <button class="tb" data-tab="house"><span class="ic">🏗️</span>房子</button>
  <button class="tb" data-tab="runs"><span class="ic">📈</span>运行</button>
+ <button class="tb" data-tab="quota"><span class="ic">🌤️</span>配额</button>
 </nav>
 </div>
 <div id="atpop" hidden></div>
@@ -392,7 +415,8 @@ function showView(v){curView=v;
  if(v==='now')loadFeed();
  if(v==='rooms')renderRoomList();
  if(v==='house')renderHouse();
- if(v==='runs')renderRunsView()}
+ if(v==='runs')renderRunsView();
+ if(v==='quota')renderQuotaView()}
 for(const tb of document.querySelectorAll('[data-tab]'))tb.onclick=()=>showView(tb.dataset.tab);
 function updateBadges(){
  const dmTotal=Object.values(dmStore).reduce((s,c)=>s+(c.unread||0),0);
@@ -878,6 +902,50 @@ function renderConfig(box,cfg,budget){
   det.appendChild(pre);box.appendChild(det)}}
 
 /* ===== 房子 ===== */
+/* ===== 配额气象台（V2-Q）：GET /quota，每家一张卡，进度条 + 重置倒计时；错的标原因，过期的虚线 ===== */
+let quotaData=null;
+const PROVIDER_ICON={claude:'🟠',codex:'⚫',kimi:'🌙',glm:'🔷',deepseek:'🐋'};
+function countdown(iso){const ms=Date.parse(iso)-Date.now();if(isNaN(ms))return '';if(ms<=0)return '该重置了';const m=Math.round(ms/60000);if(m<60)return m+' 分钟后重置';const h=Math.floor(m/60);if(h<48)return h+' 小时 '+(m%60)+' 分后重置';return Math.floor(h/24)+' 天 '+(h%24)+' 小时后重置'}
+function renderQuotaCards(){
+ const box=$('#qgrid');box.innerHTML='';
+ if(!quotaData){return}
+ const cards=quotaData.providers||[];
+ if(!cards.length){box.innerHTML='<div class="empty">没有住户用 AI provider，或者 room.yaml 里没写 model.provider</div>';return}
+ for(const c of cards){
+  const d=document.createElement('div');d.className='qcard'+(c.status==='error'?' err':'')+(c.stale?' stale':'');
+  const h=document.createElement('div');h.className='qh';
+  const n=document.createElement('span');n.className='qn';n.textContent=(PROVIDER_ICON[c.provider]||'▫️')+' '+(c.label||c.provider);
+  const w=document.createElement('span');w.className='qw';w.textContent=(c.residents||[]).join('、');
+  const b=document.createElement('span');b.className='qb';b.textContent=c.stale?('过期数据 · '+fmtFull(c.staleSince)):(c.status==='error'?'拿不到':'实时');
+  h.append(n,w,b);d.appendChild(h);
+  if(c.status==='error'){const r=document.createElement('div');r.className='qm reason';r.textContent=c.message||'不可用';d.appendChild(r)}
+  else if(c.message){const m=document.createElement('div');m.className='qm';m.textContent=c.message;d.appendChild(m)}
+  const wins=c.windows||[];
+  if(!wins.length&&c.status!=='error'){const m=document.createElement('div');m.className='qm';m.textContent='此方案不提供额度窗';d.appendChild(m)}
+  for(const x of wins){
+   const wd=document.createElement('div');wd.className='qwin';
+   const l=document.createElement('div');l.className='ql';
+   const a=document.createElement('span');a.textContent=x.label+(x.detail?' · '+x.detail:'');
+   const p=document.createElement('span');p.className='qp';p.textContent='已用 '+x.usedPercent+'%';
+   l.append(a,p);wd.appendChild(l);
+   const bar=document.createElement('div');bar.className='bar';const i=document.createElement('i');i.style.width=Math.max(0,Math.min(100,x.usedPercent))+'%';if(x.usedPercent>=90)i.className='hot';else if(x.usedPercent>=70)i.className='warn';bar.appendChild(i);wd.appendChild(bar);
+   const r=document.createElement('div');r.className='qr';r.textContent=x.resetAt?(countdown(x.resetAt)+' · '+fmtFull(x.resetAt)):(x.resetHint||'');if(r.textContent)wd.appendChild(r);
+   d.appendChild(wd);
+  }
+  box.appendChild(d);
+ }
+ $('#quotasub').textContent='各家还剩多少 · '+fmt(quotaData.fetched_at)+' 取的';
+}
+async function renderQuotaView(fresh){
+ const box=$('#qgrid');
+ if(me&&me.species!=='human'){box.innerHTML='<div class="empty">这页只有家人能看</div>';return}
+ if(!quotaData)box.innerHTML='<div class="empty">在问各家……</div>';
+ try{quotaData=await req('GET','/quota'+(fresh?'?fresh=1':''))}catch(e){box.innerHTML='';const d=document.createElement('div');d.className='empty';d.textContent='拉不到配额：'+e.message;box.appendChild(d);return}
+ renderQuotaCards();
+}
+$('#quotarefresh').onclick=()=>renderQuotaView(true);
+setInterval(()=>{if(curView==='quota'&&document.visibilityState==='visible')renderQuotaView()},60000);
+setInterval(()=>{if(curView==='quota'&&quotaData)renderQuotaCards()},30000);   // 倒计时走字，不重新取
 /* ===== 运行面板（V2-4B）：GET /runs，表格，30 秒一刷 ===== */
 async function renderRunsView(){
  const box=$('#runstbl');

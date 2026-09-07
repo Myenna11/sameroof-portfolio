@@ -113,3 +113,31 @@ test('GET /runs（V2-4A）：读 state/runs/*.jsonl，倒序、limit、按住户
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('GET /quota（V2-Q）：按住户 provider 分组并发取数，单家失败只坏一张卡，只给家人', async () => {
+  const root = fixture();
+  fs.writeFileSync(path.join(root, 'rooms', '乙', 'room.yaml'), 'id: resident_beta_01\nname: 乙\nspecies: agent\nmodel: {provider: kimi-coding, id: k3}\n');
+  fs.mkdirSync(path.join(root, 'rooms', '丙'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'rooms', '丙', 'room.yaml'), 'id: resident_gamma_01\nname: 丙\nspecies: agent\nmodel: {provider: zhipu, id: glm}\n');
+  const quotaProviders = {
+    kimi: { label: 'Kimi', fetch: async () => ({ status: 'ok', windows: [{ label: '5 小时窗', usedPercent: 12, resetAt: '2026-09-08T00:00:00.000Z' }] }) },
+    glm: { label: 'GLM', fetch: async () => { throw Object.assign(new Error('没 coding plan'), { code: 'QUOTA-NO-PLAN' }); } },
+  };
+  const room = createLivingRoom({ houseDir: root, runDir: path.join(root, 'run'), dataDir: path.join(root, 'state'), port: 0, quotaProviders });
+  try {
+    const port = (await room.listen()).port;
+    const alpha = room.tokenStore.issue('resident_alpha_01').token;
+    const beta = room.tokenStore.issue('resident_beta_01').token;
+    const r = await request(port, '/quota', { token: alpha });
+    assert.equal(r.status, 200);
+    const by = Object.fromEntries(r.body.providers.map(c => [c.provider, c]));
+    assert.deepEqual(Object.keys(by).sort(), ['glm', 'kimi']);
+    assert.equal(by.kimi.status, 'ok'); assert.deepEqual(by.kimi.residents, ['乙']); assert.equal(by.kimi.windows[0].usedPercent, 12);
+    assert.equal(by.glm.status, 'error'); assert.equal(by.glm.code, 'QUOTA-NO-PLAN'); assert.deepEqual(by.glm.windows, []);
+    assert.ok(fs.existsSync(path.join(root, 'state', 'quota-cache.json')));
+    assert.equal((await request(port, '/quota', { token: beta })).status, 403);
+  } finally {
+    await room.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
