@@ -130,7 +130,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
     const per = deliverCfg.from[s.name] || deliverCfg.from[s.id]; if (DELIVER_MODES.includes(per)) return per;
     const byKind = deliverCfg[s.species === 'human' ? 'human' : 'agent']; return DELIVER_MODES.includes(byKind) ? byKind : 'after_turn';
   };
-  // ---- 运行队列：每住户一条，三车道，同时只跑一个 run ----
+  // ---- 运行队列：每住户一条，四车道（human > routine > agent > heartbeat），同时只跑一个 run ----
   const pending = { human: null, routine: [], agent: null, heartbeat: null };   // 每车道最多记一个待醒原因（一次醒来读全部未读，合并即可）；例行各带各的提示词，排队不合并
   let active = null;                                                // { lane, reason, ctrl, startedAt }
   let hb = null;                                                    // 心跳调度句柄
@@ -239,7 +239,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
       run.context = { system_chars: system.length, user_chars: user.length, memories_recalled: remembered ? remembered.split('\n').length - 1 : 0, recent_lines: recentCtx ? recentCtx.split('\n').length - 1 : 0, dm_lines: dmCtx ? dmCtx.split('\n').length : 0, system_preview: system.slice(0, 1200), user_preview: user.slice(0, 1200) };
       // 跳数：人说的话 hop=0；agent 回话 = 听到的 agent 消息里最大 hop + 1。超过上限的链只写不叫醒（防两个 agent 无限对聊）
       const hopIn = inbox.filter(m => !isHuman(m.from_id)).reduce((a, m) => Math.max(a, Number((m.meta || {}).hop) || 0), 0);
-      const hopOut = room.species === 'human' ? 0 : hopIn + 1;
+      const hopOut = (room.species === 'human' || routine) ? 0 : hopIn + 1;   // 例行醒来是新起点，不接 agent 链
       if (opts.dry) { console.log('==== SYSTEM ====\n' + system + '\n==== USER ====\n' + user); console.log('[dry-run] 只看不说，不发客厅、不标已读、不写记忆'); run.status = 'dry'; return; }
       run.model_calls = 1;
       let reply = await abortable(Promise.resolve(think(system, user, signal)), signal);
@@ -270,7 +270,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
     }
     finally {
       run.ms = Date.now() - t0; if (R.lastUsage) { run.usage = R.lastUsage; R.lastUsage = null; } R.recordRun(run);
-      if (hb) hb.backoff(reason === 'heartbeat' && ['passive_idle', 'silent', 'nothing', 'passive_budget'].includes(run.status));
+      if (hb && lane !== 'routine') hb.backoff(reason === 'heartbeat' && ['passive_idle', 'silent', 'nothing', 'passive_budget'].includes(run.status));   // 例行是定时的，不算"有真事"，不归零心跳退避
     }
   }
   async function writeHandover() {
