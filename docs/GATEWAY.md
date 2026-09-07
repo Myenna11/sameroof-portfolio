@@ -88,6 +88,7 @@
 
 - `params_digest = sha256(UTF-8(JCS(params)))`。JCS 指 RFC 8785 规范化 JSON；拒绝 `NaN`、Infinity、重复键、超限深度和超限字符串。
 - 客厅对带 `gateway_request_id` 的审批必须自己重算同一摘要并与 body 比较；不一致返回 400，不创建审批。
+- 重复键必须在网关从原始 intent 文本入口用 strict parser 拒绝。客厅可以在普通 JSON 解析后重算摘要：执行型审批必须先有不可变 gateway intent，解析后对象若不能与该 intent 摘要完全匹配，网关不会执行。
 - 当前客厅 `JSON.stringify(params)` 的旧摘要只保留给非执行型旧审批；网关不得消费旧摘要。
 - 除摘要外，网关仍逐字段匹配 `resident_id`、`action` 和 `gateway_request_id`。摘要不是身份认证。
 
@@ -148,7 +149,7 @@ received -> awaiting_approval -> approved -> executing -> succeeded|failed|timed
 
 该流必须可从持久化游标补读，不能只靠 SSE 或进程内 callback；这样客厅或网关重启不会丢决定。网关把游标持久化到自己的事务库。`params` 不需要再次传输，因为不可变 intent 已在网关；客厅只返回权威绑定字段。
 
-网关只在以下全部成立时消费允许：记录存在、`decision=allowed`、未过期、`single_use=true`、四个绑定字段完全一致、`approval_id` 未消费。否则终态拒绝并审计。
+网关只在以下全部成立时消费允许：记录存在、`decision=allowed`、未过期、`single_use=true`、四个绑定字段完全一致、`approval_id` 未消费。否则终态拒绝并审计。有效期取 `min(intent.expires_at, approval.expires_at)`；任一缺失、格式错误或已经到期都 fail closed。
 
 ### 3.3 结果投回
 
@@ -175,7 +176,9 @@ received -> awaiting_approval -> approved -> executing -> succeeded|failed|timed
 }
 ```
 
-客厅创建一条只投给 `resident_id` 的 system/inbox 消息，meta 带完整小结果，不公开到客厅历史；投递模式为 `wake`，使住户从 human 车道醒来。相同 `request_id` 重试必须返回同一 `message_id`，不能重复投递。
+客厅创建一条只投给 `resident_id` 的 system/inbox 消息，meta 带完整小结果，不公开到客厅历史；协议投递模式使用现有的 `interrupt`，`kind=result` 必须使住户从 human 车道醒来，不新增同义的 `wake` 值。相同 `request_id` 重试必须返回同一 `message_id`，不能重复投递。
+
+客厅必须严格校验上述已知安全字段、类型、长度和绑定关系；为了 G1/W3 独立演进，内部结果 body 的未知字段可以忽略。第 2 节“未知字段拒绝”只约束网关自己的 adapter 入口。
 
 ## 4. v1 动作字典
 
@@ -353,6 +356,7 @@ target 原料：
 - `once` 仅对当前 approval 生效。
 - `session` 只在网关当前 session id 内存中，重启失效。
 - `always` / `never` 原子写入 `/var/lib/sameroof-gateway/policy.json`，`0600`，带创建人、时间、配置版本和精确 key；不能写通配符。
+- `session|always` 只与 `decision=allow` 组合；`never` 只与 `decision=deny` 组合；`once` 两种决定都可用。其他组合拒绝，不做猜测。
 - remembered allow 仍需生成成对 `asked` / `decided` 审计，`decision_source=remembered`，再进入相同的一次性消费状态机。
 - 同一 run 中被拒绝的相同 key 再次请求直接 `abandoned`，不再打扰人。
 - deny 优先于 allow；硬编码 deny 和 house/room ceiling 永远不能被记忆覆盖。
@@ -361,7 +365,7 @@ target 原料：
 
 审计库位于 `/var/lib/sameroof-gateway/gateway.db`，WAL，目录 `0700`、文件 `0600`。至少记录：时间、request/approval/run/resident、动作、摘要、策略版本、asked/decided、决定来源、执行器、bwrap 探针版本、开始/结束/退出码、coverage 和 next。
 
-不记录：文件 content、完整 stdout/stderr、环境值、token、Authorization、`.env` 内容。对 stdout/stderr 只存 hash、字节数、截断标记和脱敏后的短摘要。常见 secret pattern 与已知 token 值在入库和投回前双重脱敏。
+不记录：文件 content、完整 stdout/stderr、环境值、token、Authorization、`.env` 内容。对 stdout/stderr 只存 hash、字节数、截断标记和脱敏后的短摘要。常见 secret pattern 与已知 token 值在入库和投回前双重脱敏。网关必须把自己实际载入的 adapter token、客厅 service token、broker token 等加入 exact-value redaction set；客厅的键名字样脱敏只是第二道兜底，不能替代这一层。
 
 稳定错误码至少包括：
 
