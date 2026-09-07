@@ -68,7 +68,7 @@ archived?, archived_at?                           ← v0.1 的冷藏照旧
 | POST | `/rooms/:id/memory/:memId/approve` | **只有人** | — | 通过后的记录 |
 | POST | `/rooms/:id/memory/:memId/discard` | 人，或本人 | — | 丢弃后的记录 |
 | POST | `/rooms/:id/memory/merge` | **只有人** | `{ids:[…2-50], content}` | 新记录 |
-| POST | `/rooms/:id/memory/supersede` | 人；本人只能对**非亲笔** | `{old_id, content}` | 新候选（under_review） |
+| POST | `/rooms/:id/memory/supersede` | 人；本人只能对非亲笔或**自己 self 写的** | `{old_id, content}` | 新候选（under_review） |
 | GET | `/rooms/:id/memory?limit&before` | 人，或本人（rooms-api 原有） | — | 折叠后的清单，带 `review/authored/version_status/fact_key/supersedes/superseded_by/merged_into/redacted`，`reviewed` 留作兼容（= review==='approved'） |
 
 记录字段：`id, ts, content, source, by, confidence, tags, review, authored, version_status, fact_key, supersedes, superseded_by, merged_into, redacted, archived, hits`。
@@ -83,3 +83,5 @@ archived?, archived_at?                           ← v0.1 的冷藏照旧
 cd packages/plugin-memory && npm test     # test/memory.test.js
 cd packages/living-room && npm test       # test/memory-api.test.js 在里面
 ```
+
+`compact()` 由适配器在住户睡前调用（room.js `sleep()`），日常不跑。

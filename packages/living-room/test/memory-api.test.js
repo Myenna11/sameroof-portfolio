@@ -88,6 +88,9 @@ test('memory api：权限矩阵与 happy path', async () => {
     assert.equal((await request(port, P + 'supersede', { method: 'POST', token: other, body: { old_id: authored.id, content: 'x' } })).status, 403);
     const s1 = await request(port, P + 'supersede', { method: 'POST', token: self, body: { old_id: authored.id, content: '维护者说我叫小乙' } });
     assert.equal(s1.status, 403); assert.equal(s1.body.error.code, 'MEM-HUMAN-ONLY');
+    const selfMem = M.remember({ content: '我记得今天下雨', source: 'self', by: 'resident_alpha_01' });   // 自己 self 写的亲笔：自己可以提新版本，仍 under_review
+    const s0 = await request(port, P + 'supersede', { method: 'POST', token: self, body: { old_id: selfMem.id, content: '我记得今天下大雨' } });
+    assert.equal(s0.status, 200); assert.equal(s0.body.version_status, 'under_review');
     const ext = M.remember({ content: '外面看到的旧消息', source: 'external' });
     const s2 = await request(port, P + 'supersede', { method: 'POST', token: self, body: { old_id: ext.id, content: '外面看到的新消息' } });
     assert.equal(s2.status, 200); assert.equal(s2.body.version_status, 'under_review');

@@ -60,13 +60,13 @@ function mount({ houseDir, residents, byId, writeJson: rawWriteJson, readJson, H
       note(me, r, '把 ' + r.name + ' 的 ' + body.ids.length + ' 条记忆合并成一条。', { op: 'merge', memory_id: rec.id, merged_from: body.ids });
       return writeJson(res, 200, brief(rec));
     }
-    if (op === 'supersede') {                                       // 人；住户本人只能取代自己屋里的非亲笔
+    if (op === 'supersede') {                                       // 人；住户本人只能取代自己屋里的非亲笔或自己 self 写的
       if (typeof body.old_id !== 'string') throw new HttpError(400, 'MEM-ID-INVALID', '要有 old_id。');
       const oldId = memId(body.old_id); const text = content(body);
       if (!isHuman(me)) {
         if (!isSelf(me, r)) throw new HttpError(403, 'MEM-FORBIDDEN', '只能取代自己屋里的记忆。');
         const old = M.get(oldId); if (!old) throw new HttpError(404, 'MEM-NOT-FOUND', '没有这条记忆：' + oldId);
-        if (old.authored) throw new HttpError(403, 'MEM-HUMAN-ONLY', '亲笔记忆只有人能提议取代。');
+        if (old.authored && old.source === 'human') throw new HttpError(403, 'MEM-HUMAN-ONLY', '人亲笔写的记忆只有人能提议取代。');   // 住户自己写的（self）可以自己提新版本，仍进 under_review 等人点头
       }
       const rec = call(() => M.supersede(oldId, { content: text, ...who }));
       note(me, r, '给 ' + r.name + ' 的一条记忆提了新版本，等审。', { op: 'supersede', memory_id: rec.id, supersedes: oldId });

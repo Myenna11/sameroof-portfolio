@@ -119,6 +119,7 @@ test('redact：每种形状各一例；邮箱和手机号不遮', () => {
   assert.equal(R('-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY----- 后面').text, '[已脱敏] 后面');
   assert.equal(R('password: hunter2').text, 'password: [已脱敏]');
   assert.equal(R('wifi 密码是 operator2026，别忘了').text, 'wifi 密码是 [已脱敏]，别忘了');
+  assert.equal(R('密码 123456 记一下').text, '密码 [已脱敏] 记一下');
   assert.equal(R('token=abc123 secret: s3cr3t').text, 'token= [已脱敏] secret: [已脱敏]');
   const keep = '维护者的邮箱 operator@example.com，手机 13800138000，短 id mem_15b2ac413812';
   assert.deepEqual(R(keep), { text: keep, redacted: false });

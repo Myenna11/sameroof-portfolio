@@ -19,7 +19,7 @@ class StateError extends MemoryError { constructor(message) { super(409, 'MEM-ST
 // ---------- 写入脱敏（纯函数）。不遮邮箱和手机号：家里人的联系方式是该记的。 ----------
 const REDACT_RULES = [
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, REDACTED],
-  [/(password|passwd|pwd|passphrase|密码|口令|token|secret|api[_-]?key|access[_-]?key)(\s*(?:[:=：]|是|为|\bis\b)\s*)["'`]?([^\s"'`,;，。；、]+)/gi, (_, k, sep) => k + sep.replace(/\s+$/, '') + ' ' + REDACTED],
+  [/(password|passwd|pwd|passphrase|密码|口令|token|secret|api[_-]?key|access[_-]?key)(\s*(?:[:=：]|是|为|\bis\b)\s*|\s+)["'`]?([^\s"'`,;，。；、]+)/gi, (_, k, sep) => k + sep.replace(/\s+$/, '') + ' ' + REDACTED],
   [/\bBearer\s+[A-Za-z0-9\-._~+/]{8,}=*/gi, 'Bearer ' + REDACTED],
   [/\b(?:sk-(?:[a-z0-9]+-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|xox[abprs]-[A-Za-z0-9-]{8,}|AKIA[A-Z0-9]{16})\b/g, REDACTED],
   [/\b[0-9a-fA-F]{32,}\b/g, REDACTED],
