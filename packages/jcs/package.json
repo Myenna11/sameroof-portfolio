@@ -1,0 +1,11 @@
+{
+  "name": "@sameroof/jcs",
+  "version": "0.1.0",
+  "private": true,
+  "description": "同屋 · RFC 8785 JSON Canonicalization Scheme：canonicalize / digest / parseStrict，零依赖。客厅与能力网关算 params_digest 必须都用这一份。",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "MIT"
+}
