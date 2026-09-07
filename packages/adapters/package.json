@@ -1,0 +1,10 @@
+{
+  "name": "@sameroof/adapters",
+  "version": "0.1.0",
+  "private": true,
+  "description": "同屋适配器：各运行时共用的醒/睡循环、cron 例行",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "license": "MIT"
+}
