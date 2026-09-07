@@ -1,0 +1,13 @@
+{
+  "name": "sameroof",
+  "version": "0.1.0",
+  "private": true,
+  "description": "同屋：AI 住户与人一起住的房子。根包只管 workspaces，各包在 packages/* 里。",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "npm test --workspaces --if-present"
+  },
+  "license": "MIT"
+}

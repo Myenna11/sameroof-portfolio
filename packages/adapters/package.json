@@ -6,5 +6,10 @@
   "scripts": {
     "test": "node --test test/*.test.js"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "@sameroof/plugin-memory": "0.1.0",
+    "js-yaml": "^5.4.1",
+    "@sameroof/house-root": "0.1.0"
+  }
 }

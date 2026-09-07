@@ -3,9 +3,10 @@
 // 职责：SOUL→系统提示；时间由房子供给；inbox→上下文；输出→客厅。不持有任何凭证（Claude Code 自管，runtime_managed）。
 'use strict';
 const fs = require('fs'), path = require('path'), http = require('http'), { spawn } = require('child_process');
-const yaml = require('/root/sameroof/packages/living-room/node_modules/js-yaml');
+const yaml = require('js-yaml');
+const { resolveHouseRoot } = require('@sameroof/house-root');
 
-const HOUSE = process.env.SAMEROOF_HOUSE || path.resolve(__dirname, '../../..');
+const HOUSE = resolveHouseRoot();
 const ROOM = process.argv[2] || '规划员';
 const DRY = process.argv.includes('--dry');
 const LR = process.env.SAMEROOF_LR || 'http://127.0.0.1:8790';

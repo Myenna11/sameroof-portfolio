@@ -14,6 +14,7 @@ const { TokenStore } = require('./tokens');
 const { SlidingWindowLimiter, AuthFailureLimiter } = require('./rate-limit');
 const { PushClient, PushClientError } = require('./push-client');
 const roomsApi = require('./rooms-api');
+const { resolveHouseRoot } = require('@sameroof/house-root');
 
 const RESERVED = new Set(['system', 'all', 'everyone', 'house']);
 const MESSAGE_MAX = 8000;
@@ -142,7 +143,7 @@ function pushSubscription(value) {
 }
 
 function createLivingRoom(options = {}) {
-  const houseDir = path.resolve(options.houseDir || process.env.SAMEROOF_HOUSE || path.resolve(__dirname, '../..'));
+  const houseDir = path.resolve(options.houseDir || resolveHouseRoot());
   const runDir = path.resolve(options.runDir || path.join(process.env.HOME || os.homedir(), '.sameroof', 'run'));
   const dataDir = path.resolve(options.dataDir || path.join(houseDir, 'state'));
   const staticDir = path.join(houseDir, 'apps', 'house');
