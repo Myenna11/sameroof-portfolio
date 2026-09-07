@@ -158,6 +158,14 @@ summary{cursor:pointer;color:var(--mute);font-size:13px}
 .li{display:flex;gap:9px;padding:10px 4px;border-bottom:1px solid var(--line2);font-size:14.5px}
 .li::before{content:"·";color:var(--accent);font-weight:700}
 /* 运行 */
+.runtbl{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:6px 10px;margin:14px 12px;overflow-x:auto}
+.runtbl table{width:100%;border-collapse:collapse;font-size:13px;white-space:nowrap}
+.runtbl th{text-align:left;color:var(--mute);font-weight:500;font-size:12px;padding:6px 8px;border-bottom:1px solid var(--line)}
+.runtbl td{padding:6px 8px;border-bottom:1px solid var(--line2);vertical-align:top}
+.runtbl tr:last-child td{border-bottom:0}
+.runtbl td.num{font-family:var(--mono);font-size:12px;text-align:right}
+.runtbl td.err{color:var(--red);white-space:normal;max-width:320px;font-size:12px}
+.runtbl td.rsn{white-space:normal;max-width:260px}
 .run{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:12px;margin-bottom:10px}
 .run .rh{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .run .rt{font-size:12px;color:var(--mute)}
@@ -202,6 +210,7 @@ summary{cursor:pointer;color:var(--mute);font-size:13px}
   <button data-tab="lounge">🛋️ 客厅<span class="badge" id="nb-lounge" hidden></span></button>
   <button data-tab="rooms">🚪 房间<span class="badge" id="nb-rooms" hidden></span></button>
   <button data-tab="house">🏗️ 房子</button>
+  <button data-tab="runs">📈 运行</button>
  </nav>
  <div class="foot"><span id="railme"></span></div>
 </aside>
@@ -248,12 +257,17 @@ summary{cursor:pointer;color:var(--mute);font-size:13px}
   <div class="hd"><h1>房子</h1><span class="sub">底层</span><span class="sp"></span></div>
   <div class="housewrap" id="housewrap"></div>
  </section>
+ <section class="view" id="view-runs">
+  <div class="hd"><h1>运行</h1><span class="sub" id="runssub">每个住户每次醒来</span><span class="sp"></span><button class="loadmore" id="runsrefresh" type="button">刷新</button></div>
+  <div class="runtbl" id="runstbl"></div>
+ </section>
 </main>
 <nav id="tabbar">
  <button class="tb on" data-tab="now"><span class="ic">🌅</span>现在</button>
  <button class="tb" data-tab="lounge"><span class="ic">🛋️</span>客厅<span class="badge" id="tb-lounge" hidden></span></button>
  <button class="tb" data-tab="rooms"><span class="ic">🚪</span>房间<span class="badge" id="tb-rooms" hidden></span></button>
  <button class="tb" data-tab="house"><span class="ic">🏗️</span>房子</button>
+ <button class="tb" data-tab="runs"><span class="ic">📈</span>运行</button>
 </nav>
 </div>
 <div id="atpop" hidden></div>
@@ -371,7 +385,8 @@ function showView(v){curView=v;
  updateBadges();
  if(v==='now')loadFeed();
  if(v==='rooms')renderRoomList();
- if(v==='house')renderHouse()}
+ if(v==='house')renderHouse();
+ if(v==='runs')renderRunsView()}
 for(const tb of document.querySelectorAll('[data-tab]'))tb.onclick=()=>showView(tb.dataset.tab);
 function updateBadges(){
  const dmTotal=Object.values(dmStore).reduce((s,c)=>s+(c.unread||0),0);
@@ -857,6 +872,32 @@ function renderConfig(box,cfg,budget){
   det.appendChild(pre);box.appendChild(det)}}
 
 /* ===== 房子 ===== */
+/* ===== 运行面板（V2-4B）：GET /runs，表格，30 秒一刷 ===== */
+async function renderRunsView(){
+ const box=$('#runstbl');
+ if(me&&me.species!=='human'){box.innerHTML='<div class="empty">这页只有家人能看</div>';return}
+ let rows;
+ try{rows=await req('GET','/runs?limit=30')}catch(e){box.innerHTML='';const d=document.createElement('div');d.className='empty';d.textContent='拉不到运行记录：'+e.message;box.appendChild(d);return}
+ box.innerHTML='';
+ if(!rows.length){box.innerHTML='<div class="empty">还没有人醒过</div>';return}
+ const t=document.createElement('table');
+ const th=document.createElement('tr');for(const h of ['时间','住户','原因','车道','状态','耗时','模型','tokens'])th.appendChild(Object.assign(document.createElement('th'),{textContent:h}));
+ t.appendChild(th);
+ const td=(txt,cls)=>{const c=document.createElement('td');c.textContent=txt==null?'':String(txt);if(cls)c.className=cls;return c};
+ for(const r of rows){
+  const tr=document.createElement('tr');
+  tr.append(td(r.ts?fmtFull(r.ts):''),td(r.resident||r.resident_id),td(r.reason||'','rsn'),td(RUNLANE[r.lane]||r.lane||''),td(RUNST[r.status]||r.status||''),td(r.ms==null?'':(r.ms/1000).toFixed(1)+'s','num'),td(r.model_calls||0,'num'));
+  const u=r.usage||{};const inTok=u.prompt_tokens??u.input_tokens;const outTok=u.completion_tokens??u.output_tokens;
+  const cache=u.cached_tokens?' · 命中缓存 '+u.cached_tokens:'';
+  tr.appendChild(td(inTok==null&&outTok==null?(u.total_tokens?u.total_tokens+' 总':''):(inTok??0)+' 入 / '+(outTok??0)+' 出'+cache,'num'));
+  t.appendChild(tr);
+  if(r.error){const er=document.createElement('tr');const c=td(String(r.error),'err');c.colSpan=8;er.appendChild(c);t.appendChild(er)}
+ }
+ box.appendChild(t);
+ $('#runssub').textContent='最近 '+rows.length+' 次 · '+fmt(Date.now())+' 刷新';
+}
+$('#runsrefresh').onclick=()=>renderRunsView();
+setInterval(()=>{if(curView==='runs'&&document.visibilityState==='visible')renderRunsView()},30000);
 async function renderHouse(){
  const box=$('#housewrap');box.innerHTML='';
  const row=(ic,tt,ss)=>{const d=document.createElement('div');d.className='card hrow';
