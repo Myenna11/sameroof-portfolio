@@ -147,6 +147,7 @@ summary{cursor:pointer;color:var(--mute);font-size:13px}
 /* 记忆 */
 .mem{background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:11px 12px;margin-bottom:9px}
 .mem.arch{opacity:.55}
+.mem.sel{outline:2px solid var(--accent)}
 .mem .ct{font-size:14.5px;white-space:pre-wrap;word-break:break-word}
 .mem .mt{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px;align-items:center;font-size:11px;color:var(--mute)}
 .cbar{width:52px;height:5px;border-radius:3px;background:var(--line2);overflow:hidden;display:inline-block;vertical-align:middle}
@@ -604,27 +605,90 @@ for(const p of document.querySelectorAll('#roompills .pill-tab'))p.onclick=async
   box.dataset.done='1';
  }catch(e){box.innerHTML='<div class="empty">'+esc(e.message)+'</div>'}};
 
-/* ----- 记忆 ----- */
-function renderMemory(box,rows){
+/* ----- 记忆（K2：审核队列 + 亲笔标记；接口见 packages/plugin-memory/README.md HTTP 表） ----- */
+const MEMSRC={human:'家人说的',self:'TA 自己记的',inbox:'听来的',external:'外面看来的'};
+function memMeta(mt,m){
+ const src=document.createElement('span');src.className='pill'+(m.source==='human'?' ok':'');
+ src.textContent=MEMSRC[m.source]||'听来的';mt.appendChild(src);
+ if(m.authored){const au=document.createElement('span');au.className='pill ok';au.textContent='✍️ 亲笔';au.title='亲手写的记忆受保护：不能直接改写，只能提出新版本，由人点头';mt.appendChild(au)}
+ const conf=document.createElement('span');
+ conf.innerHTML='置信 '+Math.round((m.confidence||0)*100)+'% <span class="cbar"><i style="width:'+Math.round((m.confidence||0)*100)+'%"></i></span>';
+ mt.appendChild(conf);
+ const rv=document.createElement('span');
+ rv.textContent=m.review==='pending'?'待审':m.review==='discarded'?'已丢弃':'✓ 已审';mt.appendChild(rv);
+ if(m.version_status==='superseded'){const sp=document.createElement('span');sp.className='pill warn';sp.textContent='已被取代';mt.appendChild(sp)}
+ if(m.version_status==='under_review'){const ur=document.createElement('span');ur.className='pill warn';ur.textContent='新版本待审';mt.appendChild(ur)}
+ if(m.redacted){const rd=document.createElement('span');rd.className='pill';rd.textContent='已脱敏';rd.title='写入时遮掉了疑似密钥/口令';mt.appendChild(rd)}
+ if(m.archived){const ar=document.createElement('span');ar.className='pill warn';ar.textContent='冷藏';mt.appendChild(ar)}
+ if(m.fact_key){const fk=document.createElement('span');fk.className='pill';fk.textContent='事实·'+m.fact_key;mt.appendChild(fk)}
+ if(m.hits){const h=document.createElement('span');h.textContent='被想起 '+m.hits+' 次';mt.appendChild(h)}
+ for(const tg of (m.tags||[])){const g=document.createElement('span');g.className='pill';g.textContent='#'+tg;mt.appendChild(g)}
+ const tm=document.createElement('span');tm.textContent=fmtFull(m.ts);mt.appendChild(tm)}
+function memCard(m){
+ const d=document.createElement('div');d.className='mem'+(m.archived?' arch':'');
+ const ct=document.createElement('div');ct.className='ct';ct.textContent=m.content;
+ const mt=document.createElement('div');mt.className='mt';memMeta(mt,m);
+ d.append(ct,mt);return d}
+async function memAct(box,path,body){
+ try{await req('POST','/rooms/'+encodeURIComponent(roomId)+path,body);
+  delete roomDataCache[roomId+':memory'];
+  await renderMemory(box,await roomData('memory'));
+ }catch(e){alert(e.message)}}
+function supersedeForm(box,m,anchor){
+ if(anchor.nextSibling&&anchor.nextSibling.classList&&anchor.nextSibling.classList.contains('supform')){anchor.nextSibling.remove();return}
+ const f=document.createElement('div');f.className='supform';f.style.marginTop='8px';
+ const ta=document.createElement('textarea');ta.rows=2;ta.value=m.content;ta.style.cssText='width:100%;border:1px solid var(--line);border-radius:10px;padding:8px;font:inherit;background:var(--paper);resize:vertical';
+ const row=document.createElement('div');row.style.cssText='display:flex;gap:8px;margin-top:6px';
+ const ok=document.createElement('button');ok.className='dlv on';ok.type='button';ok.textContent='提出新版本';
+ ok.onclick=()=>{const c=ta.value.trim();if(!c)return alert('新版本不能是空的');memAct(box,'/memory/supersede',{old_id:m.id,content:c})};
+ const no=document.createElement('button');no.className='dlv';no.type='button';no.textContent='取消';no.onclick=()=>f.remove();
+ row.append(ok,no);f.append(ta,row);
+ anchor.after(f);ta.focus()}
+async function renderMemory(box,rows){
  box.innerHTML='';
- if(!rows.length){box.innerHTML='<div class="empty">记忆箱子还是空的</div>';return}
+ const isHuman=me&&me.species==='human';
+ const isSelf=me&&me.id===roomId;
+ if(isHuman||isSelf){
+  let pend=[];try{pend=await req('GET','/rooms/'+encodeURIComponent(roomId)+'/memory/pending?limit=50')}catch(e){}
+  const t0=document.createElement('div');t0.className='secttl';t0.textContent='等点头（'+pend.length+'）';box.appendChild(t0);
+  if(!pend.length){const e0=document.createElement('div');e0.className='empty';e0.textContent='没有等点头的记忆';box.appendChild(e0)}
+  else{
+   const sel=new Set();let merging=false;
+   const editor=document.createElement('div');editor.hidden=true;editor.style.marginBottom='9px';
+   const mta=document.createElement('textarea');mta.rows=2;mta.placeholder='合并成一条（人话；原文系统留档）';
+   mta.style.cssText='width:100%;border:1px solid var(--line);border-radius:10px;padding:8px;font:inherit;background:var(--paper);resize:vertical';
+   const mrow=document.createElement('div');mrow.style.cssText='display:flex;gap:8px;margin-top:6px;align-items:center';
+   const mok=document.createElement('button');mok.className='dlv on';mok.type='button';mok.textContent='确认合并';
+   const mno=document.createElement('button');mno.className='dlv';mno.type='button';mno.textContent='取消';
+   const cnt=document.createElement('span');cnt.style.cssText='font-size:12px;color:var(--mute)';
+   mrow.append(mok,mno,cnt);editor.append(mta,mrow);box.appendChild(editor);
+   const paint=()=>{cnt.textContent=merging?('已选 '+sel.size+' 条'+(sel.size<2?'（至少 2 条）':'')):''};
+   if(isHuman&&pend.length>=2){
+    const mbtn=document.createElement('button');mbtn.className='dlv';mbtn.type='button';mbtn.textContent='合并几条…';mbtn.style.marginBottom='9px';
+    mbtn.onclick=()=>{merging=!merging;editor.hidden=!merging;mbtn.classList.toggle('on',merging);sel.clear();for(const c of box.querySelectorAll('.mem[data-mid]'))c.classList.remove('sel');paint()};
+    box.appendChild(mbtn);
+    mno.onclick=()=>{merging=false;editor.hidden=true;mbtn.classList.remove('on');sel.clear();for(const c of box.querySelectorAll('.mem[data-mid]'))c.classList.remove('sel');paint()};
+    mok.onclick=()=>{const c=mta.value.trim();if(sel.size<2)return alert('先点选至少两条');if(!c)return alert('合并后的内容不能是空的');memAct(box,'/memory/merge',{ids:[...sel],content:c})}}
+   for(const m of pend){
+    const d=memCard(m);d.dataset.mid=m.id;
+    const acts=document.createElement('div');acts.style.cssText='display:flex;gap:8px;margin-top:8px;flex-wrap:wrap';
+    const mk=(label,fn)=>{const b=document.createElement('button');b.className='dlv';b.type='button';b.textContent=label;b.onclick=fn;return b};
+    if(isHuman)acts.appendChild(mk('✓ 通过',()=>memAct(box,'/memory/'+m.id+'/approve')));
+    acts.appendChild(mk('✗ 丢弃',()=>memAct(box,'/memory/'+m.id+'/discard')));
+    if(isHuman||!m.authored||m.source==='self')acts.appendChild(mk('✎ 改写出新版…',()=>supersedeForm(box,m,acts)));
+    d.appendChild(acts);
+    d.onclick=ev=>{if(!merging||ev.target.closest('button')||ev.target.closest('textarea'))return;
+     if(sel.has(m.id)){sel.delete(m.id);d.classList.remove('sel')}else{sel.add(m.id);d.classList.add('sel')}paint()};
+    box.appendChild(d)}}}
  const t=document.createElement('div');t.className='secttl';t.textContent='记忆（'+rows.length+' 条）';box.appendChild(t);
+ if(!rows.length){const e=document.createElement('div');e.className='empty';e.textContent='记忆箱子还是空的';box.appendChild(e);return}
  for(const m of rows.slice().reverse()){
-  const d=document.createElement('div');d.className='mem'+(m.archived?' arch':'');
-  const ct=document.createElement('div');ct.className='ct';ct.textContent=m.content;
-  const mt=document.createElement('div');mt.className='mt';
-  const src=document.createElement('span');src.className='pill'+(m.source==='human'?' ok':'');
-  src.textContent=m.source==='human'?'家人说的':m.source==='self'?'TA 自己记的':'听来的';
-  mt.appendChild(src);
-  const conf=document.createElement('span');
-  conf.innerHTML='置信 '+Math.round((m.confidence||0)*100)+'% <span class="cbar"><i style="width:'+Math.round((m.confidence||0)*100)+'%"></i></span>';
-  mt.appendChild(conf);
-  const rv=document.createElement('span');rv.textContent=m.reviewed?'✓ 已审':'未审';mt.appendChild(rv);
-  if(m.archived){const ar=document.createElement('span');ar.className='pill warn';ar.textContent='冷藏';mt.appendChild(ar)}
-  if(m.hits){const h=document.createElement('span');h.textContent='被想起 '+m.hits+' 次';mt.appendChild(h)}
-  for(const tg of (m.tags||[])){const g=document.createElement('span');g.className='pill';g.textContent='#'+tg;mt.appendChild(g)}
-  const tm=document.createElement('span');tm.textContent=fmtFull(m.ts);mt.appendChild(tm);
-  d.append(ct,mt);box.appendChild(d)}}
+  const d=memCard(m);
+  if(!m.archived&&m.review!=='discarded'&&m.version_status!=='superseded'&&(isHuman||(isSelf&&(!m.authored||m.source==='self')))){
+   const acts=document.createElement('div');acts.style.cssText='display:flex;gap:8px;margin-top:8px';
+   const sb=document.createElement('button');sb.className='dlv';sb.type='button';sb.textContent='✎ 改写出新版…';
+   sb.onclick=()=>supersedeForm(box,m,acts);acts.appendChild(sb);d.appendChild(acts)}
+  box.appendChild(d)}}
 /* ----- 交接 ----- */
 function renderHandover(box,d){
  box.innerHTML='';
@@ -652,7 +716,8 @@ function renderCare(box,concerns,notes){
   for(const c of concerns.done){const d=document.createElement('div');d.className='li';d.style.color='var(--mute)';d.textContent=c;det.appendChild(d)}
   box.appendChild(det)}}
 /* ----- 运行 ----- */
-const RUNST={said:'💬 说了话',dm:'💌 发了私信',silent:'🤫 看了看没说',nothing:'😴 没事',passive:'🪶 轻醒',deferred:'🪶 压后了',error:'⚠️ 出错'};
+const RUNST={said:'💬 说了话',dm:'💌 发了私信',silent:'🤫 看了看没说',nothing:'😴 没事',passive:'🪶 轻醒',passive_budget:'🪙 预算用完，只看不说',passive_idle:'🪶 轻醒（心跳没事）',deferred:'🪶 压后了',interrupted:'⚡ 被打断',approval:'🙋 请求了审批',approval_invalid:'⚠️ APPROVAL 格式不对',gateway_unavailable:'⚠️ 网关不可用',approval_rejected:'⚠️ 客厅没收审批',dry:'🧪 dry-run',error:'⚠️ 出错'};
+const RUNLANE={human:'🧑 人类车道',agent:'🤖 住户车道',heartbeat:'💓 心跳车道',routine:'⏰ 例行车道'};
 function renderRuns(box,rows){
  box.innerHTML='';
  if(!rows.length){box.innerHTML='<div class="empty">还没醒过，或者运行记录还没落盘</div>';return}
@@ -661,7 +726,7 @@ function renderRuns(box,rows){
   const d=document.createElement('div');d.className='run';
   const h=document.createElement('div');h.className='rh';
   const rs=document.createElement('span');rs.className='rs';rs.textContent=RUNST[r.status]||('· '+r.status);
-  const rt=document.createElement('span');rt.className='rt';rt.textContent=fmtFull(r.ts)+' · '+String(r.reason||'');
+  const rt=document.createElement('span');rt.className='rt';rt.textContent=fmtFull(r.ts)+(r.lane?' · '+(RUNLANE[r.lane]||r.lane):'')+' · '+String(r.reason||'');
   h.append(rs,rt);d.appendChild(h);
   const meta=document.createElement('div');meta.className='meta';
   const bits=[];
@@ -670,6 +735,7 @@ function renderRuns(box,rows){
   if(r.usage&&r.usage.total_tokens)bits.push(r.usage.total_tokens+' tok');
   if(r.context)bits.push('上下文 '+Math.round(((r.context.system_chars||0)+(r.context.user_chars||0))/100)/10+'k 字 · 记起 '+(r.context.memories_recalled||0)+' 条');
   if(bits.length){meta.textContent=bits.join(' · ');d.appendChild(meta)}
+  if(r.error){const em=document.createElement('div');em.className='meta';em.textContent=String(r.error);d.appendChild(em)}
   const spoken=String(r.raw_reply||'').split('\n').filter(l=>!/^\s*(REMEMBER|CONCERN|NOTE|THREAD|NEXT|BLOCKED|DONE-THREAD|LOG):/.test(l)).join('\n').replace(/[（(]静默[）)]/g,'').trim();
   if(spoken){
    const rp=document.createElement('div');rp.className='reply';
@@ -683,9 +749,41 @@ function renderRuns(box,rows){
    const det=document.createElement('details');
    const sm=document.createElement('summary');sm.textContent='房子给 TA 看的（'+r.heard.length+' 条 · 记录）';det.appendChild(sm);
    const f=document.createElement('div');f.className='fact';f.style.marginTop='6px';
-   f.textContent=r.heard.map(x=>'['+(x.kind||'?')+'] '+(x.from||'?')+': '+String(x.text||'')).join('\n');
+   f.textContent=r.heard.map(x=>(x.kind==='result'?'🧾 ':'')+'['+(x.kind||'?')+'] '+(x.from||'?')+': '+String(x.text||'')).join('\n');
    det.appendChild(f);d.appendChild(det)}
   box.appendChild(d)}}
+/* ----- 投递设置（K1：写回 room.yaml 的 extensions['dev.sameroof.deliver']，重启该住户适配器后生效） ----- */
+function renderDeliver(box,cfg){
+ const ext=(cfg.extensions&&cfg.extensions['dev.sameroof.deliver'])||{};
+ const editable=me&&me.species==='human';
+ const t=document.createElement('div');t.className='secttl';t.textContent='投递：TA 正忙时，找 TA 的话怎么办';box.appendChild(t);
+ const hint=document.createElement('div');hint.className='fact';hint.style.marginBottom='8px';
+ hint.textContent=editable?'等他忙完 = 这轮想完再一起看（默认，不浪费一轮思考）· 现在就说 = 打断重来。写回 room.yaml，重启该住户后生效。':'这页只有家人能改。没单独设的都是「等他忙完」。';
+ box.appendChild(hint);
+ const cur={human:ext.human,agent:ext.agent,from:Object.assign({},ext.from||{})};
+ const save=async()=>{
+  const has=cur.human||cur.agent||Object.keys(cur.from).length;
+  const body={};body['dev.sameroof.deliver']=has?cur:null;
+  try{const r=await req('PUT','/rooms/'+encodeURIComponent(roomId)+'/extensions',body);
+   delete roomDataCache[roomId+':'];
+   hint.textContent='写好了。'+(r&&r.note?String(r.note):'重启该住户适配器后生效。');
+   renderConfig(box,await roomData(''),await roomData('budget'));
+  }catch(e){alert(e.message)}};
+ const row=(label,val,set,clear)=>{
+  const d=document.createElement('div');d.className='kv';
+  const a=document.createElement('span');a.className='k';a.textContent=label;
+  const b=document.createElement('span');b.className='v';
+  const mk=(txt,mode)=>{const btn=document.createElement('button');btn.type='button';btn.className='dlv'+(val===mode?' on':'');btn.textContent=txt;btn.disabled=!editable;btn.onclick=()=>{set(mode);save()};b.appendChild(btn)};
+  mk('等他忙完','after_turn');b.appendChild(document.createTextNode(' '));mk('现在就说','interrupt');
+  if(val&&editable){const x=document.createElement('button');x.type='button';x.className='dlv';x.style.marginLeft='6px';x.textContent='恢复默认';x.onclick=()=>{clear();save()};b.appendChild(x)}
+  if(!val){const f=document.createElement('span');f.className='from';f.textContent=' 跟随全家默认';b.appendChild(f)}
+  d.append(a,b);box.appendChild(d)};
+ row('家人来找 TA',cur.human,v=>{cur.human=v},()=>{delete cur.human});
+ row('住户来找 TA',cur.agent,v=>{cur.agent=v},()=>{delete cur.agent});
+ for(const m of members){
+  if(m.id===roomId)continue;
+  row((m.species==='human'?'🧑 ':'🤖 ')+m.name,cur.from[m.name],
+   v=>{cur.from[m.name]=v},()=>{delete cur.from[m.name]})}}
 /* ----- 配置 ----- */
 function renderConfig(box,cfg,budget){
  box.innerHTML='';
@@ -732,6 +830,7 @@ function renderConfig(box,cfg,budget){
   d.append(a,b,f);box.appendChild(d)}
  sect('上下文窗口');
  for(const [k,v] of Object.entries(cfg.context||{}))box.appendChild(kv(k,String(v)));
+ renderDeliver(box,cfg);
  if(cfg.relations&&Object.keys(cfg.relations).length){
   sect('关系');
   for(const [k,v] of Object.entries(cfg.relations))box.appendChild(kv(k,(v&&v.kind)||''))}
