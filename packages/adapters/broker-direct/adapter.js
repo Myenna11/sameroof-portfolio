@@ -7,9 +7,13 @@ const ROOM = process.argv[2] || '检索员';
 const R = open(ROOM);
 const tokenPath = path.join(RUN, 'tokens', R.room.id);
 if (!fs.existsSync(tokenPath)) { console.error(`${ROOM} 没有 broker token：${tokenPath}。让户主签一个：sameroof-broker token issue ${R.room.id} ...`); process.exit(2); }
-const brokerToken = fs.readFileSync(tokenPath, 'utf8').trim();
+const readToken = () => fs.readFileSync(tokenPath, 'utf8').trim();   // 每次都从文件读：broker 的住户 token 是短期的（DECISIONS #12），审查员换了文件不用重启
 const SOCK = path.join(RUN, 'broker.sock');
-function think(system, user, signal) {
+async function think(system, user, signal) {
+  try { return await call(system, user, signal, readToken()); }
+  catch (e) { if (!/broker 401/.test(String(e.message))) throw e; fs.writeSync(2, `[broker] 401，重读 token 再试一次\n`); return call(system, user, signal, readToken()); }
+}
+function call(system, user, signal, brokerToken) {
   const body = JSON.stringify({ model: R.room.model.id, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], stream: false, max_tokens: 4000, thinking: { type: 'enabled', effort: 'low' } });
   return new Promise((resolve, reject) => {
     const req = http.request({ socketPath: SOCK, path: '/v1/chat/completions', method: 'POST', headers: { authorization: `Bearer ${brokerToken}`, 'content-type': 'application/json', 'x-sameroof-purpose': 'interactive', 'x-sameroof-credential': R.room.model.auth.credential } }, res => {

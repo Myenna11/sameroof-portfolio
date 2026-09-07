@@ -236,7 +236,9 @@ async function run(roomName, runtimeName, think, opts = {}) {
         '- 一次可以只回一个人；几个人说了话，回的时候说清楚回的是谁。',
         '- 家里的人（human）直接 @ 了你，至少应一声，哪怕就一句。(静默) 是给没被叫的时候用的。',
         '- 不想让全家看见就私信：整条回复以 DM: 收件人 开头。',
-        '- 你只搬字，不能执行命令。要做高危动作（读写文件、跑命令），整条回复只写一行：APPROVAL: <action> <JSON 参数>，房子会登记到网关等人审批，结果以"网关结果"投回你的收件箱。例：APPROVAL: core.fs.write {"root_id":"own-room","path":"notes/today.md","content":"今天的记录…","encoding":"utf8","mode":"replace"}（动作有 core.fs.read / core.fs.write / core.exec；参数必须是严格 JSON 对象，键不重复，别夹别的字）。',
+        gw.available(room.id)
+          ? '- 你只搬字，不能执行命令。要做高危动作（读写文件、跑命令），整条回复只写一行：APPROVAL: <action> <JSON 参数>，房子会登记到网关等人审批，结果以"网关结果"投回你的收件箱。例：APPROVAL: core.fs.write {"root_id":"own-room","path":"notes/today.md","content":"今天的记录…","encoding":"utf8","mode":"replace"}（动作有 core.fs.read / core.fs.write / core.exec；参数必须是严格 JSON 对象，键不重复，别夹别的字）。'
+          : '- 你只搬字，不能执行命令。能力网关还没上线，现在也没法申请动手（别写 APPROVAL，写了也登记不上）；想看什么文件、想改什么，直接在客厅说，让人帮你。',
         R.memory ? '- 值得以后还记得的事，在回复末尾另起一行写 REMEMBER: 一句话（可多行）。房子会存下来，标记为你自己写的、未审。' : '',
         '- 你自己房间的钥匙（同样另起一行）：CONCERN: 一句话 记进惦记本；DONE: 一句话 划掉做完的；NOTE: 一句话 记在自己的小本上；' + (R.memory ? 'FORGET: 一句话 把记忆里对上的那条冷藏（不删）。' : ''),
         '',
@@ -288,7 +290,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
         let intent; try { intent = gw.parseApprovalLine(reply); }
         catch (e) { run.status = 'approval_invalid'; run.error = String(e.message).slice(0, 300); fs.writeSync(2, `[${room.name}] APPROVAL 格式不对（${run.error}），没登记：${reply.slice(0, 200).replace(/\n/g, ' ')}\n`); shift.push({ at: new Date().toISOString(), heard: inbox.map(m => `${m.from}：${m.text}`), said: '（你上一轮的 APPROVAL 格式不对：要 APPROVAL: <action> <JSON 参数>，没登记）' }); return; }
         let reg; try { reg = await gw.registerIntent({ residentId: room.id, runId: run.id, action: intent.action, params: intent.params, ttl: 1800 }); }
-        catch (e) { run.status = 'gateway_unavailable'; run.error = `${e.code || 'GATEWAY-UNAVAILABLE'}: ${String(e.message).slice(0, 200)}`; fs.writeSync(2, `[${room.name}] 网关不可用，审批没登记（${run.error}）\n`); return; }
+        catch (e) { run.status = 'gateway_unavailable'; run.error = `${e.code || 'GATEWAY-UNAVAILABLE'}: ${String(e.message).slice(0, 200)}`; fs.writeSync(2, `[${room.name}] 网关不可用，审批没登记（${run.error}）\n`); shift.push({ at: new Date().toISOString(), heard: inbox.map(m => `${m.from}：${m.text}`), said: `（你想 ${intent.action}，但网关不可用，没登记：${run.error.slice(0, 80)}）` }); return; }
         const a = await api('POST', '/approval', reg.approval_body);
         if (!a || !a.approval_id) { run.status = 'approval_rejected'; run.error = '客厅没收审批：' + JSON.stringify(a).slice(0, 300); fs.writeSync(2, `[${room.name}] ${run.error}\n`); return; }
         run.status = 'approval'; run.gateway_request_id = reg.request_id; run.approval_id = a.approval_id; run.action = intent.action;

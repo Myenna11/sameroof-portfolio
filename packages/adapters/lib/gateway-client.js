@@ -79,4 +79,6 @@ async function registerIntent({ residentId, runId, action, params, ttl = 1800, r
   });
 }
 
-module.exports = { registerIntent, parseApprovalLine, readToken, newRequestId, GatewayUnavailable, socketPath, tokenFile };
+// 网关此刻能不能用：socket 在、这位住户的 token 文件在。只用来决定提示里让不让住户写 APPROVAL，真正的 fail closed 在 registerIntent。
+function available(residentId) { try { return fs.existsSync(socketPath()) && fs.existsSync(tokenFile(residentId)); } catch { return false; } }
+module.exports = { registerIntent, parseApprovalLine, readToken, newRequestId, GatewayUnavailable, socketPath, tokenFile, available };
