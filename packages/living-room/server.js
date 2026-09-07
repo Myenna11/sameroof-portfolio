@@ -15,6 +15,7 @@ const { SlidingWindowLimiter, AuthFailureLimiter } = require('./rate-limit');
 const { PushClient, PushClientError } = require('./push-client');
 const roomsApi = require('./rooms-api');
 const memoryApi = require('./memory-api');
+const blackboardApi = require('./blackboard-api');
 const { resolveHouseRoot } = require('@sameroof/house-root');
 const jcs = require('@sameroof/jcs');
 
@@ -250,6 +251,7 @@ function createLivingRoom(options = {}) {
   }
   const memoryHandle = memoryApi.mount({ houseDir, residents, byId, writeJson, readJson, HttpError, emitActivity });   // 记忆审核队列（W4）：挂在 /rooms/:id/memory/… 下，先于只读的 rooms-api
   const roomsHandle = roomsApi.mount({ houseDir, residents, byId, house: houseCfg, writeJson, readJson, HttpError, emitActivity });   // 房间读 + PUT /rooms/:id/extensions（K1）；要 emitActivity 所以挪到这儿挂
+  const blackboard = blackboardApi.mount({ residents, byId, byName, norm, db, writeJson, readJson, HttpError, emitActivity, post });   // 黑板（W7）：tasks 表 + GET/POST /tasks、PATCH /tasks/:id
   const presence = new Map();
   const sseByResident = new Map();
   const sseByIp = new Map();
@@ -300,7 +302,7 @@ function createLivingRoom(options = {}) {
     if (isPrivate && !byId.has(input.to_id)) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', '没这个人。');
     const id = 'msg_' + crypto.randomBytes(12).toString('hex');
     const ts = new Date().toISOString();
-    const mentions = isPrivate ? [input.to_id] : mentionsIn(input.text).filter(id0 => id0 !== input.from_id);
+    const mentions = isPrivate ? [input.to_id] : Array.isArray(input.mentions) ? input.mentions.filter(id0 => byId.has(id0) && id0 !== input.from_id) : mentionsIn(input.text).filter(id0 => id0 !== input.from_id);   // 明给 mentions 的（黑板 system 小字 @ 主人）不再从正文里找
     const row = {
       id,
       seq: ++seq,
@@ -545,6 +547,7 @@ function createLivingRoom(options = {}) {
       }
 
       if (url.pathname.startsWith('/rooms/')) { if (await memoryHandle(req, url, me, res)) return; if (await roomsHandle(req, url, me, res)) return; }
+      if (url.pathname === '/tasks' || url.pathname.startsWith('/tasks/')) { if (await blackboard.handle(req, url, me, res)) return; }
 
       if (req.method === 'POST' && url.pathname === '/activity') {           // 住户（适配器）报自己的事件；actor 只认 token
         const body = await readJson(req);
@@ -715,6 +718,9 @@ function createLivingRoom(options = {}) {
     catch (error) { console.error('[审批过期任务失败]', error.message); }
   }, 60000);
   expiryTimer.unref();
+  try { const n = blackboard.archive(); if (n) console.log('[黑板] 收起了 ' + n + ' 件满 7 天的 done/dropped'); } catch (error) { console.error('[黑板归档失败]', error.message); }   // 启动时一次，之后每小时一次
+  const archiveTimer = setInterval(() => { try { blackboard.archive(); } catch (error) { console.error('[黑板归档失败]', error.message); } }, 3600000);
+  archiveTimer.unref();
 
   function listen() {
     const port = options.port === undefined ? Number(process.env.SAMEROOF_PORT || 8790) : options.port;
@@ -730,6 +736,7 @@ function createLivingRoom(options = {}) {
 
   function close() {
     clearInterval(expiryTimer);
+    clearInterval(archiveTimer);
     for (const listener of listeners) {
       try { listener.send({ kind: 'system', text: '客厅暂时关门。' }); } catch {}
       try { listener.close(); } catch {}
@@ -737,7 +744,7 @@ function createLivingRoom(options = {}) {
     return new Promise(resolve => server.close(() => { db.close(); resolve(); }));
   }
 
-  return { server, listen, close, tokenStore, residents, db, gatewayTokenFile, clientIp: req => clientIp(req, options.trustLoopbackProxy !== false) };
+  return { server, listen, close, tokenStore, residents, db, gatewayTokenFile, blackboard, clientIp: req => clientIp(req, options.trustLoopbackProxy !== false) };
 }
 
 async function main() {
