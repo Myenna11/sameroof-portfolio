@@ -15,6 +15,7 @@ const { SlidingWindowLimiter, AuthFailureLimiter } = require('./rate-limit');
 const { PushClient, PushClientError } = require('./push-client');
 const roomsApi = require('./rooms-api');
 const { resolveHouseRoot } = require('@sameroof/house-root');
+const jcs = require('@sameroof/jcs');
 
 const RESERVED = new Set(['system', 'all', 'everyone', 'house']);
 const MESSAGE_MAX = 8000;
@@ -24,6 +25,15 @@ const SSE_TOTAL_MAX = 100;
 const SSE_RESIDENT_MAX = 3;
 const SSE_IP_MAX = 10;
 const PUSH_HOSTS = new Set(['fcm.googleapis.com', 'updates.push.services.mozilla.com', 'web.push.apple.com']);
+// ---- 能力网关接缝（docs/GATEWAY.md §3）：执行型审批、权威决定流、结果投回 ----
+const GATEWAY_RESULT_STATUSES = new Set(['succeeded', 'failed', 'denied', 'expired', 'timed_out', 'failed_unknown']);
+const GATEWAY_NEXT_KINDS = new Set(['none', 'request_writable_root', 'retry_in_sandbox', 'human_action']);
+const GATEWAY_DETAILS_MAX = 4096;
+const GATEWAY_SUMMARY_MAX = 2000;
+const REQUEST_ID_RE = /^req_[A-Za-z0-9_-]{4,120}$/;
+const APPROVAL_ID_RE = /^apr_[a-f0-9]{24}$/;
+const DIGEST_RE = /^[a-f0-9]{64}$/;
+const SECRET_KEY_RE = /token|authorization|bearer|secret|password|passwd|api[_-]?key|cookie/i;
 
 class HttpError extends Error {
   constructor(status, code, message) {
@@ -44,6 +54,24 @@ function securityHeaders(api = true) {
     'content-security-policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://house.sameroof.example; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
     ...(api ? { 'cache-control': 'no-store' } : {})
   };
+}
+
+// 投回住户前脱敏：token/Authorization 之类字样后面的值、常见 secret 形状。只对短文本用，不保证穷尽——网关那边入库前还要再脱一遍（GATEWAY.md §10）。
+function redactText(text) {
+  return String(text)
+    .replace(/\b(authorization|bearer|token|secret|password|passwd|api[_-]?key|cookie)\b(\s*[:=]\s*|\s+)([A-Za-z0-9_\-.=+/]{8,})/gi, '$1$2[已脱敏]')
+    .replace(/\b(sk|ghp|gho|ghu|xox[abp])[-_][A-Za-z0-9_\-]{16,}/g, '[已脱敏]');
+}
+function redactValue(value, depth = 0) {
+  if (depth > 8) return '[太深，略]';
+  if (typeof value === 'string') return redactText(value);
+  if (Array.isArray(value)) return value.slice(0, 200).map(v => redactValue(v, depth + 1));
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const key of Object.keys(value).slice(0, 200)) out[key] = SECRET_KEY_RE.test(key) ? '[已脱敏]' : redactValue(value[key], depth + 1);
+    return out;
+  }
+  return value;
 }
 
 function writeJson(res, status, value, extra = {}) {
@@ -179,14 +207,25 @@ function createLivingRoom(options = {}) {
     'CREATE INDEX IF NOT EXISTS push_subscriptions_resident ON push_subscriptions(resident_id);',
     'CREATE TABLE IF NOT EXISTS activity(seq INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, kind TEXT NOT NULL, actor_id TEXT, text TEXT, meta TEXT);',
   ].join('\n'));
+  // 网关接缝的表：审批多两列（老库 ALTER 补上）、权威决定流、结果幂等键
+  const approvalColumns = new Set(db.prepare('PRAGMA table_info(approvals)').all().map(column => column.name));
+  if (!approvalColumns.has('gateway_request_id')) db.exec('ALTER TABLE approvals ADD COLUMN gateway_request_id TEXT');
+  if (!approvalColumns.has('digest_kind')) db.exec("ALTER TABLE approvals ADD COLUMN digest_kind TEXT NOT NULL DEFAULT 'legacy'");
+  db.exec([
+    'CREATE UNIQUE INDEX IF NOT EXISTS approvals_gateway_request ON approvals(gateway_request_id) WHERE gateway_request_id IS NOT NULL;',
+    'CREATE TABLE IF NOT EXISTS approval_decisions(',
+    'seq INTEGER PRIMARY KEY AUTOINCREMENT, approval_id TEXT NOT NULL, gateway_request_id TEXT NOT NULL, resident_id TEXT NOT NULL, action TEXT NOT NULL,',
+    'params_digest TEXT NOT NULL, decision TEXT NOT NULL, remember TEXT NOT NULL, decided_by TEXT NOT NULL, decided_at TEXT NOT NULL, expires_at TEXT NOT NULL, single_use INTEGER NOT NULL DEFAULT 1);',
+    'CREATE TABLE IF NOT EXISTS gateway_results(request_id TEXT PRIMARY KEY, message_id TEXT NOT NULL, received_at TEXT NOT NULL);',
+  ].join('\n'));
 
   let seq = db.prepare('SELECT MAX(seq) AS value FROM messages').get().value || 0;
   const insMsg = db.prepare('INSERT INTO messages(id,seq,ts,kind,from_id,to_id,text,mentions,reply_to,meta) VALUES(?,?,?,?,?,?,?,?,?,?)');
   const insDelivery = db.prepare('INSERT OR IGNORE INTO deliveries(message_id,resident_id,status,ts) VALUES(?,?,?,?)');
   const ackDelivery = db.prepare("UPDATE deliveries SET status='read', ts=? WHERE message_id=? AND resident_id=? AND status!='read'");
   const unread = db.prepare("SELECT m.* FROM deliveries d JOIN messages m ON m.id=d.message_id WHERE d.resident_id=? AND d.status!='read' ORDER BY m.seq");
-  const history = db.prepare("SELECT * FROM messages WHERE kind!='dm' AND seq>? ORDER BY seq LIMIT ?");
-  const historyBefore = db.prepare("SELECT * FROM messages WHERE kind!='dm' AND seq<? ORDER BY seq DESC LIMIT ?");
+  const history = db.prepare("SELECT * FROM messages WHERE kind NOT IN ('dm','result') AND seq>? ORDER BY seq LIMIT ?");      // result 类只投申请住户，不进公共历史
+  const historyBefore = db.prepare("SELECT * FROM messages WHERE kind NOT IN ('dm','result') AND seq<? ORDER BY seq DESC LIMIT ?");
   const dmHistory = db.prepare("SELECT * FROM messages WHERE kind='dm' AND ((from_id=? AND to_id=?) OR (from_id=? AND to_id=?)) AND seq<? ORDER BY seq DESC LIMIT ?");
   const insActivity = db.prepare('INSERT INTO activity(ts,kind,actor_id,text,meta) VALUES(?,?,?,?,?)');
   const activityBefore = db.prepare('SELECT * FROM activity WHERE seq<? ORDER BY seq DESC LIMIT ?');
@@ -195,6 +234,11 @@ function createLivingRoom(options = {}) {
   const upsertPush = db.prepare(`INSERT INTO push_subscriptions(endpoint,resident_id,subscription,created_ts,updated_ts) VALUES(?,?,?,?,?)
     ON CONFLICT(endpoint) DO UPDATE SET resident_id=excluded.resident_id,subscription=excluded.subscription,updated_ts=excluded.updated_ts`);
   const deletePush = db.prepare('DELETE FROM push_subscriptions WHERE endpoint=? AND resident_id=?');
+  const insDecision = db.prepare('INSERT INTO approval_decisions(approval_id,gateway_request_id,resident_id,action,params_digest,decision,remember,decided_by,decided_at,expires_at,single_use) VALUES(?,?,?,?,?,?,?,?,?,?,1)');
+  const decisionsAfter = db.prepare('SELECT * FROM approval_decisions WHERE seq>? ORDER BY seq LIMIT ?');
+  const approvalByRequest = db.prepare('SELECT * FROM approvals WHERE gateway_request_id=?');
+  const getResult = db.prepare('SELECT * FROM gateway_results WHERE request_id=?');
+  const insResult = db.prepare('INSERT INTO gateway_results(request_id,message_id,received_at) VALUES(?,?,?)');
 
   const listeners = new Set();
   function emitActivity({ kind, actor_id, text, meta }) {          // 房子的呼吸：事件流，进 activity 表并推给所有 SSE
@@ -249,11 +293,12 @@ function createLivingRoom(options = {}) {
   }
 
   function post(input) {
-    if (!byId.has(input.from_id)) throw new HttpError(400, 'ACTOR-INVALID', '发言者不在房子里。');
-    if (input.kind === 'dm' && !byId.has(input.to_id)) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', '没这个人。');
+    const isPrivate = input.kind === 'dm' || input.kind === 'result';          // result：网关结果，只给申请住户（GATEWAY.md §3.3）
+    if (input.from_id !== 'house' && !byId.has(input.from_id)) throw new HttpError(400, 'ACTOR-INVALID', '发言者不在房子里。');
+    if (isPrivate && !byId.has(input.to_id)) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', '没这个人。');
     const id = 'msg_' + crypto.randomBytes(12).toString('hex');
     const ts = new Date().toISOString();
-    const mentions = input.kind === 'dm' ? [input.to_id] : mentionsIn(input.text).filter(id0 => id0 !== input.from_id);
+    const mentions = isPrivate ? [input.to_id] : mentionsIn(input.text).filter(id0 => id0 !== input.from_id);
     const row = {
       id,
       seq: ++seq,
@@ -266,19 +311,21 @@ function createLivingRoom(options = {}) {
       reply_to: input.reply_to || null,
       meta: input.meta || null
     };
-    const targets = input.kind === 'dm' ? [input.to_id] : residents.map(resident => resident.id).filter(id0 => id0 !== input.from_id);
+    const targets = isPrivate ? [input.to_id] : residents.map(resident => resident.id).filter(id0 => id0 !== input.from_id);
     db.transaction(() => {
       insMsg.run(id, row.seq, ts, row.kind, row.from_id, row.to_id, row.text, JSON.stringify(mentions), row.reply_to, row.meta ? JSON.stringify(row.meta) : null);
       for (const target of targets) insDelivery.run(id, target, 'queued', ts);
     })();
-    if (row.kind !== 'dm') {
+    if (!isPrivate) {
       try { fs.appendFileSync(path.join(dataDir, 'living-room', ts.slice(0, 7) + '.jsonl'), JSON.stringify(row) + '\n'); }
       catch (error) { console.error('[客厅归档失败，数据库仍是权威]', error.message); }
     }
-    const state = presence.get(row.from_id) || {};
-    state.last_said = ts;
-    presence.set(row.from_id, state);
-    for (const listener of listeners) if (row.kind !== 'dm' || listener.id === row.to_id || listener.id === row.from_id) listener.send(row);
+    if (row.from_id !== 'house') {
+      const state = presence.get(row.from_id) || {};
+      state.last_said = ts;
+      presence.set(row.from_id, state);
+    }
+    for (const listener of listeners) if (!isPrivate || listener.id === row.to_id || listener.id === row.from_id) listener.send(row);
     notifyOfflineHumans(row, targets);
     return row;
   }
@@ -340,12 +387,83 @@ function createLivingRoom(options = {}) {
     return true;
   }
 
+  // ---- 网关内部接口（GATEWAY.md §3.2 / §3.3）：仅 loopback + 网关 service token；token 从文件读，文件没有就整个关着（fail closed）----
+  const gatewayTokenFile = path.resolve(options.gatewayServiceTokenFile || process.env.SAMEROOF_GATEWAY_SERVICE_TOKEN_FILE || path.join(runDir, 'gateway-service.token'));
+  function gatewayAuth(req) {
+    const remote = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+    const loopback = remote === '127.0.0.1' || remote === '::1';
+    const proxied = req.headers['cf-connecting-ip'] !== undefined || req.headers['x-forwarded-for'] !== undefined;   // 经隧道/反代进来的公网请求也落在 loopback，一律不算本机
+    if (!loopback || proxied) throw new HttpError(403, 'GW-NOT-LOOPBACK', '网关内部接口只开给本机。');
+    let expected;
+    try {
+      const stat = fs.statSync(gatewayTokenFile);
+      if (!stat.isFile() || (stat.mode & 0o077) !== 0) throw new HttpError(503, 'GW-SERVICE-TOKEN-UNSAFE', 'service token 文件权限得是 0600，内部接口先关着。');
+      expected = fs.readFileSync(gatewayTokenFile, 'utf8').trim();
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      throw new HttpError(503, 'GW-SERVICE-TOKEN-MISSING', '网关 service token 还没配好，内部接口先关着。');
+    }
+    if (expected.length < 32) throw new HttpError(503, 'GW-SERVICE-TOKEN-MISSING', 'service token 太短（要 ≥ 32 字符），内部接口先关着。');
+    const match = /^Bearer\s+([^\s]+)$/i.exec(String(req.headers.authorization || ''));
+    const given = match ? match[1] : '';
+    const a = crypto.createHash('sha256').update(given).digest();
+    const b = crypto.createHash('sha256').update(expected).digest();
+    if (!given || !crypto.timingSafeEqual(a, b)) throw new HttpError(403, 'GW-AUTH-DENIED', '这不是网关的 service token。');   // 住户 token 也走这里 → 403
+  }
+  async function gatewayInternal(req, res, url) {
+    gatewayAuth(req);
+    if (req.method === 'GET' && url.pathname === '/internal/gateway/approval-results') {   // 权威决定流：按 seq 可补读，重启不丢
+      const afterSeq = positiveInt(url.searchParams.get('after_seq'), 0, 0, Number.MAX_SAFE_INTEGER, 'GW-AFTER-SEQ-INVALID');
+      const limit = positiveInt(url.searchParams.get('limit'), 100, 1, 100, 'GW-LIMIT-INVALID');
+      const items = decisionsAfter.all(afterSeq, limit).map(row => ({ ...row, single_use: row.single_use === 1 }));
+      return writeJson(res, 200, { items, next_seq: items.length ? items[items.length - 1].seq : afterSeq });
+    }
+    if (req.method === 'POST' && url.pathname === '/internal/gateway/results') {           // 结果投回：request_id 幂等，只投申请住户
+      const body = await readJson(req);
+      const requestId = body.request_id;
+      if (typeof requestId !== 'string' || !REQUEST_ID_RE.test(requestId)) throw new HttpError(400, 'GW-RESULT-INVALID', 'request_id 不合法。');
+      const existing = getResult.get(requestId);
+      if (existing) return writeJson(res, 200, { message_id: existing.message_id, request_id: requestId, received_at: existing.received_at, duplicate: true });
+      if (typeof body.approval_id !== 'string' || !APPROVAL_ID_RE.test(body.approval_id)) throw new HttpError(400, 'GW-RESULT-INVALID', 'approval_id 不合法。');
+      if (typeof body.resident_id !== 'string' || typeof body.action !== 'string') throw new HttpError(400, 'GW-RESULT-INVALID', '要有 resident_id 和 action。');
+      if (!GATEWAY_RESULT_STATUSES.has(body.status)) throw new HttpError(400, 'GW-RESULT-INVALID', 'status 不在 succeeded/failed/denied/expired/timed_out/failed_unknown 里。');
+      if (!body.coverage || typeof body.coverage !== 'object' || Array.isArray(body.coverage)) throw new HttpError(400, 'GW-RESULT-INVALID', 'coverage 得是对象。');
+      if (!body.next || typeof body.next !== 'object' || !GATEWAY_NEXT_KINDS.has(body.next.kind)) throw new HttpError(400, 'GW-RESULT-INVALID', 'next.kind 不在 none/request_writable_root/retry_in_sandbox/human_action 里。');
+      if (typeof body.summary !== 'string' || !body.summary.trim()) throw new HttpError(400, 'GW-RESULT-INVALID', '要有 summary。');
+      if (body.details !== undefined && (!body.details || typeof body.details !== 'object')) throw new HttpError(400, 'GW-RESULT-INVALID', 'details 得是对象。');
+      const approval = approvalByRequest.get(requestId);
+      if (!approval) throw new HttpError(404, 'GW-RESULT-UNKNOWN-REQUEST', '没有这个 request_id 的审批。');
+      if (approval.id !== body.approval_id || approval.resident_id !== body.resident_id || approval.action !== body.action) throw new HttpError(409, 'GW-RESULT-MISMATCH', 'approval_id / resident_id / action 与客厅记录不一致。');
+      if (!byId.has(approval.resident_id)) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', '申请的住户已不在房子里。');
+      const summary = redactText(body.summary).slice(0, GATEWAY_SUMMARY_MAX);
+      let details = null;
+      if (body.details !== undefined) {
+        const text = JSON.stringify(redactValue(body.details));
+        details = Buffer.byteLength(text) <= GATEWAY_DETAILS_MAX ? JSON.parse(text) : { truncated: true, bytes: Buffer.byteLength(text), preview: text.slice(0, 3800) };
+      }
+      const receivedAt = new Date().toISOString();
+      let row;
+      db.transaction(() => {
+        row = post({ kind: 'result', from_id: 'house', to_id: approval.resident_id, text: summary, meta: {
+          gateway_request_id: requestId, approval_id: approval.id, action: approval.action, status: body.status,
+          coverage: redactValue(body.coverage), next: redactValue(body.next), details, deliver: 'interrupt'
+        } });
+        insResult.run(requestId, row.id, receivedAt);
+        db.prepare('UPDATE approvals SET used=1 WHERE id=?').run(approval.id);
+      })();
+      emitActivity({ kind: 'note', actor_id: approval.resident_id, text: '网关执行 ' + approval.action + '：' + body.status, meta: { gateway_request_id: requestId, approval_id: approval.id, status: body.status } });
+      return writeJson(res, 200, { message_id: row.id, request_id: requestId, received_at: receivedAt, delivered_to: approval.resident_id, duplicate: false });
+    }
+    throw new HttpError(404, 'ROUTE-NOT-FOUND', '没这个门。');
+  }
+
   const server = http.createServer(async (req, res) => {
     const identity = connectionIdentity(req, options.trustLoopbackProxy !== false);
     const ip = identity.ip;
     try {
       const url = new URL(req.url, 'http://localhost');
       if (staticResponse(req, res, url.pathname)) return;
+      if (url.pathname.startsWith('/internal/gateway/')) return await gatewayInternal(req, res, url);
 
       const authn = authenticate(req, res, identity.authFailureKey);
       if (!authn) return;
@@ -453,7 +571,7 @@ function createLivingRoom(options = {}) {
       }
 
       if (req.method === 'GET' && url.pathname === '/inbox') {
-        return writeJson(res, 200, unread.all(me.id).map(row => ({ ...row, mentions: JSON.parse(row.mentions), meta: row.meta ? JSON.parse(row.meta) : null, from: byId.get(row.from_id)?.name })));
+        return writeJson(res, 200, unread.all(me.id).map(row => ({ ...row, mentions: JSON.parse(row.mentions), meta: row.meta ? JSON.parse(row.meta) : null, from: row.from_id === 'house' ? '房子' : byId.get(row.from_id)?.name })));
       }
 
       if (req.method === 'POST' && url.pathname === '/inbox/ack') {
@@ -502,15 +620,37 @@ function createLivingRoom(options = {}) {
         }
         const ttl = positiveInt(body.ttl_seconds, 1800, 30, 3600, 'APPROVAL-TTL-INVALID');
         const params = body.params && typeof body.params === 'object' && !Array.isArray(body.params) ? body.params : {};
-        const paramsJson = JSON.stringify(params);
+        // 执行型审批（带 gateway_request_id + params_digest）：客厅按 RFC 8785 自己重算摘要，不信 body；旧客户端不带的走 JSON.stringify 摘要，标 legacy，网关不消费。
+        const executable = body.gateway_request_id !== undefined || body.params_digest !== undefined;
+        let paramsJson, paramsDigest, digestKind = 'legacy', gatewayRequestId = null;
+        if (executable) {
+          if (typeof body.gateway_request_id !== 'string' || !REQUEST_ID_RE.test(body.gateway_request_id)) throw new HttpError(400, 'APPROVAL-REQUEST-ID-INVALID', 'gateway_request_id 得是 req_ 开头的合法 id，且要和 params_digest 一起给。');
+          if (typeof body.params_digest !== 'string' || !DIGEST_RE.test(body.params_digest)) throw new HttpError(400, 'APPROVAL-DIGEST-INVALID', 'params_digest 得是 64 位小写 hex，且要和 gateway_request_id 一起给。');
+          if (!body.params || typeof body.params !== 'object' || Array.isArray(body.params)) throw new HttpError(400, 'APPROVAL-PARAMS-INVALID', '执行型审批的 params 得是对象。');
+          try { paramsJson = jcs.canonicalize(params); paramsDigest = jcs.digest(params); }
+          catch (error) { throw new HttpError(400, 'APPROVAL-PARAMS-INVALID', 'params 不能做 JCS 规范化：' + error.message); }
+          if (paramsDigest !== body.params_digest) throw new HttpError(400, 'APPROVAL-DIGEST-MISMATCH', 'params_digest 与客厅按 RFC 8785 重算的不一致，不创建审批。');
+          if (approvalByRequest.get(body.gateway_request_id)) throw new HttpError(409, 'APPROVAL-REQUEST-DUPLICATE', '这个 gateway_request_id 已经有审批了，一个 request 只能绑一个审批。');
+          digestKind = 'jcs';
+          gatewayRequestId = body.gateway_request_id;
+        } else {
+          paramsJson = JSON.stringify(params);
+          paramsDigest = crypto.createHash('sha256').update(paramsJson).digest('hex');
+        }
         const id = 'apr_' + crypto.randomBytes(12).toString('hex');
         const now = Date.now();
-        const digest = crypto.createHash('sha256').update(paramsJson).digest('hex');
-        db.prepare('INSERT INTO approvals(id,resident_id,action,params_digest,params,status,created_ts,expires_ts) VALUES(?,?,?,?,?,?,?,?)')
-          .run(id, me.id, body.action, digest, paramsJson, 'pending', new Date(now).toISOString(), new Date(now + ttl * 1000).toISOString());
-        post({ kind: 'system', from_id: me.id, text: me.name + ' 想 ' + body.action + '，等审批。', meta: { approval_id: id, action: body.action, params_digest: digest } });
-        emitActivity({ kind: 'approval_request', actor_id: me.id, text: me.name + ' 想 ' + body.action + '，等审批。', meta: { approval_id: id, action: body.action, waiting_on: 'human' } });
-        return writeJson(res, 200, { approval_id: id, params_digest: digest, expires_in: ttl });
+        const expiresAt = new Date(now + ttl * 1000).toISOString();
+        try {
+          db.prepare('INSERT INTO approvals(id,resident_id,action,params_digest,params,status,created_ts,expires_ts,gateway_request_id,digest_kind) VALUES(?,?,?,?,?,?,?,?,?,?)')
+            .run(id, me.id, body.action, paramsDigest, paramsJson, 'pending', new Date(now).toISOString(), expiresAt, gatewayRequestId, digestKind);
+        } catch (error) {
+          if (String(error.code || '').startsWith('SQLITE_CONSTRAINT')) throw new HttpError(409, 'APPROVAL-REQUEST-DUPLICATE', '这个 gateway_request_id 已经有审批了，一个 request 只能绑一个审批。');
+          throw error;
+        }
+        const approvalMeta = { approval_id: id, action: body.action, params_digest: paramsDigest, gateway_request_id: gatewayRequestId, digest_kind: digestKind };
+        post({ kind: 'system', from_id: me.id, text: me.name + ' 想 ' + body.action + '，等审批。', meta: approvalMeta });
+        emitActivity({ kind: 'approval_request', actor_id: me.id, text: me.name + ' 想 ' + body.action + '，等审批。', meta: { ...approvalMeta, waiting_on: 'human' } });
+        return writeJson(res, 200, { approval_id: id, params_digest: paramsDigest, expires_in: ttl, expires_at: expiresAt, gateway_request_id: gatewayRequestId, digest_kind: digestKind });
       }
 
       const approvalMatch = /^\/approval\/(apr_[a-f0-9]{24})$/.exec(url.pathname);
@@ -523,10 +663,20 @@ function createLivingRoom(options = {}) {
         if (!approval) throw new HttpError(404, 'APPROVAL-NOT-FOUND', '没有这个审批。');
         if (approval.status !== 'pending' || Date.parse(approval.expires_ts) < Date.now()) throw new HttpError(409, 'APPROVAL-CLOSED', '审批已过期或已决定。');
         const decision = body.decision === 'allow' ? 'allowed' : 'denied';
-        db.prepare('UPDATE approvals SET status=?, decided_by=? WHERE id=?').run(decision, me.id, approval.id);
-        post({ kind: 'system', from_id: me.id, text: me.name + (decision === 'allowed' ? '同意' : '拒绝') + '了 ' + (byId.get(approval.resident_id)?.name || approval.resident_id) + ' 的 ' + approval.action + '。', meta: { approval_id: approval.id, decision } });
-        emitActivity({ kind: 'approval_result', actor_id: me.id, text: me.name + (decision === 'allowed' ? '同意' : '拒绝') + '了 ' + (byId.get(approval.resident_id)?.name || approval.resident_id) + ' 的 ' + approval.action + '。', meta: { approval_id: approval.id, decision, resident_id: approval.resident_id } });
-        return writeJson(res, 200, { approval_id: approval.id, decision, params_digest: approval.params_digest, expires_at: approval.expires_ts, single_use: true });
+        const decidedAt = new Date().toISOString();
+        // TODO(实现员 K2)：决定接口暂不收 remember 字段，先固定 once；按钮上线后在这里收 remember，并按 house 的 approval_memory ceiling 裁。
+        const remember = 'once';
+        let decisionSeq = null;
+        db.transaction(() => {                                                   // 人的决定与权威决定流同一事务落盘；legacy 摘要的审批不进流（网关不得消费）
+          db.prepare('UPDATE approvals SET status=?, decided_by=? WHERE id=?').run(decision, me.id, approval.id);
+          if (approval.digest_kind === 'jcs' && approval.gateway_request_id) {
+            decisionSeq = Number(insDecision.run(approval.id, approval.gateway_request_id, approval.resident_id, approval.action, approval.params_digest, decision, remember, me.id, decidedAt, approval.expires_ts).lastInsertRowid);
+          }
+        })();
+        const decisionMeta = { approval_id: approval.id, decision, gateway_request_id: approval.gateway_request_id || null, digest_kind: approval.digest_kind };
+        post({ kind: 'system', from_id: me.id, text: me.name + (decision === 'allowed' ? '同意' : '拒绝') + '了 ' + (byId.get(approval.resident_id)?.name || approval.resident_id) + ' 的 ' + approval.action + '。', meta: decisionMeta });
+        emitActivity({ kind: 'approval_result', actor_id: me.id, text: me.name + (decision === 'allowed' ? '同意' : '拒绝') + '了 ' + (byId.get(approval.resident_id)?.name || approval.resident_id) + ' 的 ' + approval.action + '。', meta: { ...decisionMeta, resident_id: approval.resident_id } });
+        return writeJson(res, 200, { approval_id: approval.id, decision, params_digest: approval.params_digest, expires_at: approval.expires_ts, single_use: true, remember, gateway_request_id: approval.gateway_request_id || null, decision_seq: decisionSeq, decided_at: decidedAt });
       }
 
       if (approvalMatch && req.method === 'GET') {
@@ -581,7 +731,7 @@ function createLivingRoom(options = {}) {
     return new Promise(resolve => server.close(() => { db.close(); resolve(); }));
   }
 
-  return { server, listen, close, tokenStore, residents, db, clientIp: req => clientIp(req, options.trustLoopbackProxy !== false) };
+  return { server, listen, close, tokenStore, residents, db, gatewayTokenFile, clientIp: req => clientIp(req, options.trustLoopbackProxy !== false) };
 }
 
 async function main() {
