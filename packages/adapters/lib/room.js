@@ -5,6 +5,7 @@ const yaml = require('js-yaml');
 const { resolveHouseRoot } = require('@sameroof/house-root');
 const memoryPlugin = require('@sameroof/plugin-memory');
 const cron = require('./cron');
+const C = require('./context');                                          // 上下文拼装的纯函数：打分挑选、摘要帧、工具留壳
 const LR = process.env.SAMEROOF_LR || 'http://127.0.0.1:8790';
 const RUN = path.join(process.env.HOME || '/root', '.sameroof', 'run');
 let houseDir = null;                                                       // 懒解析：真开房间时才找 house.yaml，纯函数测试不碰盘
@@ -175,7 +176,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
       const hoPath = path.join(R.roomDir, 'handover', 'latest.md'); const handover = fs.existsSync(hoPath) ? fs.readFileSync(hoPath, 'utf8') : '（没有交接信）';
       state.wakes_today++; state.last_wake = new Date().toISOString(); save();
       // ---- 上下文预算（房间可配，缺省来自 house.yaml defaults.context）----
-      const ctx = Object.assign({ recent_messages: 20, recent_max_chars: 4000, memory_hits: 4, memory_recent: 3 },
+      const ctx = Object.assign({ recent_messages: 20, recent_max_chars: 4000, memory_hits: 4, memory_recent: 3, frame_max_chars: 400 },
         ((R.house.defaults || {}).context) || ((R.house.extensions || {})['dev.sameroof.context']) || {},
         room.context || ((room.extensions || {})['dev.sameroof.context']) || {});
       let remembered = '';
@@ -184,32 +185,38 @@ async function run(roomName, runtimeName, think, opts = {}) {
         const hits = R.memory.recall(q, ctx.memory_hits); const recent = R.memory.recent(ctx.memory_recent).filter(m => !hits.find(h => h.id === m.id));
         const list = [...hits, ...recent]; if (list.length) remembered = '【我记得的事】\n' + R.memory.render(list);
       }
-      // 客厅最近的话（已读的也带上，免得断了上文），按字数封顶
-      let recentCtx = '';
+      // ---- 上下文三条规则（细节与打分表见 lib/context.js 与 README"上下文怎么拼"）----
+      // 1. remembered 不进 system，放 user 开头（system 只放一班内稳定的：人设、规矩、交接信、惦记本、小本）
+      // 2. 刚才的话 / 私信往来：候选 = 最近 recent_messages*2 条（上限 60）里未读之外的，打分取最高 recent_messages 条、按时间重排；超 recent_max_chars 从分低的丢
+      // 3. 工具留壳：meta.kind==='tool' 的消息（住户有手之后客厅里会出现）在刚才的话 / 私信 / 收件箱里都只显示 [工具调用: X]，结果不展开——等网关投回收件箱的正文消息
+      let recentCtx = ''; let recentScored = [];
       const unreadIds = new Set(inbox.map(m => m.id));
+      const scoreOpts = { roomId: room.id, inbox, members, now: Date.now() };
+      const frame = (m, ts, tag, maxChars = ctx.frame_max_chars) => C.renderFrame(m, { roomId: room.id, members, ts, tag, maxChars });
+      const pick = (rows, limit, maxChars, ts) => C.pickRecent(rows, { limit, maxChars, score: m => C.scoreRecent(m, scoreOpts), render: m => frame(m, ts) });
       if (ctx.recent_messages > 0) {
-        const hist = await api('GET', `/history?before=${Number.MAX_SAFE_INTEGER}&limit=${ctx.recent_messages + inbox.length}`).catch(() => []);  // 最近的 N 条（不是最早的）
-        const older = (Array.isArray(hist) ? hist : []).filter(m => !unreadIds.has(m.id)).slice(-ctx.recent_messages);
-        const lines = []; let used = 0;
-        for (const m of older.reverse()) { const line = `[${m.ts.slice(11, 16)}] ${byName(m.from_id, members)}${m.from_id === room.id ? '（我自己）' : ''}：${m.text}`; if (used + line.length > ctx.recent_max_chars) break; lines.unshift(line); used += line.length; }
-        if (lines.length) recentCtx = '【客厅里刚才的话（你已经看过、也可能已经回过——别再回一遍）】\n' + lines.join('\n');
+        const pool = Math.min(60, ctx.recent_messages * 2);
+        const hist = await api('GET', `/history?before=${Number.MAX_SAFE_INTEGER}&limit=${Math.min(200, pool + inbox.length)}`).catch(() => []);  // 最近的（不是最早的）；多拿 inbox.length 条免得未读吃掉候选池
+        const older = (Array.isArray(hist) ? hist : []).filter(m => !unreadIds.has(m.id)).slice(-pool);
+        const r = pick(older, ctx.recent_messages, ctx.recent_max_chars, 'short');
+        recentScored = r.scored.slice(0, 20);
+        if (r.lines.length) recentCtx = '【客厅里刚才的话（你已经看过、也可能已经回过——别再回一遍）】\n' + r.lines.join('\n');
       }
-      // 私信往来：谁私信了我，就把和他最近的来回带上（含我自己回过的），免得每次都从头答一遍
+      // 私信往来：谁私信了我，就把和他最近的来回带上（含我自己回过的），免得每次都从头答一遍。同样打分挑选，只在该 partner 的 dm 历史内
       let dmCtx = '';
       {
         const partners = [...new Set(inbox.filter(m => m.kind === 'dm').map(m => m.from_id))].filter(Boolean);
-        const blocks = [];
+        const blocks = []; const n = ctx.dm_recent || 10; const pool = Math.min(60, n * 2);
         for (const pid of partners.slice(0, 3)) {
-          const h = await api('GET', `/dm/history?with=${encodeURIComponent(pid)}&limit=${ctx.dm_recent || 10}`).catch(() => []);
-          const rows = (Array.isArray(h) ? h : []).filter(m => !unreadIds.has(m.id));
+          const h = await api('GET', `/dm/history?with=${encodeURIComponent(pid)}&limit=${Math.min(200, pool + inbox.length)}`).catch(() => []);
+          const rows = (Array.isArray(h) ? h : []).filter(m => !unreadIds.has(m.id)).slice(-pool);
           if (!rows.length) continue;
-          const ls = []; let used = 0;
-          for (const m of rows.reverse()) { const line = `[${m.ts.slice(5, 16).replace('T', ' ')}] ${byName(m.from_id, members)}${m.from_id === room.id ? '（我自己）' : ''}：${m.text}`; if (used + line.length > (ctx.dm_max_chars || 3000)) break; ls.unshift(line); used += line.length; }
-          if (ls.length) blocks.push(`【和 ${byName(pid, members)} 的私信往来（你已经回过的，别再回一遍）】\n` + ls.join('\n'));
+          const r = pick(rows, n, ctx.dm_max_chars || 3000, 'long');
+          if (r.lines.length) blocks.push(`【和 ${byName(pid, members)} 的私信往来（你已经回过的，别再回一遍）】\n` + r.lines.join('\n'));
         }
         dmCtx = blocks.join('\n');
       }
-      // ---- 提示按"变化频率"排：稳定的在前（缓存能命中），每次都变的在后 ----
+      // ---- 提示按"变化频率"排：稳定的在前（缓存能命中），每次都变的在后；召回块（remembered）每次都不同，挪到 user 侧开头 ----
       const system = [
         soul || `你是${room.name}。`,
         '',
@@ -225,7 +232,6 @@ async function run(roomName, runtimeName, think, opts = {}) {
         '【上次交接信】', handover,
         R.keys.concerns().length ? '【我惦记的事】\n' + R.keys.concerns().join('\n') : '',
         R.keys.notes().length ? '【我自己的小本】\n' + R.keys.notes().join('\n') : '',
-        remembered,
         recentCtx,
         dmCtx,
         '',
@@ -233,12 +239,12 @@ async function run(roomName, runtimeName, think, opts = {}) {
         `【家里的人】${members.map(m => `${m.name}(${m.species}${m.online ? '·在线' : ''})`).join('、')}`,
         `【为什么醒】${reason}`,
       ].filter(x => x !== '').join('\n');
-      const inboxText = '【你没读的客厅记录（按时间）】\n' + inbox.map(m => `[${m.ts.slice(11, 16)}] ${m.from}${m.kind === 'dm' ? '(私信给你)' : ''}${m.mentions && m.mentions.includes(room.id) ? '(叫了你)' : ''}：${m.text}`).join('\n');
-      const user = routine ? `【例行】${routine.prompt}` + (inbox.length ? '\n\n' + inboxText : '') + '\n\n例行的事做完就说一句，没什么要说就回 (静默)。'
+      const inboxText = '【你没读的客厅记录（按时间）】\n' + inbox.map(m => frame(m, 'short', `${m.kind === 'dm' ? '(私信给你)' : ''}${m.mentions && m.mentions.includes(room.id) ? '(叫了你)' : ''}`, 0)).join('\n');   // 未读不截断，只做工具留壳
+      const user = (remembered ? remembered + '\n\n' : '') + (routine ? `【例行】${routine.prompt}` + (inbox.length ? '\n\n' + inboxText : '') + '\n\n例行的事做完就说一句，没什么要说就回 (静默)。'
         : inbox.length ? inboxText + '\n\n看完决定：要不要说、对谁说。只回新的；上面"刚才的话"里已经有人回过的、你自己说过的，不要再回一遍。像家里人说话，不要列清单；没什么要说就回 (静默)。'
-        : '心跳醒来。客厅没人叫你，但交接信里有惦记的事。要是确实该对家里人说一句就说，没有就回 (静默)。';
+        : '心跳醒来。客厅没人叫你，但交接信里有惦记的事。要是确实该对家里人说一句就说，没有就回 (静默)。');
       run.heard = inbox.map(m => ({ id: m.id, from: m.from, kind: m.kind, text: m.text.slice(0, 300), mentioned: !!(m.mentions && m.mentions.includes(room.id)) }));
-      run.context = { system_chars: system.length, user_chars: user.length, memories_recalled: remembered ? remembered.split('\n').length - 1 : 0, recent_lines: recentCtx ? recentCtx.split('\n').length - 1 : 0, dm_lines: dmCtx ? dmCtx.split('\n').length : 0, system_preview: system.slice(0, 1200), user_preview: user.slice(0, 1200) };
+      run.context = { system_chars: system.length, user_chars: user.length, memories_recalled: remembered ? remembered.split('\n').length - 1 : 0, recent_lines: recentCtx ? recentCtx.split('\n').length - 1 : 0, dm_lines: dmCtx ? dmCtx.split('\n').length : 0, recent_scored: recentScored, system_preview: system.slice(0, 1200), user_preview: user.slice(0, 1200) };
       // 跳数：人说的话 hop=0；agent 回话 = 听到的 agent 消息里最大 hop + 1。超过上限的链只写不叫醒（防两个 agent 无限对聊）
       const hopIn = inbox.filter(m => !isHuman(m.from_id)).reduce((a, m) => Math.max(a, Number((m.meta || {}).hop) || 0), 0);
       const hopOut = (room.species === 'human' || routine) ? 0 : hopIn + 1;   // 例行醒来是新起点，不接 agent 链
