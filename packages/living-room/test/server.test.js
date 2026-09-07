@@ -82,3 +82,34 @@ test('public boundary uses bearer auth, IP failure limit, resident say limit, an
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('GET /runs（V2-4A）：读 state/runs/*.jsonl，倒序、limit、按住户筛、只给家人', async () => {
+  const root = fixture();
+  fs.mkdirSync(path.join(root, 'rooms', '丙'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'rooms', '丙', 'room.yaml'), 'id: resident_gamma_01\nname: 丙\nspecies: agent\n');
+  fs.mkdirSync(path.join(root, 'state', 'runs'), { recursive: true });
+  const rec = (id, resident_id, ts, extra = {}) => JSON.stringify({ id, resident_id, ts, reason: '心跳', lane: 'heartbeat', status: 'silent', ms: 1200, model_calls: 1, heard: [{ big: 'x'.repeat(50) }], ...extra }) + '\n';
+  fs.writeFileSync(path.join(root, 'state', 'runs', 'resident_beta_01.jsonl'), rec('run_b1', 'resident_beta_01', '2026-09-07T10:00:00.000Z') + 'not json\n' + rec('run_b2', 'resident_beta_01', '2026-09-07T12:00:00.000Z', { usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }, error: 'boom' }));
+  fs.writeFileSync(path.join(root, 'state', 'runs', 'resident_gamma_01.jsonl'), rec('run_g1', 'resident_gamma_01', '2026-09-07T11:00:00.000Z'));
+  const room = createLivingRoom({ houseDir: root, runDir: path.join(root, 'run'), dataDir: path.join(root, 'state'), port: 0 });
+  try {
+    const port = (await room.listen()).port;
+    const alpha = room.tokenStore.issue('resident_alpha_01').token;
+    const beta = room.tokenStore.issue('resident_beta_01').token;
+    const all = await request(port, '/runs', { token: alpha });
+    assert.equal(all.status, 200);
+    assert.deepEqual(all.body.map(r => r.id), ['run_b2', 'run_g1', 'run_b1']);                       // 合并、最新在前，坏行跳过
+    assert.deepEqual(Object.keys(all.body[0]).sort(), ['error', 'id', 'lane', 'model_calls', 'ms', 'reason', 'resident', 'resident_id', 'status', 'ts', 'usage']);   // heard 这种大字段不带
+    assert.equal(all.body[0].resident, '乙'); assert.equal(all.body[0].usage.total_tokens, 15); assert.equal(all.body[0].error, 'boom');
+    assert.equal(all.body[1].error, undefined); assert.equal(all.body[1].usage, null);
+    assert.deepEqual((await request(port, '/runs?limit=2', { token: alpha })).body.map(r => r.id), ['run_b2', 'run_g1']);
+    assert.deepEqual((await request(port, '/runs?resident=resident_beta_01', { token: alpha })).body.map(r => r.id), ['run_b2', 'run_b1']);
+    assert.deepEqual((await request(port, '/runs?resident=' + encodeURIComponent('丙'), { token: alpha })).body.map(r => r.id), ['run_g1']);   // 名字也认
+    assert.equal((await request(port, '/runs?resident=nobody', { token: alpha })).status, 404);
+    assert.equal((await request(port, '/runs?limit=0', { token: alpha })).status, 400);
+    assert.equal((await request(port, '/runs', { token: beta })).status, 403);                        // 住户不能看
+  } finally {
+    await room.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

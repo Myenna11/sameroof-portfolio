@@ -118,4 +118,4 @@ function mount({ houseDir, residents, byId, house, writeJson: rawWriteJson, read
     }
   };
 }
-module.exports = { mount };
+module.exports = { mount, readJsonl };

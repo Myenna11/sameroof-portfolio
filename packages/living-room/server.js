@@ -560,6 +560,17 @@ function createLivingRoom(options = {}) {
         const kind = url.searchParams.get('kind');
         return writeJson(res, 200, activityBefore.all(before, limit).filter(r => !kind || r.kind === kind).map(r => ({ ...r, meta: r.meta ? JSON.parse(r.meta) : null, actor: byId.get(r.actor_id)?.name })));
       }
+      if (req.method === 'GET' && url.pathname === '/runs') {                 // V2-4A：运行记录（state/runs/<resident>.jsonl）；只给家人看
+        if (me.species !== 'human') throw new HttpError(403, 'RUNS-HUMAN-ONLY', '只有家人能看运行记录。');
+        const limit = positiveInt(url.searchParams.get('limit'), 20, 1, 200, 'RUNS-LIMIT-INVALID');
+        const who = url.searchParams.get('resident');
+        const targets = who ? [byId.get(who) || byName.get(norm(who))].filter(Boolean) : residents.filter(r => r.species !== 'human');
+        if (who && !targets.length) throw new HttpError(404, 'RUNS-RESIDENT-NOT-FOUND', '没这个住户。');
+        const rows = targets.flatMap(r => roomsApi.readJsonl(path.join(houseDir, 'state', 'runs', `${r.id}.jsonl`), limit))
+          .map(r => ({ id: r.id, resident_id: r.resident_id, resident: byId.get(r.resident_id)?.name || null, ts: r.ts, reason: r.reason || null, lane: r.lane || null, status: r.status || null, ms: r.ms ?? null, usage: r.usage || null, model_calls: r.model_calls || 0, ...(r.error ? { error: String(r.error) } : {}) }))
+          .sort((a, b) => String(b.ts || '').localeCompare(String(a.ts || ''))).slice(0, limit);
+        return writeJson(res, 200, rows);
+      }
       if (req.method === 'GET' && url.pathname === '/dm/history') {
         const withName = url.searchParams.get('with') || ''; const other = byId.get(withName) || byName.get(withName.normalize('NFKC').toLowerCase());
         if (!other) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', '没这个人。');
