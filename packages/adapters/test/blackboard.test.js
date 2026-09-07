@@ -19,7 +19,7 @@ test('parsePin 钉：只有标题必填，| 段可选、顺序无关，中英冒
   assert.equal(parsePin('PINNED: x'), null);
   assert.equal(parsePin(null), null);
 });
-test('parsePin 到期：五段 cron → due_cron；带时区 ISO 按写的算；不带时区按房子 tz；看不懂 → null', () => {
+test('parsePin 到期：五段 cron → due_cron；带时区 ISO 按写的算；不带时区按房子 tz；看不懂 → 照钉带 due_error', () => {
   assert.equal(parsePin('PIN: 每天看一眼 | 到期: 0 9 * * 1-5').due_cron, '0 9 * * 1-5');
   assert.equal(parsePin('PIN: x | 到期:  0   9 * * *').due_cron, '0 9 * * *');                   // 多余空白收成一个
   assert.equal(parsePin('PIN: x | 到期: 2026-09-08T21:00+08:00').due_at, '2026-09-08T13:00:00.000Z');
@@ -27,9 +27,9 @@ test('parsePin 到期：五段 cron → due_cron；带时区 ISO 按写的算；
   assert.equal(parsePin('PIN: x | 到期: 2026-09-08 21:00', { tz: TZ }).due_at, '2026-09-08T13:00:00.000Z');   // 不带时区：房子时区
   assert.equal(parsePin('PIN: x | 到期: 2026-09-08T21:00', { tz: 'UTC' }).due_at, '2026-09-08T21:00:00.000Z');
   assert.equal(parsePin('PIN: x | 到期: 2026-09-08', { tz: TZ }).due_at, '2026-09-07T16:00:00.000Z');          // 只给日期 = 当天 00:00
-  assert.equal(parsePin('PIN: x | 到期: 明天上午'), null);
-  assert.equal(parsePin('PIN: x | 到期: 99 9 * * *'), null);
-  assert.equal(parsePin('PIN: x | 到期: 2026-02-30T10:00Z'), null);
+  assert.equal(parsePin('PIN: x | 到期: 明天上午').due_error, '明天上午');
+  assert.equal(parsePin('PIN: x | 到期: 99 9 * * *').due_error, '99 9 * * *');
+  assert.equal(parsePin('PIN: x | 到期: 2026-02-30T10:00Z').due_error, '2026-02-30T10:00Z');
   const both = parsePin('PIN: x | 到期: 0 9 * * *'); assert.equal(both.due_at, undefined);
 });
 test('parsePin 改状态：PIN <task_id>: doing / done 结果 / blocked 原因 / drop 理由（drop → dropped）', () => {
