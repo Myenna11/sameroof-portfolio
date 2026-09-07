@@ -35,7 +35,9 @@
 - `GET /rooms/:id`（或 :name）配置视图：
   `{id,name,species,aliases,avatar,model:{provider,id,auth:{alias,mode,provider,registered},fallback},runtime:{value,from},plugins:{value,from},heartbeat:{value,from},schedule:{quiet_hours,timezone},permissions:{k:{value,from:'room'|'house_cap'}},context,relations(仅 human),soul,state:{wakes_today,day,last_wake,last_sleep}}`
   **凭证只有状态，永不回显。**
-- `GET /rooms/:id/memory?limit=&before=` → `[{id,ts,content,source,by,confidence,reviewed,archived,hits,tags}]`
+- `GET /rooms/:id/memory?limit=&before=` → `[{id,ts,content,source,by,confidence,review,authored,version_status,fact_key,supersedes,superseded_by,redacted,archived,hits,tags}]`（`reviewed` 留兼容）
+- 记忆审核队列（9/7，W4；权限矩阵与错误码 `MEM-*` 见 packages/plugin-memory/README.md）：`GET /rooms/:id/memory/pending`（人 / 本人）；`POST /rooms/:id/memory/:memId/approve`（人）、`/discard`（人 / 本人）；`POST /rooms/:id/memory/merge {ids, content}`（人）；`POST /rooms/:id/memory/supersede {old_id, content}`（人；本人只能对非亲笔或自己 self 写的）→ 新候选 under_review
+- `PUT /rooms/:id/extensions {"dev.sameroof.<key>": object|array|null, …}`（人 / 本人；9/7，K1）：每个 namespace 整段替换，null 删段；写回 room.yaml 保注释保顺序；先过 schema 校验，不过 400 `ROOM-EXT-INVALID` 带 issues 不写盘；回 `{id, extensions, note}`；**适配器重启后生效**。`GET /rooms/:id` 现在带 `extensions`。
 - `GET /rooms/:id/handover` → `{latest:markdown, history:[markdown]}`（"我想对明天的自己说"= claim，"房子记下的事实"= fact）
 - `GET /rooms/:id/concerns` → `{open:[…], done:[…]}`
 - `GET /rooms/:id/notes` → `[…]`

@@ -29,7 +29,7 @@ function request(port, pathname, options = {}) {
 // 乙的 room.yaml 尽量像真房间：有 model / heartbeat / relations / avatar / 已有的 extensions，好验"别的字段一根毛都没动"
 const YI = `schema_version: 1
 id: resident_beta_01
-name: 乙
+name: 乙   # 人写的注释要活下来
 species: agent
 model:
   provider: zhipu
@@ -70,7 +70,8 @@ test('rooms extensions：PUT 权限、整段替换、null 删段、校验不过�
     const self = room.tokenStore.issue('resident_beta_01').token;
     const other = room.tokenStore.issue('resident_gamma_01').token;
     const P = '/rooms/resident_beta_01/extensions';
-    const before = yaml.load(fs.readFileSync(file, 'utf8'));
+    const beforeText = fs.readFileSync(file, 'utf8'); const before = yaml.load(beforeText);
+    const inExt = (line, text) => { const lines = text.split('\n'); let on = false; for (const l of lines) { if (/^extensions:/.test(l)) on = true; else if (/^\S/.test(l)) on = false; if (l === line) return on; } return false; };
     const deliver = { human: 'interrupt', agent: 'after_turn', from: { 甲: 'interrupt' } };
 
     // 别人 403，盘上没动
@@ -85,7 +86,10 @@ test('rooms extensions：PUT 权限、整段替换、null 删段、校验不过�
     const text1 = fs.readFileSync(file, 'utf8'); const after1 = yaml.load(text1);
     assert.deepEqual(strip(after1), strip(before));
     assert.deepEqual(after1.extensions, s.body.extensions);
-    assert.ok(text1.includes('甲: interrupt') && text1.includes('prompt: 早安') && text1.includes('emoji: 🌸'), '中文与 emoji 原样写回');
+    assert.ok(text1.includes('甲: interrupt') && text1.includes('prompt: 早安'), '中文原样写回');
+    const squash = t => t.replace(/\s+/g, '');   // yaml 包会把 {a: 1} 重排成 { a: 1 }，比较时去空白；注释和顺序必须还在
+    for (const line of beforeText.split('\n')) if (line.trim() && !inExt(line, beforeText)) assert.ok(squash(text1).includes(squash(line)), 'extensions 之外的每一行（含注释）原样保留：' + line);
+    assert.ok(text1.includes('# 人写的注释要活下来'));
     assert.ok(!fs.existsSync(file + '.tmp'));
 
     // 整段替换：deliver 换成只剩 human，from 不会残留

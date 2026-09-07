@@ -2,6 +2,7 @@
 'use strict';
 const fs = require('fs'), path = require('path');
 const yaml = require('js-yaml');
+const YAML = require('yaml');                                              // 改 room.yaml 用 Document 级改写，保住人写的注释（DECISIONS #14：house/room.yaml 是人写的意图）
 const memoryPlugin = require('@sameroof/plugin-memory');
 const { validateRoom } = require('@sameroof/schema');
 
@@ -44,13 +45,17 @@ function mount({ houseDir, residents, byId, house, writeJson: rawWriteJson, read
     }
     const file = path.join(roomDir(r), 'room.yaml');
     if (!fs.existsSync(file)) throw new HttpError(404, 'ROOM-NOT-FOUND', '这间屋没有 room.yaml。');
-    const doc = yaml.load(fs.readFileSync(file, 'utf8')) || {};
-    const next = Object.assign({}, doc.extensions || {});
+    const ydoc = YAML.parseDocument(fs.readFileSync(file, 'utf8'));
+    if (ydoc.errors && ydoc.errors.length) throw new HttpError(500, 'ROOM-YAML-INVALID', 'room.yaml 解析失败：' + ydoc.errors[0].message);
+    const cur = ydoc.get('extensions'); const next = Object.assign({}, cur && typeof cur.toJSON === 'function' ? cur.toJSON() : (cur || {}));
     const deleted = [];
-    for (const k of keys) { if (body[k] === null) { if (k in next) deleted.push(k); delete next[k]; } else next[k] = body[k]; }
-    if (Object.keys(next).length) doc.extensions = next; else delete doc.extensions;
+    for (const k of keys) {
+      if (body[k] === null) { if (k in next) deleted.push(k); delete next[k]; ydoc.deleteIn(['extensions', k]); }
+      else { next[k] = body[k]; ydoc.setIn(['extensions', k], body[k]); }
+    }
+    if (!Object.keys(next).length) ydoc.delete('extensions');
     const tmp = file + '.tmp';
-    fs.writeFileSync(tmp, yaml.dump(doc, { lineWidth: -1, noRefs: true }), 'utf8');   // 中文原样，不转义
+    fs.writeFileSync(tmp, ydoc.toString({ lineWidth: 0 }), 'utf8');                  // 注释、顺序、中文都原样
     const issues = validateRoom(tmp).map(i => ({ ...i, file }));            // issue 里的 file 换回真名，别把 .tmp 露出去
     if (issues.length) { try { fs.unlinkSync(tmp); } catch {} throw bad('ROOM-EXT-INVALID', '改完的 room.yaml 过不了校验，没写盘。', issues); }
     fs.renameSync(tmp, file);
