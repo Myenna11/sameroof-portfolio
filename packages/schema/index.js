@@ -307,6 +307,19 @@ function validateHouse(dir, options = {}) {
     }
   }
 
+  const mountIds = new Set();
+  for (const mount of house.gateway?.mounts || []) {
+    if (!mount || typeof mount !== 'object' || Array.isArray(mount)) continue;
+    if (mount.id === 'own-room') {
+      out.push(issue(houseFile, lineFor(houseParsed, '/gateway/mounts', 'id'), 'HOUSE-GATEWAY-MOUNT-RESERVED-001', 'gateway mount id“own-room”是保留名，由系统指向住户自己的房间。'));
+    } else if (mountIds.has(mount.id)) {
+      out.push(issue(houseFile, lineFor(houseParsed, '/gateway/mounts', 'id'), 'HOUSE-GATEWAY-MOUNT-DUP-001', 'gateway mount id“' + mount.id + '”重复。'));
+    } else mountIds.add(mount.id);
+    for (const residentId of Object.keys(mount.residents || {})) if (!ids.has(residentId)) {
+      out.push(issue(houseFile, lineFor(houseParsed, '/gateway/mounts', 'residents'), 'HOUSE-GATEWAY-RESIDENT-001', 'gateway mount 引用了不存在的住户 id“' + residentId + '”。'));
+    }
+  }
+
   if (house.extensions && options.knownExtensions) {
     const known = new Set(options.knownExtensions);
     for (const namespace of Object.keys(house.extensions)) if (!known.has(namespace)) {

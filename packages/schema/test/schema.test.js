@@ -160,6 +160,38 @@ permissions:
   assert.ok(validateHouse(dir).some(x => x.code === 'ROOM-PERM-CEILING-001'));
 });
 
+test('gateway mounts 是受校验的核心字段，拒绝保留/重复 id 与未知住户', () => {
+  const house = validHouse.replace('credentials:', `gateway:
+  mounts:
+    - id: project-community
+      path: /srv/community
+      residents: {resident_agent_01: read-write}
+credentials:`);
+  const room = `schema_version: 1
+id: resident_agent_01
+name: 小甲
+model: {provider: zhipu, id: one, auth: {mode: broker, credential: shared-cheap}}
+`;
+  assert.deepEqual(validateHouse(makeHouse({ house, rooms: { a: room } })), []);
+
+  const invalid = house.replace(
+    '    - id: project-community\n      path: /srv/community\n      residents: {resident_agent_01: read-write}',
+    `    - id: own-room
+      path: /srv/one
+      residents: {resident_missing_01: read-write}
+    - id: duplicate
+      path: /srv/two
+      residents: {resident_agent_01: read-only}
+    - id: duplicate
+      path: /srv/three
+      residents: {resident_agent_01: read-write}`
+  );
+  const codes = new Set(validateHouse(makeHouse({ house: invalid, rooms: { a: room } })).map(x => x.code));
+  assert.ok(codes.has('HOUSE-GATEWAY-MOUNT-RESERVED-001'));
+  assert.ok(codes.has('HOUSE-GATEWAY-MOUNT-DUP-001'));
+  assert.ok(codes.has('HOUSE-GATEWAY-RESIDENT-001'));
+});
+
 test('deliver / limits / routines 是房子与房间的核心字段', () => {
   const house = validHouse
     .replace('  approve_timeout: 30m', `  deliver: {human: after_turn, agent: inject, from: {维护者: interrupt}}

@@ -59,6 +59,31 @@
       "properties": { "admin": { "type": "string", "minLength": 1, "maxLength": 80 } }
     },
     "routines": { "$ref": "https://sameroof.local/schema/room-v1.json#/$defs/routines" },
+    "gateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mounts": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "object",
+            "required": ["id", "path", "residents"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+              "path": { "type": "string", "pattern": "^/", "minLength": 2, "maxLength": 4096 },
+              "residents": {
+                "type": "object",
+                "minProperties": 1,
+                "propertyNames": { "pattern": "^resident_[a-z0-9][a-z0-9_-]{2,95}$" },
+                "additionalProperties": { "enum": ["read-only", "read-write"] }
+              }
+            }
+          }
+        }
+      }
+    },
     "extensions": {
       "type": "object",
       "propertyNames": { "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z][a-z0-9-]*){2,}$" },
