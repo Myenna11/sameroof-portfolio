@@ -181,7 +181,6 @@ function createLivingRoom(options = {}) {
   const residents = loadResidents(houseDir);
   const byId = new Map(residents.map(resident => [resident.id, resident]));
   const houseCfg = yaml.load(fs.readFileSync(path.join(houseDir, 'house.yaml'), 'utf8')) || {};
-  const roomsHandle = roomsApi.mount({ houseDir, residents, byId, house: houseCfg, writeJson, HttpError });
   const byName = new Map();
   for (const resident of residents) for (const name of resident._names) byName.set(name, resident);
 
@@ -250,6 +249,7 @@ function createLivingRoom(options = {}) {
     return ev;
   }
   const memoryHandle = memoryApi.mount({ houseDir, residents, byId, writeJson, readJson, HttpError, emitActivity });   // 记忆审核队列（W4）：挂在 /rooms/:id/memory/… 下，先于只读的 rooms-api
+  const roomsHandle = roomsApi.mount({ houseDir, residents, byId, house: houseCfg, writeJson, readJson, HttpError, emitActivity });   // 房间读 + PUT /rooms/:id/extensions（K1）；要 emitActivity 所以挪到这儿挂
   const presence = new Map();
   const sseByResident = new Map();
   const sseByIp = new Map();
@@ -697,7 +697,7 @@ function createLivingRoom(options = {}) {
       const code = known ? error.code : 'INTERNAL-ERROR';
       if (!known) console.error('[客厅请求失败]', error);
       const extra = error.retryAfterMs ? { 'retry-after': String(Math.ceil(error.retryAfterMs / 1000)) } : {};
-      writeJson(res, status, { error: { code, message: status === 500 ? '客厅内部出了点问题。' : error.message } }, extra);
+      writeJson(res, status, { error: { code, message: status === 500 ? '客厅内部出了点问题。' : error.message, ...(known && Array.isArray(error.issues) ? { issues: error.issues } : {}) } }, extra);
     }
   });
 

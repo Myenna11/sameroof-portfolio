@@ -3,6 +3,12 @@
 const fs = require('fs'), path = require('path');
 const yaml = require('js-yaml');
 const memoryPlugin = require('@sameroof/plugin-memory');
+const { validateRoom } = require('@sameroof/schema');
+
+// K1：房间 extensions 只开放 dev.sameroof.* 这一片给 PUT（形状同 room.schema.json 的 propertyNames，再收窄到我们自己的前缀）
+const EXT_NS_RE = /^[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*){2,}$/;
+const EXT_OURS = 'dev.sameroof.';
+const EXT_NOTE = '适配器重启后生效';
 
 const readLines = f => fs.existsSync(f) ? fs.readFileSync(f, 'utf8').split('\n').filter(l => l.trim()) : [];
 const readJsonl = (f, limit = 100, before = null) => {
@@ -12,18 +18,55 @@ const readJsonl = (f, limit = 100, before = null) => {
   return filtered.slice(-limit);
 };
 
-function mount({ houseDir, residents, byId, house, writeJson: rawWriteJson, HttpError }) {
+function mount({ houseDir, residents, byId, house, writeJson: rawWriteJson, readJson, HttpError, emitActivity }) {
   const writeJson = (res, status, value) => { rawWriteJson(res, status, value); return true; };   // 回 true：写完就算开过门。之前回 undefined，server.js 会继续找门 → 404 → res.destroy() 掐掉 keep-alive 连接（W4 顺手修）
   const roomDir = r => r._dir || path.join(houseDir, 'rooms', r.name);
   const findRoom = seg => { const r = byId.get(seg) || residents.find(x => x.name === seg); if (!r) throw new HttpError(404, 'ROOM-NOT-FOUND', '没这间屋。'); return r; };
   const canSee = (me, r) => me.species === 'human' || me.id === r.id;   // 人能看全屋；agent 只能看自己
+  const isHuman = me => me.species === 'human';
+  const isSelf = (me, r) => me.id === r.id;
+  const bad = (code, message, issues) => { const e = new HttpError(400, code, message); if (issues) e.issues = issues; return e; };
+
+  // PUT /rooms/:id/extensions（K1，实现员的投递开关面）：body { "<dev.sameroof.xxx>": object|array|null, … }
+  // 每个命名空间整段替换（null = 删掉这一段），没提到的命名空间不动；room.yaml 其它字段一律不碰。
+  // 写法：读 yaml → 改 extensions → dump 到 .tmp → 过 @sameroof/schema 校验 → rename 顶上；校验不过就把 .tmp 删了，盘上什么都没发生。
+  // 注意：js-yaml dump 会丢掉原文件里的注释（房间里自己写的行内注释会没），先审后合。
+  async function putExtensions(req, r, me, res) {
+    const body = await readJson(req);                                    // 先把请求体读完再判权限（keep-alive 上别留没读的字节）
+    if (!isHuman(me) && !isSelf(me, r)) throw new HttpError(403, 'ROOM-FORBIDDEN', '只能改自己的房间。');
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw bad('ROOM-EXT-INVALID', '请求体得是 { "<namespace>": object|array|null } 这样的对象。');
+    const keys = Object.keys(body);
+    if (!keys.length) throw bad('ROOM-EXT-INVALID', '至少给一个命名空间。');
+    for (const k of keys) {
+      if (!EXT_NS_RE.test(k) || !k.startsWith(EXT_OURS)) throw bad('ROOM-EXT-NAMESPACE', '命名空间“' + k + '”不合法：只能改 dev.sameroof.<key>。');
+      const v = body[k];
+      if (v !== null && (typeof v !== 'object')) throw bad('ROOM-EXT-INVALID', '“' + k + '”得是对象、数组或 null（null = 删掉这段）。');
+    }
+    const file = path.join(roomDir(r), 'room.yaml');
+    if (!fs.existsSync(file)) throw new HttpError(404, 'ROOM-NOT-FOUND', '这间屋没有 room.yaml。');
+    const doc = yaml.load(fs.readFileSync(file, 'utf8')) || {};
+    const next = Object.assign({}, doc.extensions || {});
+    const deleted = [];
+    for (const k of keys) { if (body[k] === null) { if (k in next) deleted.push(k); delete next[k]; } else next[k] = body[k]; }
+    if (Object.keys(next).length) doc.extensions = next; else delete doc.extensions;
+    const tmp = file + '.tmp';
+    fs.writeFileSync(tmp, yaml.dump(doc, { lineWidth: -1, noRefs: true }), 'utf8');   // 中文原样，不转义
+    const issues = validateRoom(tmp).map(i => ({ ...i, file }));            // issue 里的 file 换回真名，别把 .tmp 露出去
+    if (issues.length) { try { fs.unlinkSync(tmp); } catch {} throw bad('ROOM-EXT-INVALID', '改完的 room.yaml 过不了校验，没写盘。', issues); }
+    fs.renameSync(tmp, file);
+    if (Object.keys(next).length) r.extensions = next; else delete r.extensions;   // 客厅内存里的住户对象也跟上，GET /rooms/:id 立刻能读到
+    emitActivity({ kind: 'config_change', actor_id: me.id, text: me.name + ' 改了 ' + r.name + ' 的扩展配置：' + keys.join(', '), meta: { room_id: r.id, namespaces: keys, deleted } });
+    return writeJson(res, 200, { id: r.id, extensions: next, note: EXT_NOTE });
+  }
   const credStatus = r => {
     const auth = (r.model && r.model.auth) || {}; const alias = auth.credential;
     const entry = (house.credentials || []).find(c => c.alias === alias);
     return alias ? { alias, mode: auth.mode || (entry && entry.mode) || 'broker', provider: entry ? entry.provider : (r.model && r.model.provider), registered: !!entry } : null;
   };
   return async function handle(req, url, me, res) {
-    const m = url.pathname.match(/^\/rooms\/([^/]+)(?:\/([a-z]+))?$/); if (!m || req.method !== 'GET') return false;
+    const m = url.pathname.match(/^\/rooms\/([^/]+)(?:\/([a-z]+))?$/); if (!m) return false;
+    if (req.method === 'PUT' && m[2] === 'extensions') return putExtensions(req, findRoom(decodeURIComponent(m[1])), me, res);
+    if (req.method !== 'GET') return false;
     const r = findRoom(decodeURIComponent(m[1])); const sub = m[2] || 'config';
     if (!canSee(me, r)) throw new HttpError(403, 'ROOM-FORBIDDEN', '只能看自己的房间。');
     const dir = roomDir(r); const limit = Math.min(Number(url.searchParams.get('limit') || 50), 500); const before = url.searchParams.get('before');
@@ -43,6 +86,7 @@ function mount({ houseDir, residents, byId, house, writeJson: rawWriteJson, Http
           permissions: Object.fromEntries(Object.entries(Object.assign({}, d.permissions || {}, r.permissions || {})).map(([k, v]) => [k, { value: v, from: (r.permissions || {})[k] ? 'room' : 'house_cap' }])),
           context: Object.assign({ recent_messages: 20, recent_max_chars: 4000, memory_hits: 4, memory_recent: 3 }, (house.extensions || {})['dev.sameroof.context'] || {}, (r.extensions || {})['dev.sameroof.context'] || {}),
           relations: me.species === 'human' ? (r.relations || {}) : undefined,     // 高敏感：只给人看
+          extensions: r.extensions || {},                                          // K1：开关现值（deliver / limits / …），PUT /rooms/:id/extensions 改
           soul: fs.existsSync(soulPath) ? fs.readFileSync(soulPath, 'utf8') : null,
           state: st ? { wakes_today: st.wakes_today, day: st.day, last_wake: st.last_wake, last_sleep: st.last_sleep } : null,
         });
