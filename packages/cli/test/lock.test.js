@@ -26,6 +26,7 @@ defaults:
   runtime: pi
   plugins: [living-room]
   heartbeat: {enabled: true, mode: minimal, interval: adaptive, budget: {per_day: {requests: 12, tokens: 50000}, on_exceeded: passive}}
+  context: {recent_messages: 20, recent_max_chars: 4000, memory_hits: 4, memory_recent: 3}
   approve_timeout: 30m
   permissions: {living_room.send: allow}
 credentials:

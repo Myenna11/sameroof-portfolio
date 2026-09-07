@@ -10,6 +10,9 @@
     "test": "node --test"
   },
   "dependencies": {
+    "@sameroof/house-root": "0.1.0",
+    "@sameroof/living-room": "0.2.0",
+    "@sameroof/schema": "0.1.0",
     "yaml": "^2.8.1"
   }
 }
