@@ -158,6 +158,11 @@ summary{cursor:pointer;color:var(--mute);font-size:13px}
 .li{display:flex;gap:9px;padding:10px 4px;border-bottom:1px solid var(--line2);font-size:14.5px}
 .li::before{content:"·";color:var(--accent);font-weight:700}
 /* 运行 */
+.runstats{display:flex;gap:10px;flex-wrap:wrap;margin:14px 12px 0}
+.runstats .st{flex:1 1 120px;background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:10px 12px}
+.runstats .st .lb{font-size:11px;color:var(--mute)}
+.runstats .st .v{font-family:var(--mono);font-size:20px;line-height:1.3;margin-top:2px}
+.runstats .st .sm{font-size:11px;color:var(--mute);margin-top:2px}
 .runtbl{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:6px 10px;margin:14px 12px;overflow-x:auto}
 .runtbl table{width:100%;border-collapse:collapse;font-size:13px;white-space:nowrap}
 .runtbl th{text-align:left;color:var(--mute);font-weight:500;font-size:12px;padding:6px 8px;border-bottom:1px solid var(--line)}
@@ -259,6 +264,7 @@ summary{cursor:pointer;color:var(--mute);font-size:13px}
  </section>
  <section class="view" id="view-runs">
   <div class="hd"><h1>运行</h1><span class="sub" id="runssub">每个住户每次醒来</span><span class="sp"></span><button class="loadmore" id="runsrefresh" type="button">刷新</button></div>
+  <div class="runstats" id="runstats"></div>
   <div class="runtbl" id="runstbl"></div>
  </section>
 </main>
@@ -876,8 +882,10 @@ function renderConfig(box,cfg,budget){
 async function renderRunsView(){
  const box=$('#runstbl');
  if(me&&me.species!=='human'){box.innerHTML='<div class="empty">这页只有家人能看</div>';return}
- let rows;
- try{rows=await req('GET','/runs?limit=30')}catch(e){box.innerHTML='';const d=document.createElement('div');d.className='empty';d.textContent='拉不到运行记录：'+e.message;box.appendChild(d);return}
+ let all;
+ try{all=await req('GET','/runs?limit=200')}catch(e){box.innerHTML='';$('#runstats').innerHTML='';const d=document.createElement('div');d.className='empty';d.textContent='拉不到运行记录：'+e.message;box.appendChild(d);return}
+ renderRunStats(all);
+ const rows=all.slice(0,30);
  box.innerHTML='';
  if(!rows.length){box.innerHTML='<div class="empty">还没有人醒过</div>';return}
  const t=document.createElement('table');
@@ -895,6 +903,20 @@ async function renderRunsView(){
  }
  box.appendChild(t);
  $('#runssub').textContent='最近 '+rows.length+' 次 · '+fmt(Date.now())+' 刷新';
+}
+// V2-CSS：今日统计（本机时区的"今天"；/runs 最多拉 200 条，今天超过 200 次醒来就只算最近 200 次）
+function renderRunStats(all){
+ const today=new Date().toDateString();
+ const t=all.filter(r=>r.ts&&new Date(r.ts).toDateString()===today);
+ let calls=0,inTok=0,outTok=0,cached=0,withUsage=0;
+ for(const r of t){calls+=r.model_calls||0;const u=r.usage;if(!u)continue;withUsage++;inTok+=(u.prompt_tokens??u.input_tokens??0);outTok+=(u.completion_tokens??u.output_tokens??0);cached+=(u.cached_tokens||0)}
+ const fmtN=n=>n>=10000?(n/1000).toFixed(1)+'k':String(n);
+ const box=$('#runstats');box.innerHTML='';
+ const tile=(lb,v,sm)=>{const d=document.createElement('div');d.className='st';const a=document.createElement('div');a.className='lb';a.textContent=lb;const b=document.createElement('div');b.className='v';b.textContent=v;d.append(a,b);if(sm){const c=document.createElement('div');c.className='sm';c.textContent=sm;d.appendChild(c)}box.appendChild(d)};
+ tile('今日醒来',String(t.length),all.length>=200?'只看了最近 200 次':'');
+ tile('模型调用',String(calls),withUsage<calls?'其中 '+(calls-withUsage)+' 次没带 usage':'');
+ tile('输入 tokens',fmtN(inTok),cached?'命中缓存 '+fmtN(cached):'');
+ tile('输出 tokens',fmtN(outTok),withUsage?'来自 '+withUsage+' 次调用':'');
 }
 $('#runsrefresh').onclick=()=>renderRunsView();
 setInterval(()=>{if(curView==='runs'&&document.visibilityState==='visible')renderRunsView()},30000);
