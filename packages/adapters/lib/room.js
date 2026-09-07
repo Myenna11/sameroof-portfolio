@@ -6,6 +6,7 @@ const { resolveHouseRoot } = require('@sameroof/house-root');
 const { resolveExecutionConfig } = require('@sameroof/schema');
 const memoryPlugin = require('@sameroof/plugin-memory');
 const cron = require('./cron');
+const BB = require('./blackboard');                                       // 黑板：PIN 解析、due 落 routine、渲染；routine 的时间/校验函数也放那儿共用
 const C = require('./context');                                          // 上下文拼装的纯函数：打分挑选、摘要帧、工具留壳
 const gw = require('./gateway-client');
 const LR = process.env.SAMEROOF_LR || 'http://127.0.0.1:8790';
@@ -94,37 +95,7 @@ const LANES = ['human', 'routine', 'agent', 'heartbeat'];
 // ---- 例行（routines）：house/room 的 extensions["dev.sameroof.routines"]，每条 { id, cron | at, prompt, enabled?, quiet_hours?, late_grace? } ----
 // 房间的追加在房子之后，同 id 房间覆盖房子。字段缺、cron/at 非法、cron 与 at 同给或都不给、同一处 id 重复都直接抛（配置小，早炸早改）。
 // cron 型周期触发；at 型一次性（ISO 8601，带 Z 或 ±HH:MM；不带时区按房子 tz 解释），响过一次 state 记 done，之后不再响（配置里的 enabled 是人写的，不动）。
-const DUR_UNIT = { ms: 1, s: 1000, m: 60000, h: 3600000, d: 86400000 };
-const DEFAULT_LATE_GRACE = 24 * 3600000;
-function parseDuration(v, where) {                                          // '24h' | '90m' | '2d' | 数字按分钟
-  if (v == null) return DEFAULT_LATE_GRACE;
-  if (typeof v === 'number' && v >= 0) return v * 60000;
-  const m = typeof v === 'string' && v.trim().match(/^(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)?$/i);
-  if (!m) throw new Error(`${where} late_grace 看不懂「${v}」：写 24h / 90m / 2d，或分钟数`);
-  return Number(m[1]) * DUR_UNIT[(m[2] || 'm').toLowerCase()];
-}
-// 某时区"墙上时间"对应的 UTC 毫秒：用 Intl 反推，不自己算偏移；夏令时边缘再迭代一次
-function wallToUtc(y, mo, d, h, mi, sec, tz) {
-  const want = Date.UTC(y, mo - 1, d, h, mi, sec); let guess = want;
-  for (let i = 0; i < 2; i++) {
-    const p = {}; for (const x of new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(new Date(guess))) p[x.type] = x.value;
-    guess += want - Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour) % 24, Number(p.minute), Number(p.second));
-  }
-  return guess;
-}
-// at 字符串 → UTC 毫秒。接受 YYYY-MM-DD[THH:MM[:SS]][Z|±HH:MM]；没写时区按 tz；解析不了抛
-function parseAt(v, tz, where) {
-  if (typeof v !== 'string' || !v.trim()) throw new Error(`${where} at 得是 ISO 8601 字符串，给了 ${JSON.stringify(v)}`);
-  const s = v.trim(), m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?)?(Z|[+-]\d{2}:?\d{2})?$/i);
-  if (!m) throw new Error(`${where} at 看不懂「${s}」：要 ISO 8601，如 2026-09-08T21:00+08:00，或 2026-09-08T21:00（按房子时区 ${tz}）`);
-  const [, y, mo, d, h = '00', mi = '00', sec = '00', zone] = m;
-  const probe = new Date(Date.UTC(+y, +mo - 1, +d, +h, +mi, +sec));                 // 25:99、2 月 30 这种 Date.UTC 会悄悄进位，回读一遍对不上就抛
-  if (probe.getUTCMonth() !== +mo - 1 || probe.getUTCDate() !== +d || probe.getUTCHours() !== +h || probe.getUTCMinutes() !== +mi || probe.getUTCSeconds() !== +sec) throw new Error(`${where} at 看不懂「${s}」：不是个有效时间`);
-  const z = zone && zone.length === 5 ? zone.slice(0, 3) + ':' + zone.slice(3) : zone;
-  const ms = zone ? Date.parse(`${y}-${mo}-${d}T${h}:${mi}:${sec}${z.toUpperCase()}`) : wallToUtc(+y, +mo, +d, +h, +mi, +sec, tz);
-  if (!Number.isFinite(ms) || new Date(ms).getUTCFullYear() < 1970) throw new Error(`${where} at 看不懂「${s}」：不是个有效时间`);
-  return ms;
-}
+const { buildRoutine, DEFAULT_LATE_GRACE } = BB;                        // parseDuration / wallToUtc / parseAt 也在那儿   // 抽到 lib/blackboard.js 共用（黑板任务落 routine 也走 buildRoutine）
 const atMs = r => (r.at_ms != null ? r.at_ms : Date.parse(r.at));
 const graceMs = r => (r.late_grace_ms != null ? r.late_grace_ms : DEFAULT_LATE_GRACE);
 const fmtAt = (ms, tz) => cron.parts(new Date(ms), tz).key.replace('T', ' ') + ' ' + tz;   // 给人看的：房子时区的 'YYYY-MM-DD HH:MM tz'
@@ -133,13 +104,7 @@ function mergeRoutines(house, room, tz = 'UTC') {
     const seen = new Set(); return raw.map((r, i) => {
       if (!r || typeof r.id !== 'string' || !r.id) throw new Error(`${where} routines[${i}] 缺 id`);
       if (seen.has(r.id)) throw new Error(`${where} routines 里 id 重复：${r.id}`); seen.add(r.id);
-      if (typeof r.prompt !== 'string' || !r.prompt.trim()) throw new Error(`${where} routine ${r.id} 缺 prompt`);
-      const hasCron = r.cron != null, hasAt = r.at != null;
-      if (hasCron === hasAt) throw new Error(`${where} routine ${r.id} 的 cron 与 at 要二选一（cron=周期，at=一次性），${hasCron ? '两个都给了' : '一个都没给'}`);
-      const base = { prompt: r.prompt.trim(), enabled: r.enabled !== false, quiet_hours: r.quiet_hours === 'respect' ? 'respect' : 'ignore' };
-      if (hasCron) { if (r.late_grace != null) throw new Error(`${where} routine ${r.id}：late_grace 只对 at 型有意义`); cron.parse(r.cron); return { id: r.id, cron: r.cron, ...base }; }
-      const ms = parseAt(r.at, tz, `${where} routine ${r.id}`);
-      return { id: r.id, at: new Date(ms).toISOString(), at_ms: ms, late_grace_ms: parseDuration(r.late_grace, `${where} routine ${r.id}`), ...base }; }); };
+      return buildRoutine(r, where, tz); }); };
   const out = new Map(); for (const r of [...list(house, 'house.yaml'), ...list(room, 'room.yaml')]) out.set(r.id, r);
   return [...out.values()];
 }
@@ -176,8 +141,15 @@ async function run(roomName, runtimeName, think, opts = {}) {
   const exec = resolveExecutionConfig(R.house, room);
   const limits = exec.limits;
   const deliverCfg = exec.deliver;
-  const routines = mergeRoutines(R.house, room, R.tz); state.routines = state.routines || {};
+  const routines = mergeRoutines(R.house, room, R.tz); state.routines = state.routines || {};   // 可变数组：黑板任务的 due 会往里 push / splice（syncTaskRoutines），tick 遍历的就是它
   const routineById = id => routines.find(r => r.id === id);
+  // ---- 黑板（W7）：每次醒来拉一次"我的事"（open/doing/blocked），拉不到就静默（stderr 一行），不影响醒来；拉到就把 due 同步进 routines
+  const fetchTasks = async () => { try { const t = await api('GET', '/tasks?owner=me&state=open,doing,blocked'); if (Array.isArray(t)) return t; fs.writeSync(2, `[${room.name}] 黑板拉不到（${JSON.stringify(t).slice(0, 120)}），这轮当没有\n`); } catch (e) { fs.writeSync(2, `[${room.name}] 黑板拉不到（${e.message}），这轮当没有\n`); } return []; };
+  const syncTasks = tasks => { const d = BB.syncTaskRoutines(routines, tasks, R.tz);
+    for (const id of d.changed) delete state.routines[id];                 // 到期改了：一次性的 done 标记清掉，让它能再响
+    for (const id of d.removed) delete state.routines[id];
+    if (d.added.length || d.removed.length || d.changed.length) { save(); fs.writeSync(2, `[${room.name}] 黑板 routine 同步：+${d.added.length} -${d.removed.length} ~${d.changed.length}（现 ${routines.length} 条）\n`); }
+    return d; };
   let members = [];
   const refreshMembers = async () => { try { const m = await api('GET', '/members'); if (Array.isArray(m)) members = m; } catch {} return members; };
   const memberById = id => members.find(m => m.id === id);
@@ -223,12 +195,14 @@ async function run(roomName, runtimeName, think, opts = {}) {
     try {
       if (!R.budgetLeft()) { console.log('[预算] 今日请求数用完，passive'); run.status = 'passive_budget'; return; }
       const inbox = await api('GET', '/inbox'); if (!Array.isArray(inbox)) throw new Error('客厅没开门: ' + JSON.stringify(inbox));
+      const myTasks = await fetchTasks(); syncTasks(myTasks);              // 黑板上我的事（每次醒来都看一眼，顺手把 due 落成 routine；没叫我也同步）
       // 例行醒来：inbox 空也不算 nothing，没 @ 我也不 deferred——例行本来就不是因为有人叫
       if (!routine && inbox.length === 0 && reason !== 'heartbeat') { run.status = 'nothing'; return; }
       if (!routine && reason !== 'heartbeat' && !inbox.some(m => m.kind === 'dm' || (m.mentions && m.mentions.includes(room.id)))) { console.log('[醒] 有新话但没叫我，留到心跳再看'); run.status = 'deferred'; return; }
       if (inbox.length === 0 && reason === 'heartbeat') {
-        if (!R.keys.concerns().length) { console.log('[心跳] 没人叫我，惦记本也是空的，不叫模型'); run.status = 'passive_idle'; return; }
+        if (!R.keys.concerns().length && !myTasks.length) { console.log('[心跳] 没人叫我，惦记本和黑板都是空的，不叫模型'); run.status = 'passive_idle'; return; }
       }
+      run.tasks = myTasks.map(t => ({ id: t.id, state: t.state, title: String(t.title).slice(0, 80) }));
       await refreshMembers();
       const hoPath = path.join(R.roomDir, 'handover', 'latest.md'); const handover = fs.existsSync(hoPath) ? fs.readFileSync(hoPath, 'utf8') : '（没有交接信）';
       state.wakes_today++; state.last_wake = new Date().toISOString(); save();
@@ -287,6 +261,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
           : '- 你只搬字，不能执行命令。能力网关还没上线，现在也没法申请动手（别写 APPROVAL，写了也登记不上）；想看什么文件、想改什么，直接在客厅说，让人帮你。',
         R.memory ? '- 值得以后还记得的事，在回复末尾另起一行写 REMEMBER: 一句话（可多行）。房子会存下来，标记为你自己写的、未审。' : '',
         '- 你自己房间的钥匙（同样另起一行）：CONCERN: 一句话 记进惦记本；DONE: 一句话 划掉做完的；NOTE: 一句话 记在自己的小本上；' + (R.memory ? 'FORGET: 一句话 把记忆里对上的那条冷藏（不删）。' : ''),
+        '- 黑板：家里共享的事。钉一件：PIN: 标题 | 验收: … | 给: 名字 | 到期: 时间；改状态：PIN <task_id>: doing / done 结果 / blocked 原因 / drop 理由。没进展不更新。',
         '',
         '【上次交接信】', handover,
         R.keys.concerns().length ? '【我惦记的事】\n' + R.keys.concerns().join('\n') : '',
@@ -297,12 +272,13 @@ async function run(roomName, runtimeName, think, opts = {}) {
         R.houseTime(),
         `【家里的人】${members.map(m => `${m.name}(${m.species}${m.online ? '·在线' : ''})`).join('、')}`,
         `【为什么醒】${reason}`,
+        myTasks.length ? '【黑板上我的事】\n' + BB.renderTaskLines(myTasks, R.tz).join('\n') : '',
         remembered, recentCtx, dmCtx,
       ].filter(x => x !== '').join('\n');
       const inboxText = '【你没读的客厅记录（按时间）】\n' + inbox.map(m => m.kind === 'result' ? renderInboxLine(m, room.id) : frame(m, 'short', `${m.kind === 'dm' ? '(私信给你)' : ''}${m.mentions && m.mentions.includes(room.id) ? '(叫了你)' : ''}`, 0)).join('\n');   // 未读不截断，只做工具留壳；网关结果单独渲染
       const user = wakeHead + '\n\n' + (routine ? `【例行】${routine.prompt}` + (routine.at ? `（这是一次性提醒，原定 ${fmtAt(atMs(routine), R.tz)}）` : '') + (inbox.length ? '\n\n' + inboxText : '') + '\n\n例行的事做完就说一句，没什么要说就回 (静默)。'
         : inbox.length ? inboxText + '\n\n看完决定：要不要说、对谁说。只回新的；上面"刚才的话"里已经有人回过的、你自己说过的，不要再回一遍。像家里人说话，不要列清单；没什么要说就回 (静默)。'
-        : '心跳醒来。客厅没人叫你，但交接信里有惦记的事。要是确实该对家里人说一句就说，没有就回 (静默)。');
+        : '心跳醒来。客厅没人叫你，但惦记本或黑板上有你的事。要是确实该对家里人说一句就说，没有就回 (静默)。');
       run.heard = inbox.map(m => ({ id: m.id, from: m.from, kind: m.kind, text: m.text.slice(0, 300), mentioned: !!(m.mentions && m.mentions.includes(room.id)) }));
       run.context = { system_chars: system.length, user_chars: user.length, memories_recalled: remembered ? remembered.split('\n').length - 1 : 0, recent_lines: recentCtx ? recentCtx.split('\n').length - 1 : 0, dm_lines: dmCtx ? dmCtx.split('\n').length : 0, recent_scored: recentScored, system_preview: system.slice(0, 1200), user_preview: user.slice(0, 1200) };
       // 跳数：人说的话 hop=0；agent 回话 = 听到的 agent 消息里最大 hop + 1。超过上限的链只写不叫醒（防两个 agent 无限对聊）
@@ -317,7 +293,20 @@ async function run(roomName, runtimeName, think, opts = {}) {
       fs.writeSync(2, `[${room.name} 原始回复] ${reply.slice(0, 80).replace(/\n/g, ' ')}\n`);
       run.directives = [];
       { const lines = reply.split('\n'); const keep = [];
-        for (const l of lines) { const m = l.match(/^\s*(REMEMBER|CONCERN|DONE|NOTE|FORGET)[:：]\s*(.+)$/);
+        let pinned = false;
+        for (const l of lines) {
+          if (/^\s*PIN(\s|[:：])/i.test(l)) {                               // 黑板（W7）：钉 → POST /tasks；改 → PATCH /tasks/:id。失败不炸整轮，记 run.pin_error
+            const pin = BB.parsePin(l, { tz: R.tz }); run.directives.push({ k: 'PIN', t: l.trim().slice(0, 200) });
+            if (!pin) { run.pin_error = (run.pin_error ? run.pin_error + '；' : '') + `看不懂：${l.trim().slice(0, 80)}`; fs.writeSync(2, `[${room.name} 黑板] PIN 看不懂，没登记：${l.trim().slice(0, 80)}\n`); continue; }
+            try {
+              const origin = [...inbox].reverse().find(m0 => m0.kind === 'dm' || (m0.mentions && m0.mentions.includes(room.id))) || inbox[inbox.length - 1];
+              const r = pin.op === 'pin' ? await api('POST', '/tasks', { title: pin.title, accept: pin.accept, owner: pin.owner || 'me', due_at: pin.due_at, due_cron: pin.due_cron, ...(origin ? { origin_message_id: origin.id } : {}) })
+                : await api('PATCH', '/tasks/' + pin.id, { state: pin.state, ...(pin.text ? (pin.state === 'done' ? { result: pin.text } : { notes: pin.text }) : {}) });
+              if (!r || !r.id) throw new Error(JSON.stringify(r).slice(0, 200));
+              pinned = true; fs.writeSync(2, `[${room.name} 黑板] ${pin.op === 'pin' ? `钉了 ${r.id}「${r.title}」给 ${r.owner}` : `${r.id} → ${r.state}`}\n`);
+            } catch (e) { run.pin_error = (run.pin_error ? run.pin_error + '；' : '') + String(e.message).slice(0, 200); fs.writeSync(2, `[${room.name} 黑板] PIN 没登记：${run.pin_error.slice(-200)}\n`); }
+            continue; }
+          const m = l.match(/^\s*(REMEMBER|CONCERN|DONE|NOTE|FORGET)[:：]\s*(.+)$/);
           if (!m) { keep.push(l); continue; } const [, k, t] = m; run.directives.push({ k, t: t.slice(0, 200) });
           if (k === 'REMEMBER' && R.memory) { R.memory.remember({ content: t, source: 'self', by: room.id }); console.log(`[${room.name} 记住] ${t.slice(0, 60)}`); }
           else if (k === 'CONCERN') { R.keys.concern(t); console.log(`[${room.name} 惦记] ${t.slice(0, 60)}`); }
@@ -325,6 +314,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
           else if (k === 'NOTE') { R.keys.note(t); console.log(`[${room.name} 备注] ${t.slice(0, 60)}`); }
           else if (k === 'FORGET' && R.memory) { const f = R.memory.forget(t); console.log(`[${room.name} 冷藏] ${f ? f.content.slice(0, 60) : '（没对上）'}`); }
           else keep.push(l); }
+        if (pinned) syncTasks(await fetchTasks());                          // 刚钉/刚改的，routine 立刻跟上（做完的闹钟当场拆掉）
         reply = keep.join('\n').trim(); }
       if (inbox.length) { const a = await api('POST', '/inbox/ack', { ids: inbox.map(m => m.id) }); if (!a || typeof a.acked !== 'number') { run.ack_error = JSON.stringify(a).slice(0, 300); fs.writeSync(2, `[${room.name}] 标已读失败，下次会重复读到这些话：${run.ack_error}\n`); } }
       if (!reply || /^[(（]静默[)）]/.test(reply)) {                        // "(静默)" 后面再跟解释也算静默（实现员 46 次把"(静默)\n\n我还在读…"发进了客厅），解释只记进 run 不发
@@ -373,6 +363,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
   console.log(`[${room.name}] 适配器上线，runtime=${runtimeName}，客厅=${lrBase}${opts.dry ? '，dry-run' : ''}`);
   await refreshMembers();
   for (let i = 0; i < 30; i++) { try { const m = await api('GET', '/members'); if (Array.isArray(m)) break; } catch {} await new Promise(r => setTimeout(r, 500)); }   // 客厅可能还在开门（systemd 一起拉起时 adapter 早 1 秒），最多等 15 秒
+  syncTasks(await fetchTasks());                                          // 启动先把黑板上的 due 落成 routine（进程没跑时错过的按 late_grace 补响）
   await requestWake('human', '启动时看看有没有人找我');
   if (opts.once || opts.dry) { await sleep(); return; }
   const u = new URL('/events', lrBase);
@@ -395,7 +386,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
   // ---- 例行：每 30 秒看一眼，到点的按 routine 车道醒。cron 型进程没跑时错过的不补跑，只在启动时记一行；
   // at 型是一次性提醒，错过就没了，所以启动后 late_grace（默认 24h）内的补响一次，超过的只记一行"错过太久不补"。
   // 心跳自身逻辑不动：due() 基于 state.last_run_at，例行跑过后心跳自然往后推——"心跳不再背定时的事"就是这个意思。
-  if (routines.length) {
+  {
     const now = new Date();
     for (const r of routines) { const n = countMissed(r, state, now, R.tz); if (!n) continue;
       if (r.at) { const st = state.routines[r.id] = state.routines[r.id] || {}; if (st.missed) continue;   // 记一次就安静，别每次启动都嚷
@@ -416,8 +407,8 @@ async function run(roomName, runtimeName, think, opts = {}) {
         requestWake('routine', `routine:${r.id}`);
       }
     };
-    rtick(); rtTimer = setInterval(rtick, 30000); if (rtTimer.unref) rtTimer.unref();
-    console.log(`[${room.name}] 例行 ${routines.length} 条：${routines.map(r => `${r.id}(${r.at ? 'at ' + fmtAt(atMs(r), R.tz) + ((state.routines[r.id] || {}).done ? '，已响过' : '') : r.cron}${r.enabled ? '' : '，停用'})`).join('、')}`);
+    rtick(); rtTimer = setInterval(rtick, 30000); if (rtTimer.unref) rtTimer.unref();   // 黑板会往 routines 里加减，所以 tick 一直装着（数组空也装）
+    if (routines.length) console.log(`[${room.name}] 例行 ${routines.length} 条：${routines.map(r => `${r.id}(${r.at ? 'at ' + fmtAt(atMs(r), R.tz) + ((state.routines[r.id] || {}).done ? '，已响过' : '') : r.cron}${r.enabled ? '' : '，停用'})`).join('、')}`);
   }
   // ---- 心跳：下次 = 上次醒来（任何原因）+ 间隔；连续空心跳才退避（×1.5 到 4 小时），有真事就归位；忙则推迟不叠加；安静时段跳过 ----
   const hbCfg = room.heartbeat || (R.house.defaults || {}).heartbeat || {};
@@ -445,4 +436,4 @@ async function run(roomName, runtimeName, think, opts = {}) {
   for (let i = 0; i < 100 && active; i++) await new Promise(r => setTimeout(r, 50));   // 等正在跑的这一轮收尾（最多 5 秒）
   await sleep();
 }
-module.exports = { open, run, houseRoot, get HOUSE() { return houseRoot(); }, RUN, LANE, mergeRoutines, dueNow, countMissed, renderInboxLine, parseApprovalLine: gw.parseApprovalLine };
+module.exports = { open, run, houseRoot, get HOUSE() { return houseRoot(); }, RUN, LANE, mergeRoutines, dueNow, countMissed, renderInboxLine, parseApprovalLine: gw.parseApprovalLine, parsePin: BB.parsePin, syncTaskRoutines: BB.syncTaskRoutines };
