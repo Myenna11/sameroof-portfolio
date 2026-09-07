@@ -216,7 +216,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
         }
         dmCtx = blocks.join('\n');
       }
-      // ---- 提示按"变化频率"排：稳定的在前（缓存能命中），每次都变的在后；召回块（remembered）每次都不同，挪到 user 侧开头 ----
+      // ---- 提示按"变化频率"排：system 只放一班内稳定的（人设、规矩、交接信、惦记本、小本）----
       const system = [
         soul || `你是${room.name}。`,
         '',
@@ -232,15 +232,16 @@ async function run(roomName, runtimeName, think, opts = {}) {
         '【上次交接信】', handover,
         R.keys.concerns().length ? '【我惦记的事】\n' + R.keys.concerns().join('\n') : '',
         R.keys.notes().length ? '【我自己的小本】\n' + R.keys.notes().join('\n') : '',
-        recentCtx,
-        dmCtx,
-        '',
+      ].filter(x => x !== '').join('\n');
+      // 每次醒都变的一律放 user：时间、在场的人、为什么醒、召回、刚才的话、私信往来、未读。system 一班内基本不动，prompt cache 才吃得到。
+      const wakeHead = [
         R.houseTime(),
         `【家里的人】${members.map(m => `${m.name}(${m.species}${m.online ? '·在线' : ''})`).join('、')}`,
         `【为什么醒】${reason}`,
+        remembered, recentCtx, dmCtx,
       ].filter(x => x !== '').join('\n');
       const inboxText = '【你没读的客厅记录（按时间）】\n' + inbox.map(m => frame(m, 'short', `${m.kind === 'dm' ? '(私信给你)' : ''}${m.mentions && m.mentions.includes(room.id) ? '(叫了你)' : ''}`, 0)).join('\n');   // 未读不截断，只做工具留壳
-      const user = (remembered ? remembered + '\n\n' : '') + (routine ? `【例行】${routine.prompt}` + (inbox.length ? '\n\n' + inboxText : '') + '\n\n例行的事做完就说一句，没什么要说就回 (静默)。'
+      const user = wakeHead + '\n\n' + (routine ? `【例行】${routine.prompt}` + (inbox.length ? '\n\n' + inboxText : '') + '\n\n例行的事做完就说一句，没什么要说就回 (静默)。'
         : inbox.length ? inboxText + '\n\n看完决定：要不要说、对谁说。只回新的；上面"刚才的话"里已经有人回过的、你自己说过的，不要再回一遍。像家里人说话，不要列清单；没什么要说就回 (静默)。'
         : '心跳醒来。客厅没人叫你，但交接信里有惦记的事。要是确实该对家里人说一句就说，没有就回 (静默)。');
       run.heard = inbox.map(m => ({ id: m.id, from: m.from, kind: m.kind, text: m.text.slice(0, 300), mentioned: !!(m.mentions && m.mentions.includes(room.id)) }));
