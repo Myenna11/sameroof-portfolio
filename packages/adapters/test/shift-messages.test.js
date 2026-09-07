@@ -38,6 +38,16 @@ test('换了 system（睡前便条）是另一个话头：一次性发，不进�
   assert.deepEqual(think.shift.messages.map(m => m.role), ['system', 'user', 'assistant', 'user', 'assistant']);
   assert.equal(sent[2].length, 4);
 });
+test('call 回 { text, usage }：历史里只存 text，整个对象原样返回给 room.js', async () => {
+  const { call, sent } = fake([{ text: '在', usage: { prompt_tokens: 10, completion_tokens: 2 } }, { text: '', usage: { prompt_tokens: 1 } }, '嗯']);
+  const think = wrapThink(call);
+  assert.deepEqual(await think('s', '一', null), { text: '在', usage: { prompt_tokens: 10, completion_tokens: 2 } });
+  assert.deepEqual(think.shift.messages[2], { role: 'assistant', content: '在' });
+  await think('s', '二', null);                                                          // text 空 → 撤回
+  assert.equal(think.shift.messages.length, 3);
+  await think('s', '三', null);
+  assert.equal(sent[2].length, 4);
+});
 test('signal 原样传给 call', async () => {
   let seen; const think = wrapThink(async (_m, signal) => { seen = signal; return 'ok'; });
   const ac = new AbortController(); await think('s', 'u', ac.signal); assert.equal(seen, ac.signal);

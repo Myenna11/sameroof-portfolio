@@ -14,7 +14,8 @@ function createShift() {
     retract() { if (messages.length && messages[messages.length - 1].role === 'user') messages.pop(); },   // 出错/回空：把刚才那条 user 撤回，别留下没人接的话
   };
 }
-// call(messages, signal) → reply 文本。包成 room.js 要的 think(system, user, signal)。
+// call(messages, signal) → reply：字符串，或 { text, usage }（V2-U，usage 原样交给 room.js 记 run）。包成 room.js 要的 think(system, user, signal)。
+const textOf = r => (r && typeof r === 'object') ? (r.text == null ? '' : String(r.text)) : (r == null ? '' : String(r));
 // system 和这一班开头那条不一样（比如睡前写便条那次）→ 当另一个话头，一次性发，不进这一班。
 function wrapThink(call, shift = createShift()) {
   const think = async (system, user, signal) => {
@@ -22,8 +23,9 @@ function wrapThink(call, shift = createShift()) {
     const messages = shift.open(system, user);
     let reply;
     try { reply = await call(messages, signal); } catch (e) { shift.retract(); throw e; }
-    if (reply == null || !String(reply).trim()) { shift.retract(); return reply; }
-    shift.commit(reply);
+    const text = textOf(reply);
+    if (!text.trim()) { shift.retract(); return reply; }
+    shift.commit(text);                                                  // 历史里只存正文，usage 不进 messages
     return reply;
   };
   think.shift = shift;

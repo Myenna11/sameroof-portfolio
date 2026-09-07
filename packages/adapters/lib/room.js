@@ -1,4 +1,5 @@
-// 同屋 · 适配器公共件：读房间、连客厅、房子供给时间、醒/睡循环。运行时只需实现 think(system,user)→reply。
+// 同屋 · 适配器公共件：读房间、连客厅、房子供给时间、醒/睡循环。运行时只需实现 think(system,user,signal)→reply。
+// reply 可以是字符串，也可以是 { text, usage }（V2-U）：usage 会记进这次 run，房子不再依赖 R.lastUsage。
 'use strict';
 const fs = require('fs'), path = require('path'), http = require('http');
 const yaml = require('js-yaml');
@@ -133,6 +134,9 @@ const abortable = (promise, signal) => new Promise((resolve, reject) => {
   promise.then(v => { signal.removeEventListener('abort', onAbort); resolve(v); }, e => { signal.removeEventListener('abort', onAbort); reject(e); });
 });
 
+// think 的返回值：字符串照旧；{ text, usage } 就拆开（V2-U）
+const unpackReply = r => (r && typeof r === 'object' && !Array.isArray(r)) ? { text: r.text == null ? '' : String(r.text), usage: (r.usage && typeof r.usage === 'object') ? r.usage : null } : { text: r == null ? '' : String(r), usage: null };
+const addUsage = (run, usage) => { if (!usage) return; if (!run.usage) { run.usage = { ...usage }; return; } for (const [k, v] of Object.entries(usage)) if (typeof v === 'number' && typeof run.usage[k] === 'number') run.usage[k] += v; else if (run.usage[k] === undefined) run.usage[k] = v; };   // 同一次 run 调了两回模型：数字相加
 async function run(roomName, runtimeName, think, opts = {}) {
   const R = open(roomName, { lr: opts.lr }); const { room, api, state, save, soul } = R; const lrBase = R.lrBase;
   const stop = opts.signal || null; let stopped = false;                       // opts.signal：abort 后关 SSE、清 timer、不再 pump，睡下，run() resolve（没给就照旧）
@@ -286,10 +290,10 @@ async function run(roomName, runtimeName, think, opts = {}) {
       const hopOut = (room.species === 'human' || routine) ? 0 : hopIn + 1;   // 例行醒来是新起点，不接 agent 链
       if (opts.dry) { console.log('==== SYSTEM ====\n' + system + '\n==== USER ====\n' + user); console.log('[dry-run] 只看不说，不发客厅、不标已读、不写记忆'); run.status = 'dry'; return; }
       run.model_calls = 1;
-      let reply = await abortable(Promise.resolve(think(system, user, signal)), signal);
-      reply = String(reply || '').trim();
+      const first = unpackReply(await abortable(Promise.resolve(think(system, user, signal)), signal)); addUsage(run, first.usage);
+      let reply = first.text.trim();
       run.raw_reply = reply.slice(0, 2000);
-      if (!reply && inbox.some(m => m.mentions && m.mentions.includes(room.id))) { fs.writeSync(2, `[${room.name}] 被叫了却回空，再试一次\n`); reply = String(await abortable(Promise.resolve(think(system, user + '\n\n（上一次你回了空白。被叫了至少应一声。）', signal)), signal) || '').trim(); run.model_calls = 2; run.raw_reply = reply.slice(0, 2000); }
+      if (!reply && inbox.some(m => m.mentions && m.mentions.includes(room.id))) { fs.writeSync(2, `[${room.name}] 被叫了却回空，再试一次\n`); const again = unpackReply(await abortable(Promise.resolve(think(system, user + '\n\n（上一次你回了空白。被叫了至少应一声。）', signal)), signal)); addUsage(run, again.usage); reply = again.text.trim(); run.model_calls = 2; run.raw_reply = reply.slice(0, 2000); }
       fs.writeSync(2, `[${room.name} 原始回复] ${reply.slice(0, 80).replace(/\n/g, ' ')}\n`);
       run.directives = [];
       { const lines = reply.split('\n'); const keep = [];
@@ -339,7 +343,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
       else { console.error('[醒来失败]', e.message); run.status = 'error'; run.error = String(e.message || e).slice(0, 300); }
     }
     finally {
-      run.ms = Date.now() - t0; if (R.lastUsage) { run.usage = R.lastUsage; R.lastUsage = null; } R.recordRun(run);
+      run.ms = Date.now() - t0; R.recordRun(run);
       if (hb && lane !== 'routine') hb.backoff(reason === 'heartbeat' && ['passive_idle', 'silent', 'nothing', 'passive_budget'].includes(run.status));   // 例行是定时的，不算"有真事"，不归零心跳退避
     }
   }
@@ -352,7 +356,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
     console.log(`[${room.name}] 交接信·事实已写`);
     if (shift.length && !opts.dry) {                            // 再让本人补一句（交接信是面）
       try { const raw = await think(`你是${room.name}。现在要睡了，给明天醒来的自己写两三句交接信：这一班发生了什么、你惦记什么、有什么没做完。像给自己留便条，不要客套。`, `这一班的事实：\n${facts}`);
-        const note = String(raw || '').trim();
+        const note = unpackReply(raw).text.trim();
         fs.writeSync(2, `[${room.name}] 便条原文长度 ${note.length}\n`);
         if (note) { fs.writeFileSync(hoPath, render(note)); fs.writeSync(2, `[${room.name}] 交接信·便条已写\n`); } } catch (e) { fs.writeSync(2, `[便条没写成] ${e && e.stack || e}\n`); }
     }
