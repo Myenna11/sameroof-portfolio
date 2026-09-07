@@ -34,3 +34,24 @@ extensions:
 - 状态在 `state/adapter-<id>.json` 的 `routines[id] = { last_fired, fired, skipped_quiet }`。
 
 测试：`cd packages/adapters && npm test`。
+
+## 上下文怎么拼（context）
+
+每次醒来 `room.js` 拼 `system` + `user`，纯函数在 `lib/context.js`。三条规则：
+
+1. **每次醒都变的一律放 user 侧**：时间、在场的人、为什么醒、`【我记得的事】`（召回）、刚才的话、私信往来，都在 user 开头（例行 / 收件箱之前）。system 只放一班内稳定的东西：人设、规矩、交接信、惦记本、小本——好命中 prompt cache。
+2. **刚才的话 / 私信往来打分挑选 + 摘要帧**：候选 = `/history` 最近 `recent_messages * 2` 条（上限 60）里未读之外的，按下表打分取最高 `recent_messages` 条，**按时间重排**后渲染；总字数超 `recent_max_chars` 从**分低**的丢（不是从旧的丢）。私信往来同样打分，只在该 partner 的 dm 历史内，`dm_recent` / `dm_max_chars` 封顶不变。渲染是摘要帧：文字原样（超 `frame_max_chars`，默认 400，截断加 `…`）；同一人连续的短消息不合并。`state/runs/<id>.jsonl` 的 `context.recent_scored` 记前 20 条 `{id, score}`，事后能看为什么选了这些。
+3. **工具留壳**：住户有手（能力网关）之后客厅里会出现工具调用/结果消息。凡 `meta.kind === 'tool'`（或文本以 `[工具` 开头）的消息，在刚才的话、私信往来、收件箱里都只显示 `[工具调用: X]`（X 取 `meta.tool`，否则取方括号里的词），结果不展开——模型要看结果，等网关"结果投回收件箱"那条正文消息。
+
+打分表（`scoreRecent`）：
+
+| 条件 | 分 |
+|---|---|
+| @ 了我 | +3 |
+| 我自己说的（保住"我已经回过"） | +2 |
+| 发言人出现在本次 inbox 里 | +2 |
+| 人类（species human） | +1 |
+| 私信 | +1 |
+| 距现在每过 1 小时 | -0.5（下限 -3） |
+
+配置键（`house.yaml defaults.context` / `room.yaml context`）：`recent_messages`(20)、`recent_max_chars`(4000)、`frame_max_chars`(400)、`dm_recent`(10)、`dm_max_chars`(3000)、`memory_hits`(4)、`memory_recent`(3)。
