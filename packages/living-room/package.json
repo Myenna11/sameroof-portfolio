@@ -16,6 +16,8 @@
     "js-yaml": "^5.4.1",
     "@sameroof/house-root": "0.1.0",
     "@sameroof/jcs": "0.1.0",
-    "@sameroof/plugin-memory": "0.1.0"
+    "@sameroof/plugin-memory": "0.1.0",
+    "@sameroof/schema": "0.1.0",
+    "yaml": "^2.9.0"
   }
 }
