@@ -1,31 +1,33 @@
 // 同屋 · 适配器公共件：读房间、连客厅、房子供给时间、醒/睡循环。运行时只需实现 think(system,user)→reply。
 'use strict';
 const fs = require('fs'), path = require('path'), http = require('http');
-const yaml = require('/root/sameroof/packages/living-room/node_modules/js-yaml');
-const HOUSE = process.env.SAMEROOF_HOUSE || path.resolve(__dirname, '../../..');
-const memoryPlugin = require('../../plugin-memory');
+const yaml = require('js-yaml');
+const { resolveHouseRoot } = require('./house-root');
+const memoryPlugin = require('@sameroof/plugin-memory');
 const cron = require('./cron');
 const LR = process.env.SAMEROOF_LR || 'http://127.0.0.1:8790';
 const RUN = path.join(process.env.HOME || '/root', '.sameroof', 'run');
+let houseDir = null;                                                       // 懒解析：真开房间时才找 house.yaml，纯函数测试不碰盘
+const houseRoot = () => houseDir || (houseDir = resolveHouseRoot());
 
 function resolveRoomDir(nameOrId) {
-  const direct = path.join(HOUSE, 'rooms', nameOrId);
+  const direct = path.join(houseRoot(), 'rooms', nameOrId);
   if (fs.existsSync(path.join(direct, 'room.yaml'))) return direct;
-  for (const d of fs.readdirSync(path.join(HOUSE, 'rooms'))) {           // 机器用 id，人用名字
-    const f = path.join(HOUSE, 'rooms', d, 'room.yaml'); if (!fs.existsSync(f)) continue;
-    const r = yaml.load(fs.readFileSync(f, 'utf8')); if (r && (r.id === nameOrId || r.name === nameOrId)) return path.join(HOUSE, 'rooms', d);
+  for (const d of fs.readdirSync(path.join(houseRoot(), 'rooms'))) {           // 机器用 id，人用名字
+    const f = path.join(houseRoot(), 'rooms', d, 'room.yaml'); if (!fs.existsSync(f)) continue;
+    const r = yaml.load(fs.readFileSync(f, 'utf8')); if (r && (r.id === nameOrId || r.name === nameOrId)) return path.join(houseRoot(), 'rooms', d);
   }
   throw new Error(`找不到房间：${nameOrId}`);
 }
 function open(roomName) {
   const roomDir = resolveRoomDir(roomName);
   const room = yaml.load(fs.readFileSync(path.join(roomDir, 'room.yaml'), 'utf8'));
-  const house = yaml.load(fs.readFileSync(path.join(HOUSE, 'house.yaml'), 'utf8'));
+  const house = yaml.load(fs.readFileSync(path.join(houseRoot(), 'house.yaml'), 'utf8'));
   const lrToken = JSON.parse(fs.readFileSync(path.join(RUN, 'living-room-tokens.json'), 'utf8'))[room.id];
   if (!lrToken) throw new Error(`${roomName} 没有客厅 token`);
   const soulPath = path.join(roomDir, 'SOUL.md');
   const soul = fs.existsSync(soulPath) ? fs.readFileSync(soulPath, 'utf8') : '';
-  const statePath = path.join(HOUSE, 'state', `adapter-${room.id}.json`);
+  const statePath = path.join(houseRoot(), 'state', `adapter-${room.id}.json`);
   fs.mkdirSync(path.dirname(statePath), { recursive: true });
   const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf8')) : { last_sleep: null, last_wake: null, wakes_today: 0, day: null };
   const save = () => fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
@@ -61,7 +63,7 @@ function open(roomName) {
     note: t => { fs.appendFileSync(notesPath, `- ${new Date().toISOString().slice(0, 10)} ${t}\n`); },
     notes: (n = 8) => readLines(notesPath).slice(-n),
   };
-  const runsDir = path.join(HOUSE, 'state', 'runs'); fs.mkdirSync(runsDir, { recursive: true });
+  const runsDir = path.join(houseRoot(), 'state', 'runs'); fs.mkdirSync(runsDir, { recursive: true });
   const recordRun = rec => { try { fs.appendFileSync(path.join(runsDir, `${room.id}.jsonl`), JSON.stringify(rec) + '\n'); } catch {}
     const brief = (rec.lane === 'routine' && { said: '例行的事，说了一句', silent: '例行看过了，没什么要说' }[rec.status]) || { said: '说了一句', dm: '发了私信', approval: '请求了审批', silent: '看了看，没说话', error: '出错了', passive_budget: '预算用完，只看不说', passive_idle: '心跳，没事', nothing: '醒了，没人找', deferred: '有新话但没叫我', dry: 'dry-run' }[rec.status] || rec.status;
     const kind = rec.status === 'error' ? 'error' : (rec.model_calls ? 'model_call' : 'wake');
@@ -345,4 +347,4 @@ async function run(roomName, runtimeName, think, opts = {}) {
     hb.reschedule();
   }
 }
-module.exports = { open, run, HOUSE, RUN, LANE, mergeRoutines, dueNow, countMissed };
+module.exports = { open, run, houseRoot, get HOUSE() { return houseRoot(); }, RUN, LANE, mergeRoutines, dueNow, countMissed };
