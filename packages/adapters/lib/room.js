@@ -4,6 +4,7 @@ const fs = require('fs'), path = require('path'), http = require('http');
 const yaml = require('/root/sameroof/packages/living-room/node_modules/js-yaml');
 const HOUSE = process.env.SAMEROOF_HOUSE || path.resolve(__dirname, '../../..');
 const memoryPlugin = require('../../plugin-memory');
+const cron = require('./cron');
 const LR = process.env.SAMEROOF_LR || 'http://127.0.0.1:8790';
 const RUN = path.join(process.env.HOME || '/root', '.sameroof', 'run');
 
@@ -62,17 +63,45 @@ function open(roomName) {
   };
   const runsDir = path.join(HOUSE, 'state', 'runs'); fs.mkdirSync(runsDir, { recursive: true });
   const recordRun = rec => { try { fs.appendFileSync(path.join(runsDir, `${room.id}.jsonl`), JSON.stringify(rec) + '\n'); } catch {}
-    const brief = { said: '说了一句', dm: '发了私信', approval: '请求了审批', silent: '看了看，没说话', error: '出错了', passive_budget: '预算用完，只看不说', passive_idle: '心跳，没事', nothing: '醒了，没人找', deferred: '有新话但没叫我', dry: 'dry-run' }[rec.status] || rec.status;
+    const brief = (rec.lane === 'routine' && { said: '例行的事，说了一句', silent: '例行看过了，没什么要说' }[rec.status]) || { said: '说了一句', dm: '发了私信', approval: '请求了审批', silent: '看了看，没说话', error: '出错了', passive_budget: '预算用完，只看不说', passive_idle: '心跳，没事', nothing: '醒了，没人找', deferred: '有新话但没叫我', dry: 'dry-run' }[rec.status] || rec.status;
     const kind = rec.status === 'error' ? 'error' : (rec.model_calls ? 'model_call' : 'wake');
     api('POST', '/activity', { kind, text: `${room.name}：${brief}`, meta: { run_id: rec.id, reason: rec.reason, status: rec.status, ms: rec.ms, usage: rec.usage || null, model_calls: rec.model_calls || 0, error: rec.error || null } }).catch(() => {}); };
   const plugins = room.plugins || (house.defaults || {}).plugins || [];
   const memory = plugins.includes('memory') ? memoryPlugin.open(roomDir) : null;
-  return { room, house, roomDir, api, houseTime, inQuiet, budgetLeft, state, save, soul, memory, keys, recordRun };
+  return { room, house, roomDir, api, houseTime, inQuiet, budgetLeft, state, save, soul, memory, keys, recordRun, tz };
 }
 
 const byName = (id, members) => (members.find(m => m.id === id) || {}).name || id;
 const DELIVER_MODES = ['interrupt', 'after_turn', 'inject'];
-const LANE = { human: 3, agent: 2, heartbeat: 1 };          // 车道优先级：人 > agent > 心跳
+const LANE = { human: 4, routine: 3, agent: 2, heartbeat: 1 };   // 车道优先级：人 > 例行 > agent > 心跳（例行是明写下的 standing order，压过 agent 闲聊；agent 的 pending 不丢，只是等一轮）
+const LANES = ['human', 'routine', 'agent', 'heartbeat'];
+// ---- 例行（routines）：house/room 的 extensions["dev.sameroof.routines"]，每条 { id, cron, prompt, enabled?, quiet_hours? } ----
+// 房间的追加在房子之后，同 id 房间覆盖房子。字段缺、cron 非法、同一处 id 重复都直接抛（配置小，早炸早改）。
+function mergeRoutines(house, room) {
+  const list = (o, where) => { const raw = ((o || {}).extensions || {})['dev.sameroof.routines'] || []; if (!Array.isArray(raw)) throw new Error(`${where} 的 routines 得是数组`);
+    const seen = new Set(); return raw.map((r, i) => {
+      if (!r || typeof r.id !== 'string' || !r.id) throw new Error(`${where} routines[${i}] 缺 id`);
+      if (seen.has(r.id)) throw new Error(`${where} routines 里 id 重复：${r.id}`); seen.add(r.id);
+      if (typeof r.prompt !== 'string' || !r.prompt.trim()) throw new Error(`${where} routine ${r.id} 缺 prompt`);
+      cron.parse(r.cron);
+      return { id: r.id, cron: r.cron, prompt: r.prompt.trim(), enabled: r.enabled !== false, quiet_hours: r.quiet_hours === 'respect' ? 'respect' : 'ignore' }; }); };
+  const out = new Map(); for (const r of [...list(house, 'house.yaml'), ...list(room, 'room.yaml')]) out.set(r.id, r);
+  return [...out.values()];
+}
+// 这一分钟该不该触发：匹配 cron 且这一分钟（按 tz 的 'YYYY-MM-DDTHH:MM' 键）没触发过。返回键或 null，不改 state。
+function dueNow(routine, state, now = new Date(), tz = 'UTC') {
+  if (!routine.enabled) return null;
+  const t = cron.parts(now, tz); if (!cron.matches(routine.cron, now, tz)) return null;
+  const st = ((state || {}).routines || {})[routine.id] || {};
+  return st.last_fired === t.key ? null : t.key;
+}
+// 上次触发到现在之间错过了几次（进程没跑时的），只用来在启动时记一行；最多往回数 cap 分钟
+function countMissed(routine, state, now = new Date(), tz = 'UTC', cap = 7 * 24 * 60) {
+  const st = ((state || {}).routines || {})[routine.id] || {}; if (!st.last_fired) return 0;
+  const nowKey = cron.parts(now, tz).key; let n = 0;
+  for (let k = 1; k <= cap; k++) { const d = new Date(now.getTime() - k * 60000); const key = cron.parts(d, tz).key; if (key <= st.last_fired) break; if (key !== nowKey && cron.matches(routine.cron, d, tz)) n++; }
+  return n;
+}
 const abortable = (promise, signal) => new Promise((resolve, reject) => {
   if (signal.aborted) return reject(signal.reason);
   const onAbort = () => reject(signal.reason);
@@ -88,6 +117,8 @@ async function run(roomName, runtimeName, think, opts = {}) {
   const limits = Object.assign({ run_timeout_ms: 180000, agent_hops: 6 }, ext('limits'), rext('limits'));
   const deliverCfg = Object.assign({ human: 'after_turn', agent: 'after_turn', from: {} }, ext('deliver'), rext('deliver'),
     { from: Object.assign({}, (ext('deliver').from || {}), (rext('deliver').from || {})) });
+  const routines = mergeRoutines(R.house, room); state.routines = state.routines || {};
+  const routineById = id => routines.find(r => r.id === id);
   let members = [];
   const refreshMembers = async () => { try { const m = await api('GET', '/members'); if (Array.isArray(m)) members = m; } catch {} return members; };
   const memberById = id => members.find(m => m.id === id);
@@ -100,13 +131,13 @@ async function run(roomName, runtimeName, think, opts = {}) {
     const byKind = deliverCfg[s.species === 'human' ? 'human' : 'agent']; return DELIVER_MODES.includes(byKind) ? byKind : 'after_turn';
   };
   // ---- 运行队列：每住户一条，三车道，同时只跑一个 run ----
-  const pending = { human: null, agent: null, heartbeat: null };   // 每车道最多记一个待醒原因（一次醒来读全部未读，合并即可）
+  const pending = { human: null, routine: [], agent: null, heartbeat: null };   // 每车道最多记一个待醒原因（一次醒来读全部未读，合并即可）；例行各带各的提示词，排队不合并
   let active = null;                                                // { lane, reason, ctrl, startedAt }
   let hb = null;                                                    // 心跳调度句柄
   const shift = [];                                                 // 这一班发生的事，睡前写进交接信
   function requestWake(lane, reason, deliver = 'after_turn') {
     if (active) {
-      pending[lane] = pending[lane] || reason;
+      if (lane === 'routine') { if (!pending.routine.includes(reason)) pending.routine.push(reason); } else pending[lane] = pending[lane] || reason;
       if (deliver === 'interrupt' && LANE[lane] >= LANE[active.lane]) {
         fs.writeSync(2, `[${room.name}] 打断当前一轮（${active.reason}）：${reason}\n`);
         active.ctrl.abort(new Error(`被打断：${reason}`));
@@ -115,7 +146,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
     }
     return runOnce(lane, reason);
   }
-  function pump() { for (const lane of ['human', 'agent', 'heartbeat']) if (pending[lane]) { const r = pending[lane]; pending[lane] = null; runOnce(lane, r); return; } }
+  function pump() { for (const lane of LANES) { const r = lane === 'routine' ? pending.routine.shift() : pending[lane]; if (!r) continue; if (lane !== 'routine') pending[lane] = null; runOnce(lane, r); return; } }
   async function runOnce(lane, reason) {
     const ctrl = new AbortController();
     active = { lane, reason, ctrl, startedAt: Date.now() };
@@ -127,12 +158,14 @@ async function run(roomName, runtimeName, think, opts = {}) {
 
   async function wake(reason, lane, signal) {
     const run = { id: 'run_' + Date.now().toString(36), resident_id: room.id, ts: new Date().toISOString(), reason, lane, status: 'started' };
+    const routine = lane === 'routine' ? routineById(reason.replace(/^routine:/, '')) : null; if (routine) run.routine_id = routine.id;
     const t0 = Date.now();
     try {
       if (!R.budgetLeft()) { console.log('[预算] 今日请求数用完，passive'); run.status = 'passive_budget'; return; }
       const inbox = await api('GET', '/inbox'); if (!Array.isArray(inbox)) throw new Error('客厅没开门: ' + JSON.stringify(inbox));
-      if (inbox.length === 0 && reason !== 'heartbeat') { run.status = 'nothing'; return; }
-      if (reason !== 'heartbeat' && !inbox.some(m => m.kind === 'dm' || (m.mentions && m.mentions.includes(room.id)))) { console.log('[醒] 有新话但没叫我，留到心跳再看'); run.status = 'deferred'; return; }
+      // 例行醒来：inbox 空也不算 nothing，没 @ 我也不 deferred——例行本来就不是因为有人叫
+      if (!routine && inbox.length === 0 && reason !== 'heartbeat') { run.status = 'nothing'; return; }
+      if (!routine && reason !== 'heartbeat' && !inbox.some(m => m.kind === 'dm' || (m.mentions && m.mentions.includes(room.id)))) { console.log('[醒] 有新话但没叫我，留到心跳再看'); run.status = 'deferred'; return; }
       if (inbox.length === 0 && reason === 'heartbeat') {
         if (!R.keys.concerns().length) { console.log('[心跳] 没人叫我，惦记本也是空的，不叫模型'); run.status = 'passive_idle'; return; }
       }
@@ -198,7 +231,9 @@ async function run(roomName, runtimeName, think, opts = {}) {
         `【家里的人】${members.map(m => `${m.name}(${m.species}${m.online ? '·在线' : ''})`).join('、')}`,
         `【为什么醒】${reason}`,
       ].filter(x => x !== '').join('\n');
-      const user = inbox.length ? '【你没读的客厅记录（按时间）】\n' + inbox.map(m => `[${m.ts.slice(11, 16)}] ${m.from}${m.kind === 'dm' ? '(私信给你)' : ''}${m.mentions && m.mentions.includes(room.id) ? '(叫了你)' : ''}：${m.text}`).join('\n') + '\n\n看完决定：要不要说、对谁说。只回新的；上面"刚才的话"里已经有人回过的、你自己说过的，不要再回一遍。像家里人说话，不要列清单；没什么要说就回 (静默)。'
+      const inboxText = '【你没读的客厅记录（按时间）】\n' + inbox.map(m => `[${m.ts.slice(11, 16)}] ${m.from}${m.kind === 'dm' ? '(私信给你)' : ''}${m.mentions && m.mentions.includes(room.id) ? '(叫了你)' : ''}：${m.text}`).join('\n');
+      const user = routine ? `【例行】${routine.prompt}` + (inbox.length ? '\n\n' + inboxText : '') + '\n\n例行的事做完就说一句，没什么要说就回 (静默)。'
+        : inbox.length ? inboxText + '\n\n看完决定：要不要说、对谁说。只回新的；上面"刚才的话"里已经有人回过的、你自己说过的，不要再回一遍。像家里人说话，不要列清单；没什么要说就回 (静默)。'
         : '心跳醒来。客厅没人叫你，但交接信里有惦记的事。要是确实该对家里人说一句就说，没有就回 (静默)。';
       run.heard = inbox.map(m => ({ id: m.id, from: m.from, kind: m.kind, text: m.text.slice(0, 300), mentioned: !!(m.mentions && m.mentions.includes(room.id)) }));
       run.context = { system_chars: system.length, user_chars: user.length, memories_recalled: remembered ? remembered.split('\n').length - 1 : 0, recent_lines: recentCtx ? recentCtx.split('\n').length - 1 : 0, dm_lines: dmCtx ? dmCtx.split('\n').length : 0, system_preview: system.slice(0, 1200), user_preview: user.slice(0, 1200) };
@@ -274,6 +309,25 @@ async function run(roomName, runtimeName, think, opts = {}) {
     requestWake(human ? 'human' : 'agent', `${who} 叫我`, resolveDeliver(m));
   }
   sub();
+  // ---- 例行：每 30 秒看一眼，到点的按 routine 车道醒。进程没跑时错过的不补跑，只在启动时记一行。
+  // 心跳自身逻辑不动：due() 基于 state.last_run_at，例行跑过后心跳自然往后推——"心跳不再背定时的事"就是这个意思。
+  if (routines.length) {
+    const now = new Date();
+    for (const r of routines) { const n = countMissed(r, state, now, R.tz); if (n) fs.writeSync(2, `[${room.name}] 例行 ${r.id} 上次触发 ${state.routines[r.id].last_fired} 之后错过 ${n} 次，不补跑\n`); }
+    const rtick = () => {
+      const now = new Date();
+      for (const r of routines) {
+        const key = dueNow(r, state, now, R.tz); if (!key) continue;
+        const st = state.routines[r.id] = state.routines[r.id] || { last_fired: null, skipped_quiet: 0, fired: 0 };
+        st.last_fired = key;
+        if (r.quiet_hours === 'respect' && R.inQuiet()) { st.skipped_quiet = (st.skipped_quiet || 0) + 1; save(); fs.writeSync(2, `[${room.name}] 例行 ${r.id} 赶上安静时段，跳过\n`); continue; }
+        st.fired = (st.fired || 0) + 1; save();
+        requestWake('routine', `routine:${r.id}`);
+      }
+    };
+    rtick(); const rt = setInterval(rtick, 30000); if (rt.unref) rt.unref();
+    console.log(`[${room.name}] 例行 ${routines.length} 条：${routines.map(r => `${r.id}(${r.cron}${r.enabled ? '' : '，停用'})`).join('、')}`);
+  }
   // ---- 心跳：下次 = 上次醒来（任何原因）+ 间隔；连续空心跳才退避（×1.5 到 4 小时），有真事就归位；忙则推迟不叠加；安静时段跳过 ----
   const hbCfg = room.heartbeat || (R.house.defaults || {}).heartbeat || {};
   if (hbCfg.enabled !== false) {
@@ -291,4 +345,4 @@ async function run(roomName, runtimeName, think, opts = {}) {
     hb.reschedule();
   }
 }
-module.exports = { open, run, HOUSE, RUN };
+module.exports = { open, run, HOUSE, RUN, LANE, mergeRoutines, dueNow, countMissed };
