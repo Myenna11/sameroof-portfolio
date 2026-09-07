@@ -398,7 +398,9 @@ async function run(roomName, runtimeName, think, opts = {}) {
   if (routines.length) {
     const now = new Date();
     for (const r of routines) { const n = countMissed(r, state, now, R.tz); if (!n) continue;
-      if (r.at) fs.writeSync(2, `[${room.name}] 例行 ${r.id} 原定 ${fmtAt(atMs(r), R.tz)}，已过 ${Math.round((now.getTime() - atMs(r)) / 3600000)} 小时，超过 late_grace，错过太久不补\n`);
+      if (r.at) { const st = state.routines[r.id] = state.routines[r.id] || {}; if (st.missed) continue;   // 记一次就安静，别每次启动都嚷
+        st.missed = true; st.missed_at = now.toISOString(); save();
+        fs.writeSync(2, `[${room.name}] 例行 ${r.id} 原定 ${fmtAt(atMs(r), R.tz)}，已过 ${Math.round((now.getTime() - atMs(r)) / 3600000)} 小时，超过 late_grace，错过太久不补（已记 missed，改大 late_grace 也不会再响；要重发就换个 id）\n`); }
       else fs.writeSync(2, `[${room.name}] 例行 ${r.id} 上次触发 ${state.routines[r.id].last_fired} 之后错过 ${n} 次，不补跑\n`); }
     const rtick = () => {
       const now = new Date();
