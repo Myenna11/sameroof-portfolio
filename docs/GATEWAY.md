@@ -1,6 +1,6 @@
 # 能力网关合同与安全设计（Y1）
 
-状态：Y1a 接口合同已钉死；Y1b v1 设计已钉死。G1 可以按本文实现。
+状态：Y1a 接口合同已钉死；Y1b v1 设计已钉死；G1 v2 已按 2026-09-07 审查员复核收紧运行根、策略版本和结果传输。
 依据：`DECISIONS.md` #20、`docs/neighbors/2026-09-07-exec-boundary.md`。
 范围：能力执行网关，不是消息/身份“总机”，也不代替客厅、房间适配器或 broker。
 
@@ -33,6 +33,7 @@
 - 当前 room units 都以 root 运行，root 理论上能读取别人的 token，因此 v1 的“住户间 OS 身份隔离”尚不成立；上线宣称隔离前要把每个 room unit 拆成独立 service user。即使尚未拆用户，G1 仍必须实现逐住户 token，不能以 root peer 直接信任 body。
 - 客厅普通住户 token 不能调用网关内部接口。网关使用一枚独立、窄权限的 service token，只允许读取审批决定和写入执行结果。
 - service token 放在 `/var/lib/sameroof-gateway/living-room.token`，`0600`，不得进入仓库、日志、错误详情或子进程环境。
+- gateway 生产入口拒绝 uid 0。systemd unit 必须使用 `User=sameroof-gateway`；该用户只拥有自己的 state/runtime 目录及显式授权的数据根，不能读取 broker、客厅或其他服务的状态目录。
 - 模型给出的内容、文件内容、stderr 和记忆都只是数据，不能改变本文策略。
 
 ## 2. Y1a：适配器到网关的接口合同
@@ -180,6 +181,8 @@ received -> awaiting_approval -> approved -> executing -> succeeded|failed|timed
 
 客厅必须严格校验上述已知安全字段、类型、长度和绑定关系；为了 G1/W3 独立演进，内部结果 body 的未知字段可以忽略。第 2 节“未知字段拒绝”只约束网关自己的 adapter 入口。
 
+G1 v1 的结果传输采用“小结果内联”，不是 blob 引用。gateway 在发送前把序列化 body 限制在 60 KiB（低于客厅 64 KiB HTTP 上限）；正常动作按动作级上限保证不会触线。防御性检查若发现内部结果超过 60 KiB，会改投一条小型 `GW-RESULT-TOO-LARGE` 终态结果，而不是把同一超大 body 永久留在热重试队列。客厅的 `summary` 是住户实际收到的结果正文；`details` 只承载小型结构化副本。
+
 ## 4. v1 动作字典
 
 未登记动作一律 `GW-ACTION-UNKNOWN`。v1 只实现三类：
@@ -187,12 +190,12 @@ received -> awaiting_approval -> approved -> executing -> succeeded|failed|timed
 ### 4.1 `core.fs.read`
 
 ```json
-{"root_id":"own-room","path":"memory/index.md","max_bytes":262144}
+{"root_id":"own-room","path":"memory/index.md","max_bytes":1200}
 ```
 
-- 由网关直接读取；默认上限 256 KiB，硬上限 1 MiB。
+- 由网关直接读取；默认与硬上限均为 1200 bytes。这是 v1 内联传输的端到端上限，不是底层读取能力上限。
 - 只读普通文件；目录、设备、FIFO、socket、符号链接全部拒绝。
-- 返回 UTF-8 文本或 base64 二进制标记，结果也受 1 MiB 总上限。
+- 完整 UTF-8 放进 `summary` 和 `details.content`；非法 UTF-8 以 base64 放进 `summary` 和 `details.content_base64`。1200 bytes 的 base64 加协议外壳仍低于客厅的 summary/details/body 上限。
 
 ### 4.2 `core.fs.write`
 
@@ -279,7 +282,8 @@ gateway:
 - `own-room` 是保留 root id，不写绝对路径；由 house 根 + 当前住户实际 room 目录推导，不能由请求覆盖。
 - 额外 mount 必须由户主写进 `house.yaml`，id 唯一，path 为已存在的绝对目录，resident 显式列名，权限仅 `read-only|read-write`。
 - mount 不得是 `/`、house 根的父目录、其他住户房间、broker/gateway 状态目录或 `/run`。
-- `house.yaml` 改动只有重载并校验成功后生效；执行中的 intent 使用登记时的配置版本。`house.lock` 漂移时网关拒绝新 intent。
+- gateway 内存策略带已验证的 `house.lock.source.digest`。每次登记 intent 都先重新验证 lock 与全部 source 文件；digest 变化时，完整 schema/语义校验并二次复核 digest 后才原子切换。校验失败或重载期间再次漂移就拒绝新 intent，旧策略只留给已经登记的 intent。
+- 每个 intent 持久化 `policy_digest` 与不可变策略快照。审批回来后按该快照执行；因此户主从 `approve` 收紧到 `deny` 并生成新 lock 后，新 intent 立即被拒，已经登记并获批的旧 intent 仍按登记版本完成。
 - 权限最终值取硬编码 deny、house permissions ceiling、room permissions、mount access 中最严格者。任一层缺失或无法解析都 deny。
 
 审批记忆 scope：`once < session < always`。户主 ceiling 是每个 action 可接受的最大 scope；人的选择超过 ceiling 时裁到 ceiling并在结果中明示。默认 ceiling 为 `once`。
@@ -310,7 +314,8 @@ gateway:
 启动时以及每次配置重载后先跑探针：
 
 ```bash
-/usr/bin/bwrap --unshare-user --unshare-net --ro-bind / / /bin/true
+/usr/bin/bwrap --unshare-user --unshare-net --tmpfs / --ro-bind /usr/bin /usr/bin --ro-bind /usr/lib /usr/lib \
+  --proc /proc --dev /dev --tmpfs /tmp /bin/true
 ```
 
 非 0、超时或二进制身份变化均进入 `sandbox_unavailable`，拒绝全部 `core.exec`。不得降级。
@@ -320,16 +325,23 @@ gateway:
 ```text
 --die-with-parent --new-session
 --unshare-user --unshare-net --unshare-ipc --unshare-pid --unshare-uts
---ro-bind / /
+--tmpfs /
+--ro-bind /usr/bin /usr/bin
+--ro-bind /usr/lib /usr/lib          # 另按存在性提供 /usr/sbin、/usr/lib64、/usr/share
+--symlink usr/bin /bin              # 或在非 usr-merge 主机只读挂载对应最小运行目录
+--symlink usr/lib /lib
 --proc /proc --dev /dev --tmpfs /tmp
+--ro-bind <approved read root> <same path>
 --bind <approved writable root> <same path>
---ro-bind <protected existing path> <same path>
+--tmpfs + --remount-ro <protected existing directory>
+--ro-bind /dev/null <protected existing file>
 --chdir <approved cwd>
 --clearenv + allowlisted env
 ```
 
-- 可写 bind 只能来自解析后的 mount id，不能接收请求中的裸绝对路径。
-- 每个已存在的保护路径在可写 bind 之后再 `--ro-bind` 挖空。
+- 宿主 `/` 永远不进入 mount namespace。只显式提供 `/usr/bin`、`/usr/lib` 等运行时子目录（不挂 `/usr/local`）、usr-merge 链接、最小 `/proc`/`/dev`、空 `/tmp` 和本 intent 获批的 roots；宿主 `/etc`、`/root`、`/home`、其他 `/tmp` 内容均不可见。
+- 可写 bind 只能来自 intent 登记时策略快照里的 mount id，不能接收请求中的裸绝对路径。
+- 每个已存在的硬保护路径在批准根 bind 之后挖空并重新只读；其他住户房间及 gateway/broker/客厅状态目录整体挖空。保护路径发现无法完整完成时拒绝执行。
 - 网络 namespace 永远隔离。v1 不挂宿主 DNS、代理 socket 或任意网络设备。
 - 超时先 TERM 子进程组，短暂宽限后 KILL；无论退出方式都回收整组并记录。
 - bwrap stderr 中出现权限错误时，只能生成 `next.kind=request_writable_root`。户主把明确路径加入 `house.yaml` 并重载成功后，创建一个新 intent 在 bwrap 内重跑；旧 approval 不复用。
@@ -383,7 +395,7 @@ target 原料：
 - 用户：`sameroof-gateway`（nologin）；组：`sameroof`
 - socket `0660`，只有登记过的 adapter service users 和管理 CLI 能进组。
 - adapter token 目录随 runtime directory 重建；启动器按房间生成/投递文件，网关数据库只存 token hash。room units 未拆成独立用户前，这只能鉴别协议身份，不能抵抗宿主 root 冒充；该限制必须出现在部署验收报告。
-- systemd 使用独立 unit、`UMask=0077`、`NoNewPrivileges=yes`、`PrivateTmp=yes`、最小写路径；不能把 bwrap 所需 user namespace 一并封死。
+- `deploy/sameroof-gateway.service` 使用 `User=sameroof-gateway`、`Group=sameroof`、`UMask=0077`、`NoNewPrivileges=yes`、`PrivateTmp=yes`，并显式隐藏 broker/客厅状态；不能把 bwrap 所需 user namespace 一并封死。二进制入口另有 uid 0 fail-closed，避免错误 unit 静默退回 root。
 - 安装脚本必须先备份旧状态、以服务用户检查 DB、跑 bwrap 探针、原子切换；失败回滚。本文不授权重启或改线上 unit。
 
 ## 12. G1 验收矩阵
@@ -402,6 +414,8 @@ target 原料：
 10. 结果投递幂等、只到申请住户、以 human 车道唤醒；投递失败可重试且不重执行动作。
 11. asked/decided 必须成对；审计和返回不含 token、content 或原始 secrets。
 12. 返回总有 `status / coverage / next`，coverage 不夸大。
+
+G1 自动化映射：基础状态机、锁漂移与读取边界在 `packages/gateway/test/gateway.test.js`；真实客厅投递（含 1199-byte 读取）在 `living-room-seam.test.js`；审批服务故障、四绑定错配/并发消费、过期/崩溃、路径竞态与特殊文件、真实 bwrap 主机秘密/服务状态/其他房间/网络隔离、硬保护、审计脱敏及投递不重执行在 `security-matrix.test.js`。真实 bwrap 测试不允许 skip：探针失败即测试失败。
 
 检索员每一版按本矩阵审；G1 进入主树前由审查员复核并显式给出 ALL_CLEAR，或列明未清 P0/P1。
 
