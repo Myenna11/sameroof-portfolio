@@ -279,7 +279,9 @@ async function run(roomName, runtimeName, think, opts = {}) {
           else keep.push(l); }
         reply = keep.join('\n').trim(); }
       if (inbox.length) { const a = await api('POST', '/inbox/ack', { ids: inbox.map(m => m.id) }); if (!a || typeof a.acked !== 'number') { run.ack_error = JSON.stringify(a).slice(0, 300); fs.writeSync(2, `[${room.name}] 标已读失败，下次会重复读到这些话：${run.ack_error}\n`); } }
-      if (!reply || reply === '(静默)') { console.log(`[静默] 原始长度 ${String(reply || '').length}`); run.status = 'silent'; return; }
+      if (!reply || /^[(（]静默[)）]/.test(reply)) {                        // "(静默)" 后面再跟解释也算静默（实现员 46 次把"(静默)\n\n我还在读…"发进了客厅），解释只记进 run 不发
+        const note = reply.replace(/^[(（]静默[)）]\s*/, '').trim(); if (note) run.silent_note = note.slice(0, 300);
+        console.log(`[静默] 原始长度 ${String(reply || '').length}${note ? '，附了解释，不发' : ''}`); run.status = 'silent'; return; }
       if (reply.startsWith('DM:')) { const m = reply.match(/^DM:\s*(\S+)\s*[:：]?\s*([\s\S]*)$/); if (m) { await api('POST', '/dm', { to: m[1], text: m[2], hop: hopOut }); run.status = 'dm'; run.said = m[2].slice(0, 500); run.to = m[1]; return; } }
       if (/^APPROVAL[:：]/.test(reply)) {                                   // 两阶段（GATEWAY.md §2.1）：先向网关登记不可变 intent，再把 approval_body 原样交客厅，这轮到此结束；网关不可用就不发审批
         run.said = reply.slice(0, 500);
@@ -322,6 +324,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
   process.on('SIGINT', async () => { await sleep(); process.exit(0); }); process.on('SIGTERM', async () => { await sleep(); process.exit(0); });
   console.log(`[${room.name}] 适配器上线，runtime=${runtimeName}，客厅=${LR}${opts.dry ? '，dry-run' : ''}`);
   await refreshMembers();
+  for (let i = 0; i < 30; i++) { try { const m = await api('GET', '/members'); if (Array.isArray(m)) break; } catch {} await new Promise(r => setTimeout(r, 500)); }   // 客厅可能还在开门（systemd 一起拉起时 adapter 早 1 秒），最多等 15 秒
   await requestWake('human', '启动时看看有没有人找我');
   if (opts.once || opts.dry) { await sleep(); return; }
   const u = new URL('/events', LR);
