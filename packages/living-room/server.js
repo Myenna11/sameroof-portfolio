@@ -14,7 +14,7 @@ const { TokenStore } = require('./tokens');
 const { SlidingWindowLimiter, AuthFailureLimiter } = require('./rate-limit');
 const { PushClient, PushClientError } = require('./push-client');
 const roomsApi = require('./rooms-api');
-const { resolveHouseRoot } = require('@sameroof/adapters/lib/house-root');
+const { resolveHouseRoot } = require('@sameroof/house-root');
 
 const RESERVED = new Set(['system', 'all', 'everyone', 'house']);
 const MESSAGE_MAX = 8000;

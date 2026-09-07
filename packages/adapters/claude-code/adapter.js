@@ -4,7 +4,7 @@
 'use strict';
 const fs = require('fs'), path = require('path'), http = require('http'), { spawn } = require('child_process');
 const yaml = require('js-yaml');
-const { resolveHouseRoot } = require('../lib/house-root');
+const { resolveHouseRoot } = require('@sameroof/house-root');
 
 const HOUSE = resolveHouseRoot();
 const ROOM = process.argv[2] || '规划员';

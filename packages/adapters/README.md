@@ -4,13 +4,13 @@
 
 ## 房子在哪（house root）
 
-`lib/house-root.js` 的 `resolveHouseRoot()` 按序找含 `house.yaml` 的目录：
+`@sameroof/house-root` 的 `resolveHouseRoot()` 按序找含 `house.yaml` 的目录：
 
 1. 环境变量 `SAMEROOF_ROOT`（指向的目录必须有 `house.yaml`，否则报错）
 2. 从当前目录向上逐级找 `house.yaml`（git 式；服务的 WorkingDirectory 在仓库里就靠这条）
 3. 兜底 `~/.sameroof`
 
-三条都空就报错，把试过的路列出来。旧名 `SAMEROOF_HOUSE` 还认，stderr 提醒改名。
+三条都空就报错，把试过的路列出来。旧名 `SAMEROOF_HOUSE` 不再认（不留兼容期）。解析器在 `packages/house-root`。
 `lib/room.js` 懒解析：只有真开房间（`open`）时才找，纯函数测试不碰盘。living-room 的 `server.js` 也用这同一份。
 
 ## 例行（routines）

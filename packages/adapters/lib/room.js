@@ -2,7 +2,7 @@
 'use strict';
 const fs = require('fs'), path = require('path'), http = require('http');
 const yaml = require('js-yaml');
-const { resolveHouseRoot } = require('./house-root');
+const { resolveHouseRoot } = require('@sameroof/house-root');
 const memoryPlugin = require('@sameroof/plugin-memory');
 const cron = require('./cron');
 const LR = process.env.SAMEROOF_LR || 'http://127.0.0.1:8790';

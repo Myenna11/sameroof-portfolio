@@ -2,7 +2,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const fs = require('fs'), os = require('os'), path = require('path');
-const { resolveHouseRoot, findUp } = require('../lib/house-root');
+const { resolveHouseRoot, findUp } = require('..');
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'sameroof-root-'));
 const withHouse = dir => { fs.writeFileSync(path.join(dir, 'house.yaml'), 'name: t\n'); return dir; };
@@ -33,9 +33,7 @@ test('4. 三条路都没有：抛错并把三条路写清楚', () => {
     return true;
   });
 });
-test('5. 旧名 SAMEROOF_HOUSE 还认，但 SAMEROOF_ROOT 更优先', () => {
-  const a = withHouse(tmp()), b = withHouse(tmp());
-  assert.equal(resolveHouseRoot(tmp(), { SAMEROOF_HOUSE: a }), path.resolve(a));
-  assert.equal(resolveHouseRoot(tmp(), { SAMEROOF_ROOT: b, SAMEROOF_HOUSE: a }), path.resolve(b));
-  assert.throws(() => resolveHouseRoot(tmp(), { SAMEROOF_HOUSE: tmp() }), /SAMEROOF_HOUSE=.*没有 house\.yaml/);
+test('5. 旧名 SAMEROOF_HOUSE 不再认（不留兼容期）：只设它等于没设', () => {
+  const a = withHouse(tmp());
+  assert.throws(() => resolveHouseRoot(tmp(), { SAMEROOF_HOUSE: a, HOME: tmp() }), /找不到房子/);
 });

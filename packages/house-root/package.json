@@ -1,0 +1,11 @@
+{
+  "name": "@sameroof/house-root",
+  "version": "0.1.0",
+  "private": true,
+  "description": "同屋 · 房子根目录解析：SAMEROOF_ROOT > 向上找 house.yaml > ~/.sameroof",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "MIT"
+}

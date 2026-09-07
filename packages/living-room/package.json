@@ -12,8 +12,8 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@sameroof/adapters": "0.1.0",
     "better-sqlite3": "^13.0.3",
-    "js-yaml": "^5.4.1"
+    "js-yaml": "^5.4.1",
+    "@sameroof/house-root": "0.1.0"
   }
 }
