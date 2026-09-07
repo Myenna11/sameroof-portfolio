@@ -3,6 +3,7 @@
 const fs = require('fs'), path = require('path'), http = require('http');
 const yaml = require('js-yaml');
 const { resolveHouseRoot } = require('@sameroof/house-root');
+const { resolveExecutionConfig } = require('@sameroof/schema');
 const memoryPlugin = require('@sameroof/plugin-memory');
 const cron = require('./cron');
 const C = require('./context');                                          // 上下文拼装的纯函数：打分挑选、摘要帧、工具留壳
@@ -128,7 +129,7 @@ const atMs = r => (r.at_ms != null ? r.at_ms : Date.parse(r.at));
 const graceMs = r => (r.late_grace_ms != null ? r.late_grace_ms : DEFAULT_LATE_GRACE);
 const fmtAt = (ms, tz) => cron.parts(new Date(ms), tz).key.replace('T', ' ') + ' ' + tz;   // 给人看的：房子时区的 'YYYY-MM-DD HH:MM tz'
 function mergeRoutines(house, room, tz = 'UTC') {
-  const list = (o, where) => { const raw = ((o || {}).extensions || {})['dev.sameroof.routines'] || []; if (!Array.isArray(raw)) throw new Error(`${where} 的 routines 得是数组`);
+  const list = (o, where) => { const raw = Object.hasOwn(o || {}, 'routines') ? (o.routines || []) : (((o || {}).extensions || {})['dev.sameroof.routines'] || []); if (!Array.isArray(raw)) throw new Error(`${where} 的 routines 得是数组`);   // 核心字段 routines 优先，旧 extension 回退
     const seen = new Set(); return raw.map((r, i) => {
       if (!r || typeof r.id !== 'string' || !r.id) throw new Error(`${where} routines[${i}] 缺 id`);
       if (seen.has(r.id)) throw new Error(`${where} routines 里 id 重复：${r.id}`); seen.add(r.id);
@@ -171,11 +172,10 @@ async function run(roomName, runtimeName, think, opts = {}) {
   const R = open(roomName, { lr: opts.lr }); const { room, api, state, save, soul } = R; const lrBase = R.lrBase;
   const stop = opts.signal || null; let stopped = false;                       // opts.signal：abort 后关 SSE、清 timer、不再 pump，睡下，run() resolve（没给就照旧）
   // ---- 地基配置（先放 extensions.dev.sameroof.*，等审查员升核心字段）----
-  const ext = k => (((R.house.extensions || {})['dev.sameroof.' + k]) || {});
-  const rext = k => (((room.extensions || {})['dev.sameroof.' + k]) || {});
-  const limits = Object.assign({ run_timeout_ms: 180000, agent_hops: 6 }, ext('limits'), rext('limits'));
-  const deliverCfg = Object.assign({ human: 'after_turn', agent: 'after_turn', from: {} }, ext('deliver'), rext('deliver'),
-    { from: Object.assign({}, (ext('deliver').from || {}), (rext('deliver').from || {})) });
+  // deliver / limits 用审查员 Y2 的共同解析口（核心字段优先，旧 extensions.dev.sameroof.* 只作迁移回退）；routines 原始列表也核心优先，但仍过我们自己的 mergeRoutines（支持 W1.1 的 at，等 schema 对齐后再切到 resolveExecutionConfig）
+  const exec = resolveExecutionConfig(R.house, room);
+  const limits = exec.limits;
+  const deliverCfg = exec.deliver;
   const routines = mergeRoutines(R.house, room, R.tz); state.routines = state.routines || {};
   const routineById = id => routines.find(r => r.id === id);
   let members = [];
