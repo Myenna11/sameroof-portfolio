@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const YAML = require('yaml');
-const { validateHouse } = require('../schema');
+const { validateHouse, resolveExecutionConfig } = require('../schema');
 
 class LockError extends Error {
   constructor(code, message, details = []) {
@@ -91,6 +91,7 @@ function generateLock(rootInput) {
     }
     const runtime = room.value.runtime || house.defaults?.runtime;
     const plugins = room.value.plugins || house.defaults?.plugins || [];
+    const execution = resolveExecutionConfig(house, room.value);
     if (!runtime) throw new LockError('LOCK-RUNTIME-MISSING-001', '住户“' + room.value.id + '”没有可解析的 runtime。');
     runtimeIds.add(runtime);
     for (const id of plugins) pluginIds.add(id);
@@ -100,7 +101,10 @@ function generateLock(rootInput) {
       config_digest: sha256(fs.readFileSync(room.file)),
       species: room.value.species,
       runtime,
-      plugins: [...plugins].sort()
+      plugins: [...plugins].sort(),
+      deliver: execution.deliver,
+      limits: execution.limits,
+      routines: execution.routines
     });
   }
   const runtimes = [...runtimeIds].sort().map(id => component(root, id, 'packages/adapters/' + id));

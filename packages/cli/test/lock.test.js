@@ -27,11 +27,15 @@ defaults:
   plugins: [living-room]
   heartbeat: {enabled: true, mode: minimal, interval: adaptive, budget: {per_day: {requests: 12, tokens: 50000}, on_exceeded: passive}}
   context: {recent_messages: 20, recent_max_chars: 4000, memory_hits: 4, memory_recent: 3}
+  deliver: {human: after_turn, agent: inject, from: {维护者: interrupt}}
+  limits: {run_timeout_ms: 180000, agent_hops: 6}
   approve_timeout: 30m
   permissions: {living_room.send: allow}
 credentials:
   - {alias: shared-cheap, provider: zhipu, purpose: 测试}
 notify: {admin: 甲}
+routines:
+  - {id: morning, cron: "30 9 * * 1-5", prompt: 房子的早安}
 `);
   fs.writeFileSync(path.join(root, 'rooms', '甲', 'room.yaml'), `schema_version: 1
 id: resident_alpha_01
@@ -41,6 +45,11 @@ model: {provider: zhipu, id: glm-test, auth: {mode: broker, credential: shared-c
 runtime: pi
 plugins: [living-room]
 permissions: {living_room.send: allow}
+deliver: {agent: after_turn, from: {维护者: after_turn}}
+limits: {agent_hops: 2}
+routines:
+  - {id: morning, cron: "0 10 * * *", prompt: 房间的早安, quiet_hours: respect}
+  - {id: noon, cron: "0 12 * * *", prompt: 午安}
 `);
   return root;
 }
@@ -54,6 +63,12 @@ test('lock is deterministic, secret-free, and records concrete component digests
     assert.equal(first.lock_version, 1);
     assert.equal(first.components.runtimes[0].id, 'pi');
     assert.equal(first.components.plugins[0].version, '1.2.3');
+    assert.deepEqual(first.rooms[0].deliver, { human: 'after_turn', agent: 'after_turn', from: { 维护者: 'after_turn' } });
+    assert.deepEqual(first.rooms[0].limits, { run_timeout_ms: 180000, agent_hops: 2 });
+    assert.deepEqual(first.rooms[0].routines, [
+      { id: 'morning', cron: '0 10 * * *', prompt: '房间的早安', enabled: true, quiet_hours: 'respect' },
+      { id: 'noon', cron: '0 12 * * *', prompt: '午安', enabled: true, quiet_hours: 'ignore' }
+    ]);
     assert.deepEqual(first.credentials, [{ alias: 'shared-cheap', provider: 'zhipu', mode: 'broker' }]);
     assert.equal(JSON.stringify(first).includes('api_key'), false);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }

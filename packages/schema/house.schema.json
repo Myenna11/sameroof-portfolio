@@ -28,6 +28,8 @@
           "$ref": "https://sameroof.local/schema/room-v1.json#/$defs/context",
           "required": ["recent_messages", "recent_max_chars", "memory_hits", "memory_recent"]
         },
+        "deliver": { "$ref": "https://sameroof.local/schema/room-v1.json#/$defs/deliver" },
+        "limits": { "$ref": "https://sameroof.local/schema/room-v1.json#/$defs/limits" },
         "approve_timeout": { "type": "string", "pattern": "^[1-9][0-9]*(?:s|m|h|d)$" },
         "permissions": {
           "type": "object",
@@ -56,6 +58,7 @@
       "additionalProperties": false,
       "properties": { "admin": { "type": "string", "minLength": 1, "maxLength": 80 } }
     },
+    "routines": { "$ref": "https://sameroof.local/schema/room-v1.json#/$defs/routines" },
     "extensions": {
       "type": "object",
       "propertyNames": { "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z][a-z0-9-]*){2,}$" },

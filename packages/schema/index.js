@@ -14,6 +14,11 @@ const validateHouseShape = ajv.compile(houseSchema);
 
 const RESERVED_NAMES = new Set(['system', 'all', 'everyone', 'house']);
 const PERMISSION_RANK = { deny: 0, approve: 1, allow: 2 };
+const ROUTINE_ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
+const CRON_FIELDS = [
+  { name: '分', min: 0, max: 59 }, { name: '时', min: 0, max: 23 }, { name: '日', min: 1, max: 31 },
+  { name: '月', min: 1, max: 12 }, { name: '周', min: 0, max: 7 },
+];
 
 function normalizeName(value) {
   return String(value).normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -21,6 +26,55 @@ function normalizeName(value) {
 
 function issue(file, line, code, message_zh, severity = 'error') {
   return { file: path.resolve(file), line: line || 1, code, message_zh, severity };
+}
+
+function validateCronExpression(expr) {
+  if (typeof expr !== 'string') return '不是字符串';
+  const parts = expr.trim().split(/\s+/);
+  if (parts.length !== 5) return `要 5 段（分 时 日 月 周），给了 ${parts.length} 段`;
+  for (let index = 0; index < parts.length; index++) {
+    const field = CRON_FIELDS[index];
+    for (const part of parts[index].split(',')) {
+      const match = part.match(/^(\*|\d+(?:-\d+)?)(?:\/(\d+))?$/);
+      if (!match) return `${field.name}字段“${part}”看不懂`;
+      const step = match[2] ? Number(match[2]) : 1;
+      if (step < 1) return `${field.name}字段“${part}”步长得 ≥1`;
+      let start, end;
+      if (match[1] === '*') { start = field.min; end = field.max; }
+      else if (match[1].includes('-')) [start, end] = match[1].split('-').map(Number);
+      else { start = Number(match[1]); end = match[2] ? field.max : start; }
+      if (start < field.min || end > field.max || start > end) return `${field.name}字段“${part}”超出 ${field.min}-${field.max}`;
+    }
+  }
+  return null;
+}
+
+const legacyConfig = (value, key) => value?.extensions?.['dev.sameroof.' + key];
+const preferredConfig = (value, key) => Object.hasOwn(value || {}, key) ? value[key] : legacyConfig(value, key);
+
+function resolveExecutionConfig(house, room) {
+  const houseDeliver = preferredConfig(house?.defaults, 'deliver') || legacyConfig(house, 'deliver') || {};
+  const roomDeliver = preferredConfig(room, 'deliver') || {};
+  const deliver = {
+    human: roomDeliver.human || houseDeliver.human || 'after_turn',
+    agent: roomDeliver.agent || houseDeliver.agent || 'after_turn',
+    from: Object.fromEntries(Object.entries({ ...(houseDeliver.from || {}), ...(roomDeliver.from || {}) }).sort(([a], [b]) => a.localeCompare(b)))
+  };
+  const houseLimits = preferredConfig(house?.defaults, 'limits') || legacyConfig(house, 'limits') || {};
+  const roomLimits = preferredConfig(room, 'limits') || {};
+  const limits = {
+    run_timeout_ms: roomLimits.run_timeout_ms ?? houseLimits.run_timeout_ms ?? 180000,
+    agent_hops: roomLimits.agent_hops ?? houseLimits.agent_hops ?? 6
+  };
+  const routines = new Map();
+  for (const item of [...(preferredConfig(house, 'routines') || []), ...(preferredConfig(room, 'routines') || [])]) routines.set(item.id, {
+    id: item.id,
+    cron: item.cron,
+    prompt: item.prompt.trim(),
+    enabled: item.enabled !== false,
+    quiet_hours: item.quiet_hours === 'respect' ? 'respect' : 'ignore'
+  });
+  return { deliver, limits, routines: [...routines.values()] };
 }
 
 function pointerParts(pointer) {
@@ -104,7 +158,7 @@ function localRoomIssues(parsed, options = {}) {
   const room = parsed.value || {};
   const out = [];
   if (room.species === 'human') {
-    for (const key of ['model', 'heartbeat', 'plugins']) if (Object.hasOwn(room, key)) {
+    for (const key of ['model', 'heartbeat', 'plugins', 'routines']) if (Object.hasOwn(room, key)) {
       out.push(issue(parsed.file, lineFor(parsed, '', key), 'ROOM-HUMAN-001', '“' + room.name + '”是 human，不能配置 ' + key + '。'));
     }
   }
@@ -125,6 +179,35 @@ function localRoomIssues(parsed, options = {}) {
     if (!image.startsWith(roomDir + path.sep) || !fs.existsSync(image) || !fs.lstatSync(image).isFile()) {
       out.push(issue(parsed.file, lineFor(parsed, '/avatar', 'image'), 'ROOM-AVATAR-IMAGE-001', '头像 image 必须指向本房间内已存在的文件。'));
     }
+  }
+  out.push(...routineIssues('ROOM', parsed, room));
+  return out;
+}
+
+function effectiveRoutines(value) {
+  if (Object.hasOwn(value || {}, 'routines')) return { list: value.routines, pointer: '/routines' };
+  const legacy = value?.extensions?.['dev.sameroof.routines'];
+  return legacy === undefined ? { list: [], pointer: '/routines' } : { list: legacy, pointer: '/extensions/dev.sameroof.routines' };
+}
+
+function routineIssues(kind, parsed, value) {
+  const { list, pointer } = effectiveRoutines(value);
+  if (!Array.isArray(list)) return [issue(parsed.file, lineFor(parsed, pointer), kind + '-ROUTINES-001', 'routines 必须是数组。')];
+  const out = [], ids = new Set();
+  for (let index = 0; index < list.length; index++) {
+    const routine = list[index];
+    if (!routine || typeof routine !== 'object' || Array.isArray(routine)) continue;
+    const base = pointer + '/' + index;
+    if (typeof routine.id !== 'string' || !ROUTINE_ID_RE.test(routine.id)) {
+      out.push(issue(parsed.file, lineFor(parsed, base, 'id'), kind + '-ROUTINE-ID-001', 'routine id 必须以小写字母开头，只含小写字母、数字、_ 或 -，最长 64 字符。'));
+    } else if (ids.has(routine.id)) {
+      out.push(issue(parsed.file, lineFor(parsed, base, 'id'), kind + '-ROUTINE-ID-DUP-001', '同一处 routines 里的 id“' + routine.id + '”重复。'));
+    } else ids.add(routine.id);
+    if (typeof routine.prompt !== 'string' || !routine.prompt.trim()) {
+      out.push(issue(parsed.file, lineFor(parsed, base, 'prompt'), kind + '-ROUTINE-PROMPT-001', 'routine“' + (routine.id || index + 1) + '”的 prompt 不能为空。'));
+    }
+    const cronError = validateCronExpression(routine.cron);
+    if (cronError) out.push(issue(parsed.file, lineFor(parsed, base, 'cron'), kind + '-ROUTINE-CRON-001', 'routine“' + (routine.id || index + 1) + '”的 cron 非法：' + cronError + '。'));
   }
   return out;
 }
@@ -155,6 +238,7 @@ function validateHouse(dir, options = {}) {
     out.push(issue(houseFile, lineFor(houseParsed, '/defaults/heartbeat', 'on_exceeded'), 'HOUSE-HEARTBEAT-001', 'on_exceeded 应放在 defaults.heartbeat.budget 里面，与 per_day 同级。'));
   }
   out.push(...houseShape);
+  out.push(...routineIssues('HOUSE', houseParsed, house));
   const aliases = new Map();
   for (const cred of house.credentials || []) {
     if (aliases.has(cred.alias)) {
@@ -239,4 +323,4 @@ function validateHouse(dir, options = {}) {
   return deduped.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.code.localeCompare(b.code));
 }
 
-module.exports = { normalizeName, validateRoom, validateHouse, schemas: { room: roomSchema, house: houseSchema } };
+module.exports = { normalizeName, validateCronExpression, resolveExecutionConfig, validateRoom, validateHouse, schemas: { room: roomSchema, house: houseSchema } };
