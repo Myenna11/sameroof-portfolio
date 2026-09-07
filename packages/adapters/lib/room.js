@@ -6,6 +6,7 @@ const { resolveHouseRoot } = require('@sameroof/house-root');
 const memoryPlugin = require('@sameroof/plugin-memory');
 const cron = require('./cron');
 const C = require('./context');                                          // 上下文拼装的纯函数：打分挑选、摘要帧、工具留壳
+const gw = require('./gateway-client');
 const LR = process.env.SAMEROOF_LR || 'http://127.0.0.1:8790';
 const RUN = path.join(process.env.HOME || '/root', '.sameroof', 'run');
 let houseDir = null;                                                       // 懒解析：真开房间时才找 house.yaml，纯函数测试不碰盘
@@ -66,7 +67,7 @@ function open(roomName) {
   };
   const runsDir = path.join(houseRoot(), 'state', 'runs'); fs.mkdirSync(runsDir, { recursive: true });
   const recordRun = rec => { try { fs.appendFileSync(path.join(runsDir, `${room.id}.jsonl`), JSON.stringify(rec) + '\n'); } catch {}
-    const brief = (rec.lane === 'routine' && { said: '例行的事，说了一句', silent: '例行看过了，没什么要说' }[rec.status]) || { said: '说了一句', dm: '发了私信', approval: '请求了审批', silent: '看了看，没说话', error: '出错了', passive_budget: '预算用完，只看不说', passive_idle: '心跳，没事', nothing: '醒了，没人找', deferred: '有新话但没叫我', dry: 'dry-run' }[rec.status] || rec.status;
+    const brief = (rec.lane === 'routine' && { said: '例行的事，说了一句', silent: '例行看过了，没什么要说' }[rec.status]) || { said: '说了一句', dm: '发了私信', approval: '请求了审批', approval_invalid: 'APPROVAL 格式不对，没登记', gateway_unavailable: '网关不可用，审批没登记', approval_rejected: '客厅没收审批', silent: '看了看，没说话', error: '出错了', passive_budget: '预算用完，只看不说', passive_idle: '心跳，没事', nothing: '醒了，没人找', deferred: '有新话但没叫我', dry: 'dry-run' }[rec.status] || rec.status;
     const kind = rec.status === 'error' ? 'error' : (rec.model_calls ? 'model_call' : 'wake');
     api('POST', '/activity', { kind, text: `${room.name}：${brief}`, meta: { run_id: rec.id, reason: rec.reason, status: rec.status, ms: rec.ms, usage: rec.usage || null, model_calls: rec.model_calls || 0, error: rec.error || null } }).catch(() => {}); };
   const plugins = room.plugins || (house.defaults || {}).plugins || [];
@@ -75,6 +76,16 @@ function open(roomName) {
 }
 
 const byName = (id, members) => (members.find(m => m.id === id) || {}).name || id;
+// 收件箱一行：网关结果（kind=result，只投给申请住户）显示为 [网关结果 <status>] <text>，有下一步建议就附一句
+function renderInboxLine(m, selfId) {
+  const t = `[${String(m.ts || '').slice(11, 16)}] `;
+  if (m.kind === 'result') {
+    const meta = m.meta || {}; const next = meta.next || {};
+    const hint = next.kind && next.kind !== 'none' ? `（下一步建议：${next.kind}${next.path ? ' ' + next.path : ''}）` : '';
+    return `${t}[网关结果 ${meta.status || '?'}] ${m.text}${hint}`;
+  }
+  return `${t}${m.from}${m.kind === 'dm' ? '(私信给你)' : ''}${m.mentions && m.mentions.includes(selfId) ? '(叫了你)' : ''}：${m.text}`;
+}
 const DELIVER_MODES = ['interrupt', 'after_turn', 'inject'];
 const LANE = { human: 4, routine: 3, agent: 2, heartbeat: 1 };   // 车道优先级：人 > 例行 > agent > 心跳（例行是明写下的 standing order，压过 agent 闲聊；agent 的 pending 不丢，只是等一轮）
 const LANES = ['human', 'routine', 'agent', 'heartbeat'];
@@ -225,7 +236,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
         '- 一次可以只回一个人；几个人说了话，回的时候说清楚回的是谁。',
         '- 家里的人（human）直接 @ 了你，至少应一声，哪怕就一句。(静默) 是给没被叫的时候用的。',
         '- 不想让全家看见就私信：整条回复以 DM: 收件人 开头。',
-        '- 你只搬字，不能执行命令；要做高危动作请回 APPROVAL: <action> <参数>。',
+        '- 你只搬字，不能执行命令。要做高危动作（读写文件、跑命令），整条回复只写一行：APPROVAL: <action> <JSON 参数>，房子会登记到网关等人审批，结果以"网关结果"投回你的收件箱。例：APPROVAL: core.fs.write {"root_id":"own-room","path":"notes/today.md","content":"今天的记录…","encoding":"utf8","mode":"replace"}（动作有 core.fs.read / core.fs.write / core.exec；参数必须是严格 JSON 对象，键不重复，别夹别的字）。',
         R.memory ? '- 值得以后还记得的事，在回复末尾另起一行写 REMEMBER: 一句话（可多行）。房子会存下来，标记为你自己写的、未审。' : '',
         '- 你自己房间的钥匙（同样另起一行）：CONCERN: 一句话 记进惦记本；DONE: 一句话 划掉做完的；NOTE: 一句话 记在自己的小本上；' + (R.memory ? 'FORGET: 一句话 把记忆里对上的那条冷藏（不删）。' : ''),
         '',
@@ -240,7 +251,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
         `【为什么醒】${reason}`,
         remembered, recentCtx, dmCtx,
       ].filter(x => x !== '').join('\n');
-      const inboxText = '【你没读的客厅记录（按时间）】\n' + inbox.map(m => frame(m, 'short', `${m.kind === 'dm' ? '(私信给你)' : ''}${m.mentions && m.mentions.includes(room.id) ? '(叫了你)' : ''}`, 0)).join('\n');   // 未读不截断，只做工具留壳
+      const inboxText = '【你没读的客厅记录（按时间）】\n' + inbox.map(m => m.kind === 'result' ? renderInboxLine(m, room.id) : frame(m, 'short', `${m.kind === 'dm' ? '(私信给你)' : ''}${m.mentions && m.mentions.includes(room.id) ? '(叫了你)' : ''}`, 0)).join('\n');   // 未读不截断，只做工具留壳；网关结果单独渲染
       const user = wakeHead + '\n\n' + (routine ? `【例行】${routine.prompt}` + (inbox.length ? '\n\n' + inboxText : '') + '\n\n例行的事做完就说一句，没什么要说就回 (静默)。'
         : inbox.length ? inboxText + '\n\n看完决定：要不要说、对谁说。只回新的；上面"刚才的话"里已经有人回过的、你自己说过的，不要再回一遍。像家里人说话，不要列清单；没什么要说就回 (静默)。'
         : '心跳醒来。客厅没人叫你，但交接信里有惦记的事。要是确实该对家里人说一句就说，没有就回 (静默)。');
@@ -270,7 +281,16 @@ async function run(roomName, runtimeName, think, opts = {}) {
       if (inbox.length) { const a = await api('POST', '/inbox/ack', { ids: inbox.map(m => m.id) }); if (!a || typeof a.acked !== 'number') { run.ack_error = JSON.stringify(a).slice(0, 300); fs.writeSync(2, `[${room.name}] 标已读失败，下次会重复读到这些话：${run.ack_error}\n`); } }
       if (!reply || reply === '(静默)') { console.log(`[静默] 原始长度 ${String(reply || '').length}`); run.status = 'silent'; return; }
       if (reply.startsWith('DM:')) { const m = reply.match(/^DM:\s*(\S+)\s*[:：]?\s*([\s\S]*)$/); if (m) { await api('POST', '/dm', { to: m[1], text: m[2], hop: hopOut }); run.status = 'dm'; run.said = m[2].slice(0, 500); run.to = m[1]; return; } }
-      if (reply.startsWith('APPROVAL:')) { const [, action, ...rest] = reply.split(/\s+/); await api('POST', '/approval', { action, params: { raw: rest.join(' ') } }); run.status = 'approval'; run.said = reply.slice(0, 500); return; }
+      if (/^APPROVAL[:：]/.test(reply)) {                                   // 两阶段（GATEWAY.md §2.1）：先向网关登记不可变 intent，再把 approval_body 原样交客厅，这轮到此结束；网关不可用就不发审批
+        run.said = reply.slice(0, 500);
+        let intent; try { intent = gw.parseApprovalLine(reply); }
+        catch (e) { run.status = 'approval_invalid'; run.error = String(e.message).slice(0, 300); fs.writeSync(2, `[${room.name}] APPROVAL 格式不对（${run.error}），没登记：${reply.slice(0, 200).replace(/\n/g, ' ')}\n`); shift.push({ at: new Date().toISOString(), heard: inbox.map(m => `${m.from}：${m.text}`), said: '（你上一轮的 APPROVAL 格式不对：要 APPROVAL: <action> <JSON 参数>，没登记）' }); return; }
+        let reg; try { reg = await gw.registerIntent({ residentId: room.id, runId: run.id, action: intent.action, params: intent.params, ttl: 1800 }); }
+        catch (e) { run.status = 'gateway_unavailable'; run.error = `${e.code || 'GATEWAY-UNAVAILABLE'}: ${String(e.message).slice(0, 200)}`; fs.writeSync(2, `[${room.name}] 网关不可用，审批没登记（${run.error}）\n`); return; }
+        const a = await api('POST', '/approval', reg.approval_body);
+        if (!a || !a.approval_id) { run.status = 'approval_rejected'; run.error = '客厅没收审批：' + JSON.stringify(a).slice(0, 300); fs.writeSync(2, `[${room.name}] ${run.error}\n`); return; }
+        run.status = 'approval'; run.gateway_request_id = reg.request_id; run.approval_id = a.approval_id; run.action = intent.action;
+        console.log(`[${room.name} 审批] ${intent.action} → ${a.approval_id}（${reg.request_id}）`); return; }
       await api('POST', '/say', { text: reply, hop: hopOut }); console.log(`[${room.name} 说] ${reply.slice(0, 80)}`); run.status = 'said'; run.said = reply.slice(0, 500);
       shift.push({ at: new Date().toISOString(), heard: inbox.map(m => `${m.from}：${m.text}`), said: reply });
     } catch (e) {
@@ -310,6 +330,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
     res.on('end', () => setTimeout(sub, 3000)); }); req.on('error', () => setTimeout(sub, 5000)); req.end(); };
   function onMessage(m) {
     if (!m || m.type === 'activity' || m.from_id === room.id) return;
+    if (m.kind === 'result') { if (m.to_id === room.id) requestWake('human', '网关结果：' + ((m.meta || {}).status || '?'), 'interrupt'); return; }   // 网关结果：合同要求 human 车道醒（GATEWAY.md §3.3）
     if (!((m.mentions || []).includes(room.id) || m.kind === 'dm')) return;
     if (!memberById(m.from_id)) refreshMembers();                                   // 新面孔，下轮再认
     const human = isHuman(m.from_id); const who = byName(m.from_id, members);
@@ -354,4 +375,4 @@ async function run(roomName, runtimeName, think, opts = {}) {
     hb.reschedule();
   }
 }
-module.exports = { open, run, houseRoot, get HOUSE() { return houseRoot(); }, RUN, LANE, mergeRoutines, dueNow, countMissed };
+module.exports = { open, run, houseRoot, get HOUSE() { return houseRoot(); }, RUN, LANE, mergeRoutines, dueNow, countMissed, renderInboxLine, parseApprovalLine: gw.parseApprovalLine };
