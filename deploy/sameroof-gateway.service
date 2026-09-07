@@ -20,11 +20,15 @@ Environment=SAMEROOF_GATEWAY_STATE_DIR=/var/lib/sameroof-gateway
 Environment=SAMEROOF_GATEWAY_RUN_DIR=/run/sameroof-gateway
 Environment=SAMEROOF_GATEWAY_SOCKET=/run/sameroof-gateway/gateway.sock
 Environment=SAMEROOF_GATEWAY_SERVICE_TOKEN=/var/lib/sameroof-gateway/living-room.token
+# 客厅在本机 loopback 的端口（决定流轮询 / 结果投回）
+Environment=SAMEROOF_LIVING_ROOM_PORT=8790
 
 StateDirectory=sameroof-gateway
 StateDirectoryMode=0700
 RuntimeDirectory=sameroof-gateway
 RuntimeDirectoryMode=0750
+# adapter token 只存在 /run/sameroof-gateway/tokens 里（库里只有 hash）；重启不清空，否则每次重启都得重新签发
+RuntimeDirectoryPreserve=yes
 
 NoNewPrivileges=yes
 PrivateTmp=yes
@@ -46,12 +50,16 @@ SystemCallArchitectures=native
 CapabilityBoundingSet=
 AmbientCapabilities=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# 房子的工作树在 /root/sameroof，ProtectHome 之下看不见；按路径绑进 /srv/sameroof，让 unit 里的 /srv/sameroof 路径照常成立。
+# 整棵树只读，只有 rooms/ 可写（own-room 能力）。
+BindReadOnlyPaths=/root/sameroof:/srv/sameroof
+BindPaths=/root/sameroof/rooms:/srv/sameroof/rooms
 # Built-in own-room capability. Keep house policy immutable to the gateway process.
 ReadWritePaths=/srv/sameroof/rooms
 ReadOnlyPaths=/srv/sameroof/house.yaml /srv/sameroof/house.lock
 # Any additional project mounts require a systemd drop-in listing each exact path
 # with ReadWritePaths= or ReadOnlyPaths= to match the reviewed gateway mount entry.
-InaccessiblePaths=/var/lib/sameroof-broker /var/lib/sameroof-living-room
+InaccessiblePaths=-/var/lib/sameroof-broker -/var/lib/sameroof-living-room
 
 [Install]
 WantedBy=multi-user.target

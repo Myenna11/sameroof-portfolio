@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+if [ "$(id -u)" -ne 0 ]; then
+  echo "sameroof-gateway 控制面必须由 root 调用；网关服务本身以 sameroof-gateway 用户运行。" >&2
+  exit 1
+fi
+exec /usr/sbin/runuser -u sameroof-gateway -- env \
+  HOME=/var/lib/sameroof-gateway \
+  SAMEROOF_ROOT=/srv/sameroof \
+  SAMEROOF_GATEWAY_STATE_DIR=/var/lib/sameroof-gateway \
+  SAMEROOF_GATEWAY_RUN_DIR=/run/sameroof-gateway \
+  SAMEROOF_GATEWAY_SOCKET=/run/sameroof-gateway/gateway.sock \
+  /usr/bin/node /opt/sameroof/gateway/gatewayctl.js "$@"

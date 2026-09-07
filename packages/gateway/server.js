@@ -193,6 +193,23 @@ function assertUnprivileged(uid = typeof process.getuid === 'function' ? process
   return true;
 }
 
+// adapter token 的签发/吊销是模块级函数：服务进程和控制面（gatewayctl）共用，控制面只开 State，不构造 Gateway（构造会把 executing 的 intent 标成 failed_unknown）。
+function issueAdapterToken(state, tokensDir, residentId) {
+  if (!RESIDENT_ID.test(residentId)) throw new GatewayError(400, 'GW-AUTH-DENIED', 'resident_id 不合法。');
+  fs.mkdirSync(tokensDir, { recursive: true, mode: 0o700 });
+  const token = 'srg_' + crypto.randomBytes(32).toString('base64url');
+  const file = path.join(tokensDir, residentId);
+  fs.writeFileSync(file, token + '\n', { mode: 0o640 }); fs.chmodSync(file, 0o640);
+  state.db.prepare("INSERT INTO adapter_tokens(resident_id,token_hash,status,created_at) VALUES(?,?,?,?) ON CONFLICT(resident_id) DO UPDATE SET token_hash=excluded.token_hash,status='active',created_at=excluded.created_at").run(residentId, sha(Buffer.from(token, 'utf8')), 'active', now());
+  return { resident_id: residentId, token, file };
+}
+function revokeAdapterToken(state, tokensDir, residentId) {
+  if (!RESIDENT_ID.test(residentId)) throw new GatewayError(400, 'GW-AUTH-DENIED', 'resident_id 不合法。');
+  const changed = state.db.prepare("UPDATE adapter_tokens SET status='revoked' WHERE resident_id=? AND status='active'").run(residentId).changes;
+  try { fs.unlinkSync(path.join(tokensDir, residentId)); } catch {}
+  return { resident_id: residentId, revoked: changed === 1 };
+}
+
 class Gateway {
   constructor(options = {}) {
     this.houseDir = path.resolve(options.houseDir || process.env.SAMEROOF_ROOT || process.cwd());
@@ -232,21 +249,8 @@ class Gateway {
     } catch { this.sandboxAvailable = false; }
     return this.sandboxAvailable;
   }
-  issueAdapterToken(residentId) {
-    if (!RESIDENT_ID.test(residentId)) throw new GatewayError(400, 'GW-AUTH-DENIED', 'resident_id 不合法。');
-    fs.mkdirSync(this.adapterTokensDir, { recursive: true, mode: 0o700 });
-    const token = 'srg_' + crypto.randomBytes(32).toString('base64url');
-    const file = path.join(this.adapterTokensDir, residentId);
-    fs.writeFileSync(file, token + '\n', { mode: 0o640 }); fs.chmodSync(file, 0o640);
-    this.state.db.prepare("INSERT INTO adapter_tokens(resident_id,token_hash,status,created_at) VALUES(?,?,?,?) ON CONFLICT(resident_id) DO UPDATE SET token_hash=excluded.token_hash,status='active',created_at=excluded.created_at").run(residentId, sha(Buffer.from(token, 'utf8')), 'active', now());
-    return { resident_id: residentId, token, file };
-  }
-  revokeAdapterToken(residentId) {
-    if (!RESIDENT_ID.test(residentId)) throw new GatewayError(400, 'GW-AUTH-DENIED', 'resident_id 不合法。');
-    const changed = this.state.db.prepare("UPDATE adapter_tokens SET status='revoked' WHERE resident_id=? AND status='active'").run(residentId).changes;
-    try { fs.unlinkSync(path.join(this.adapterTokensDir, residentId)); } catch {}
-    return { resident_id: residentId, revoked: changed === 1 };
-  }
+  issueAdapterToken(residentId) { return issueAdapterToken(this.state, this.adapterTokensDir, residentId); }
+  revokeAdapterToken(residentId) { return revokeAdapterToken(this.state, this.adapterTokensDir, residentId); }
   tokenSubject(secret) {
     if (!secret || typeof secret !== 'string') return null;
     const row = this.state.db.prepare("SELECT resident_id FROM adapter_tokens WHERE token_hash=? AND status='active'").get(sha(Buffer.from(secret, 'utf8')));
@@ -658,5 +662,5 @@ class Gateway {
 }
 
 function createGateway(options = {}) { return new Gateway(options); }
-if (require.main === module) { try { assertUnprivileged(); const gateway = createGateway(); gateway.listen().then(() => { gateway.startApprovalLoop(); console.log('sameroof gateway listening ' + gateway.socketPath); }).catch(error => { console.error(error.code || error); process.exitCode = 1; }); } catch (error) { console.error(error.code || error); process.exitCode = error.status || 1; } }
-module.exports = { Gateway, GatewayError, createGateway, normalizeRelative, protectedPath, resultShell, assertUnprivileged, minimalRuntimeArgs, FS_READ_MAX };
+if (require.main === module) { try { assertUnprivileged(); const gateway = createGateway({ livingRoomSocketPath: process.env.SAMEROOF_LIVING_ROOM_SOCKET || undefined, livingRoomPort: Number(process.env.SAMEROOF_LIVING_ROOM_PORT || process.env.SAMEROOF_PORT || 8790) }); gateway.listen().then(() => { gateway.startApprovalLoop(); console.log('sameroof gateway listening ' + gateway.socketPath); }).catch(error => { console.error(error.code || error); process.exitCode = 1; }); } catch (error) { console.error(error.code || error); process.exitCode = error.status || 1; } }
+module.exports = { Gateway, GatewayError, State, issueAdapterToken, revokeAdapterToken, createGateway, normalizeRelative, protectedPath, resultShell, assertUnprivileged, minimalRuntimeArgs, FS_READ_MAX };
