@@ -1,0 +1,7 @@
+{
+  "name": "@sameroof/plugin-blackboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "同屋插件：黑板（占位，目前只有 README）",
+  "license": "MIT"
+}
