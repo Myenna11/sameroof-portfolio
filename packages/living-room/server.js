@@ -453,7 +453,11 @@ function createLivingRoom(options = {}) {
         insResult.run(requestId, row.id, receivedAt);
         db.prepare('UPDATE approvals SET used=1 WHERE id=?').run(approval.id);
       })();
-      emitActivity({ kind: 'note', actor_id: approval.resident_id, text: '网关执行 ' + approval.action + '：' + body.status, meta: { gateway_request_id: requestId, approval_id: approval.id, status: body.status } });
+      // 公共 activity 摘要（实现员 K5 的缝）：只有 status/coverage/next，不带内容、不带路径细节；只在首次投递发（上面 duplicate 已早返回）
+      const cov = redactValue(body.coverage) || {}; const done = Array.isArray(cov.completed) ? cov.completed.length : null, want = Array.isArray(cov.requested) ? cov.requested.length : null;
+      const covBrief = [cov.executor, done !== null && want !== null ? `${done}/${want}` : null, cov.sandbox === 'unavailable' ? '沙箱不可用' : null].filter(Boolean).join('·');
+      emitActivity({ kind: 'approval_result', actor_id: approval.resident_id, text: '🧾 ' + (byId.get(approval.resident_id)?.name || approval.resident_id) + ' 的 ' + approval.action + ' 已执行：' + body.status + (covBrief ? '（' + covBrief + '）' : ''),
+        meta: { approval_id: approval.id, gateway_request_id: requestId, resident_id: approval.resident_id, executed: true, status: body.status, coverage: { executor: cov.executor, sandbox: cov.sandbox, network: cov.network, requested: want, completed: done }, next: redactValue(body.next) } });
       return writeJson(res, 200, { message_id: row.id, request_id: requestId, received_at: receivedAt, delivered_to: approval.resident_id, duplicate: false });
     }
     throw new HttpError(404, 'ROUTE-NOT-FOUND', '没这个门。');
