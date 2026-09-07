@@ -298,6 +298,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
           if (/^\s*PIN(\s|[:：])/i.test(l)) {                               // 黑板（W7）：钉 → POST /tasks；改 → PATCH /tasks/:id。失败不炸整轮，记 run.pin_error
             const pin = BB.parsePin(l, { tz: R.tz }); run.directives.push({ k: 'PIN', t: l.trim().slice(0, 200) });
             if (!pin) { run.pin_error = (run.pin_error ? run.pin_error + '；' : '') + `看不懂：${l.trim().slice(0, 80)}`; fs.writeSync(2, `[${room.name} 黑板] PIN 看不懂，没登记：${l.trim().slice(0, 80)}\n`); continue; }
+            if (pin.due_error) { run.pin_error = (run.pin_error ? run.pin_error + '；' : '') + `到期看不懂，照钉没带到期：${pin.due_error.slice(0, 60)}`; fs.writeSync(2, `[${room.name} 黑板] 到期看不懂（${pin.due_error.slice(0, 60)}），照钉不带到期\n`); }
             try {
               const origin = [...inbox].reverse().find(m0 => m0.kind === 'dm' || (m0.mentions && m0.mentions.includes(room.id))) || inbox[inbox.length - 1];
               const r = pin.op === 'pin' ? await api('POST', '/tasks', { title: pin.title, accept: pin.accept, owner: pin.owner || 'me', due_at: pin.due_at, due_cron: pin.due_cron, ...(origin ? { origin_message_id: origin.id } : {}) })

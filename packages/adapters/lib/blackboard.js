@@ -55,7 +55,7 @@ function buildRoutine(r, where, tz = 'UTC') {
 // 钉：  PIN: <标题> | 验收: <accept> | 给: <owner> | 到期: <ISO 或 五段 cron>     （只有标题必填；| 段可选、顺序无关；给: 缺省 = 自己）
 // 改：  PIN <task_id>: doing | done <结果> | blocked <原因> | drop <理由>        （drop → dropped；open 也认，用来拉回来）
 // 到期：含空格且五段 → due_cron；否则 → due_at（不带时区按房子 tz，转成带 Z 的 ISO 交给客厅）
-// 回 { op:'pin', title, accept?, owner?, due_at?, due_cron? } / { op:'update', id, state, text? } / null（不是 PIN 行，或格式不对、到期看不懂）
+// 回 { op:'pin', title, accept?, owner?, due_at?, due_cron? } / { op:'update', id, state, text? } / null（不是 PIN 行，或格式不对）；到期看不懂时照钉、带 due_error
 const TASK_ID_RE = /^task_[a-z0-9]{6,20}$/i;
 const UPDATE_STATES = { doing: 'doing', done: 'done', blocked: 'blocked', drop: 'dropped', dropped: 'dropped', open: 'open' };
 const PIN_KEYS = { '验收': 'accept', 'accept': 'accept', '给': 'owner', 'owner': 'owner', 'to': 'owner', '到期': 'due', 'due': 'due', 'at': 'due' };
@@ -84,7 +84,7 @@ function parsePin(line, opts = {}) {
     const kv = seg.match(/^([^:：]+)[:：]\s*([\s\S]*)$/); const key = kv && PIN_KEYS[kv[1].trim().toLowerCase()];
     if (!key) return null;                                                 // 认不得的段：整行不算（别把"| 随手一句"当标题的一部分吞掉）
     const val = kv[2].trim(); if (!val) continue;
-    if (key === 'due') { const d = parseDue(val, tz); if (!d) return null; Object.assign(out, d); }
+    if (key === 'due') { const d = parseDue(val, tz); if (!d) out.due_error = val; else Object.assign(out, d); }   // 到期看不懂：照钉，不带到期，把原文留给 room.js 记一句（事别丢）
     else out[key] = val;
   }
   return out;

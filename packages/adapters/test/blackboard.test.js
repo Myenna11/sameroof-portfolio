@@ -89,3 +89,9 @@ test('parseAt / buildRoutine 从 room.js 抽出来后行为不变', () => {
   assert.throws(() => buildRoutine({ id: 'a', cron: '* * * * *', at: '2026-09-08', prompt: 'p' }, 'x', TZ), /二选一/);
   assert.throws(() => buildRoutine({ id: 'a', cron: '* * * * *', prompt: 'p', late_grace: '1h' }, 'x', TZ), /late_grace 只对 at 型/);
 });
+
+test('到期看不懂：照钉不带到期，带 due_error', () => {
+  const { parsePin } = require('../lib/blackboard');
+  const r = parsePin('PIN: 写周报 | 到期: 下周三吧', { tz: 'Asia/Shanghai' });
+  assert.equal(r.op, 'pin'); assert.equal(r.title, '写周报'); assert.equal(r.due_at, undefined); assert.equal(r.due_cron, undefined); assert.equal(r.due_error, '下周三吧');
+});
