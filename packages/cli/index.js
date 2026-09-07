@@ -11,6 +11,7 @@ function usage() {
   console.log('  explain <名字>                                            每个生效值来自哪');
   console.log('  pair <名字> [--api 地址] [--rotate]                        手机配对链接');
   console.log('  status                                                    服务与锁');
+  console.log('  doctor [--queued-minutes N] [--json]                       检查疑似丢消息');
   console.log('  backup [--out 目录] [--plain]                              行李打包（默认 gpg 加密，口令从 stdin）');
   console.log('  restore <文件> [--into 目录]                               解到空目录');
   console.log('  lock [--check]                                            生成/校验 house.lock');
@@ -29,6 +30,7 @@ function flags(argv) {
 
 function run(argv = process.argv.slice(2)) {
   const command = argv.shift();
+  if (command === 'doctor') { const { opts } = parseOpts(argv); const report = require('./doctor').runDoctor(opts); process.exitCode = report.ok ? 0 : 1; return process.exitCode; }
   const { cmds } = require('./house');
   if (command && cmds[command]) { const { args, opts } = parseOpts(argv); cmds[command](args, opts); return process.exitCode || 0; }
   if (command !== 'lock') { usage(); return command ? 2 : 0; }
