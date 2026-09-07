@@ -35,6 +35,14 @@ extensions:
 
 测试：`cd packages/adapters && npm test`。
 
+## 接缝怎么走通（seam-walk）
+
+`test/seam-walk.test.js` 就是 W6 每晚要走的那条链，用真 `run()` + 真客厅（`createLivingRoom`）走一遍：甲在客厅 @乙 → 乙醒（human 车道）→ 回 `APPROVAL:` → 适配器向网关登记 intent → `approval_body` 原样交客厅 → 甲同意/拒绝 → 网关拉 `/internal/gateway/approval-results` 决定流、把结果投回 `/internal/gateway/results` → 客厅 `kind=result` 只投乙 → 乙被 interrupt 叫醒、看到 `[网关结果 succeeded|denied]` → 说一句；最后把网关 socket 关掉，确认 fail closed（runs 记 `gateway_unavailable`，客厅没有新审批）。
+
+网关是假的：`test/fixtures/mock-gateway.js`，零依赖 node http 听 Unix socket，只做 GATEWAY.md §2.1 的 `POST /v1/intents`（token、Idempotency-Key、JCS 摘要、同 request_id 幂等）和 §3.2/§3.3 的消费端（`pump(livingRoomBase, serviceToken)`：拉决定流、**不真执行**、直接投 `status: succeeded|denied`、`coverage.executor: 'mock'`）。G1 真网关出来后换真网关只改 socket 路径（`SAMEROOF_GATEWAY_SOCK` / `SAMEROOF_GATEWAY_TOKEN_FILE`），断言不动。
+
+跑法：`cd packages/adapters && node --test test/seam-walk.test.js`（房子、客厅、网关、token 都在临时目录，不碰真房子；`run()` 用 `opts.signal` 收尾、`opts.lr` 指临时客厅）。
+
 ## 上下文怎么拼（context）
 
 每次醒来 `room.js` 拼 `system` + `user`，纯函数在 `lib/context.js`。三条规则：

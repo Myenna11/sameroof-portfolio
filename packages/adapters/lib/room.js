@@ -21,7 +21,8 @@ function resolveRoomDir(nameOrId) {
   }
   throw new Error(`找不到房间：${nameOrId}`);
 }
-function open(roomName) {
+function open(roomName, openOpts = {}) {
+  const lrBase = openOpts.lr || LR;                                          // 客厅地址：调用方给的优先（测试起临时客厅），否则 SAMEROOF_LR / 默认
   const roomDir = resolveRoomDir(roomName);
   const room = yaml.load(fs.readFileSync(path.join(roomDir, 'room.yaml'), 'utf8'));
   const house = yaml.load(fs.readFileSync(path.join(houseRoot(), 'house.yaml'), 'utf8'));
@@ -34,7 +35,7 @@ function open(roomName) {
   const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf8')) : { last_sleep: null, last_wake: null, wakes_today: 0, day: null };
   const save = () => fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
   const api = (method, p, body) => new Promise((resolve, reject) => {
-    const u = new URL(p, LR);
+    const u = new URL(p, lrBase);
     const req = http.request({ hostname: u.hostname, port: u.port, path: u.pathname + u.search, method, headers: { authorization: `Bearer ${lrToken}`, 'content-type': 'application/json' } }, res => { let s = ''; res.on('data', c => s += c); res.on('end', () => { try { resolve(JSON.parse(s)); } catch { resolve(s); } }); });
     req.on('error', reject); if (body) req.write(JSON.stringify(body)); req.end();
   });
@@ -72,7 +73,7 @@ function open(roomName) {
     api('POST', '/activity', { kind, text: `${room.name}：${brief}`, meta: { run_id: rec.id, reason: rec.reason, status: rec.status, ms: rec.ms, usage: rec.usage || null, model_calls: rec.model_calls || 0, error: rec.error || null } }).catch(() => {}); };
   const plugins = room.plugins || (house.defaults || {}).plugins || [];
   const memory = plugins.includes('memory') ? memoryPlugin.open(roomDir) : null;
-  return { room, house, roomDir, api, houseTime, inQuiet, budgetLeft, state, save, soul, memory, keys, recordRun, tz };
+  return { room, house, roomDir, api, houseTime, inQuiet, budgetLeft, state, save, soul, memory, keys, recordRun, tz, lrBase };
 }
 
 const byName = (id, members) => (members.find(m => m.id === id) || {}).name || id;
@@ -124,7 +125,8 @@ const abortable = (promise, signal) => new Promise((resolve, reject) => {
 });
 
 async function run(roomName, runtimeName, think, opts = {}) {
-  const R = open(roomName); const { room, api, state, save, soul } = R;
+  const R = open(roomName, { lr: opts.lr }); const { room, api, state, save, soul } = R; const lrBase = R.lrBase;
+  const stop = opts.signal || null; let stopped = false;                       // opts.signal：abort 后关 SSE、清 timer、不再 pump，睡下，run() resolve（没给就照旧）
   // ---- 地基配置（先放 extensions.dev.sameroof.*，等审查员升核心字段）----
   const ext = k => (((R.house.extensions || {})['dev.sameroof.' + k]) || {});
   const rext = k => (((room.extensions || {})['dev.sameroof.' + k]) || {});
@@ -150,6 +152,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
   let hb = null;                                                    // 心跳调度句柄
   const shift = [];                                                 // 这一班发生的事，睡前写进交接信
   function requestWake(lane, reason, deliver = 'after_turn') {
+    if (stopped) return Promise.resolve();
     if (active) {
       if (lane === 'routine') { if (!pending.routine.includes(reason)) pending.routine.push(reason); } else pending[lane] = pending[lane] || reason;
       if (deliver === 'interrupt' && LANE[lane] >= LANE[active.lane]) {
@@ -160,7 +163,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
     }
     return runOnce(lane, reason);
   }
-  function pump() { for (const lane of LANES) { const r = lane === 'routine' ? pending.routine.shift() : pending[lane]; if (!r) continue; if (lane !== 'routine') pending[lane] = null; runOnce(lane, r); return; } }
+  function pump() { if (stopped) return; for (const lane of LANES) { const r = lane === 'routine' ? pending.routine.shift() : pending[lane]; if (!r) continue; if (lane !== 'routine') pending[lane] = null; runOnce(lane, r); return; } }
   async function runOnce(lane, reason) {
     const ctrl = new AbortController();
     active = { lane, reason, ctrl, startedAt: Date.now() };
@@ -324,15 +327,17 @@ async function run(roomName, runtimeName, think, opts = {}) {
   let sleeping = false;
   const sleep = async () => { if (sleeping) return; sleeping = true; try { await writeHandover(); } catch (e) { fs.writeSync(2, `[交接信失败] ${e.message}\n`); } try { if (R.memory && R.memory.compact) R.memory.compact(); } catch (e) { fs.writeSync(2, `[记忆 compact 失败] ${e.message}\n`); } /* 睡前把追加的 update 行折平 */ state.last_sleep = new Date().toISOString(); save(); try { await api('POST', '/activity', { kind: 'sleep', text: `${room.name}：睡了，交接信已写`, meta: { wakes_today: state.wakes_today } }); } catch {} };
   process.on('SIGINT', async () => { await sleep(); process.exit(0); }); process.on('SIGTERM', async () => { await sleep(); process.exit(0); });
-  console.log(`[${room.name}] 适配器上线，runtime=${runtimeName}，客厅=${LR}${opts.dry ? '，dry-run' : ''}`);
+  console.log(`[${room.name}] 适配器上线，runtime=${runtimeName}，客厅=${lrBase}${opts.dry ? '，dry-run' : ''}`);
   await refreshMembers();
   for (let i = 0; i < 30; i++) { try { const m = await api('GET', '/members'); if (Array.isArray(m)) break; } catch {} await new Promise(r => setTimeout(r, 500)); }   // 客厅可能还在开门（systemd 一起拉起时 adapter 早 1 秒），最多等 15 秒
   await requestWake('human', '启动时看看有没有人找我');
   if (opts.once || opts.dry) { await sleep(); return; }
-  const u = new URL('/events', LR);
-  const sub = () => { const req = http.request({ hostname: u.hostname, port: u.port, path: u.pathname, headers: { authorization: `Bearer ${JSON.parse(fs.readFileSync(path.join(RUN, 'living-room-tokens.json'), 'utf8'))[room.id]}` } }, res => {
+  const u = new URL('/events', lrBase);
+  let sseReq = null, sseTimer = null, rtTimer = null;
+  const resub = ms => { if (!stopped) sseTimer = setTimeout(sub, ms); };
+  const sub = () => { if (stopped) return; const req = sseReq = http.request({ hostname: u.hostname, port: u.port, path: u.pathname, headers: { authorization: `Bearer ${JSON.parse(fs.readFileSync(path.join(RUN, 'living-room-tokens.json'), 'utf8'))[room.id]}` } }, res => {
     let buf = ''; res.on('data', c => { buf += c; let i; while ((i = buf.indexOf('\n\n')) >= 0) { const chunk = buf.slice(0, i); buf = buf.slice(i + 2); if (!chunk.startsWith('data:')) continue; try { const m = JSON.parse(chunk.slice(5)); onMessage(m); } catch {} } });
-    res.on('end', () => setTimeout(sub, 3000)); }); req.on('error', () => setTimeout(sub, 5000)); req.end(); };
+    res.on('end', () => resub(3000)); }); req.on('error', () => resub(5000)); req.end(); };
   function onMessage(m) {
     if (!m || m.type === 'activity' || m.from_id === room.id) return;
     if (m.kind === 'result') { if (m.to_id === room.id) requestWake('human', '网关结果：' + ((m.meta || {}).status || '?'), 'interrupt'); return; }   // 网关结果：合同要求 human 车道醒（GATEWAY.md §3.3）
@@ -360,7 +365,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
         requestWake('routine', `routine:${r.id}`);
       }
     };
-    rtick(); const rt = setInterval(rtick, 30000); if (rt.unref) rt.unref();
+    rtick(); rtTimer = setInterval(rtick, 30000); if (rtTimer.unref) rtTimer.unref();
     console.log(`[${room.name}] 例行 ${routines.length} 条：${routines.map(r => `${r.id}(${r.cron}${r.enabled ? '' : '，停用'})`).join('、')}`);
   }
   // ---- 心跳：下次 = 上次醒来（任何原因）+ 间隔；连续空心跳才退避（×1.5 到 4 小时），有真事就归位；忙则推迟不叠加；安静时段跳过 ----
@@ -376,8 +381,17 @@ async function run(roomName, runtimeName, think, opts = {}) {
     hb = {
       reschedule() { clearTimeout(timer); const wait = Math.max(5000, due() - Date.now()); timer = setTimeout(tick, wait); if (timer.unref) timer.unref(); },
       backoff(empty) { iv = empty ? Math.min(iv * 1.5, 4 * 3600000) : base; },
+      stop() { clearTimeout(timer); },
     };
     hb.reschedule();
   }
+  if (!stop) return;                                                    // 没给 signal：照旧——循环靠 SSE 连接与 timer 活着，只在 SIGINT/SIGTERM 时睡
+  await new Promise(resolve => { if (stop.aborted) return resolve(); stop.addEventListener('abort', resolve, { once: true }); });
+  stopped = true;
+  clearTimeout(sseTimer); if (sseReq) sseReq.destroy();
+  if (rtTimer) clearInterval(rtTimer); if (hb) hb.stop();
+  if (active) active.ctrl.abort(new Error('适配器停下了'));
+  for (let i = 0; i < 100 && active; i++) await new Promise(r => setTimeout(r, 50));   // 等正在跑的这一轮收尾（最多 5 秒）
+  await sleep();
 }
 module.exports = { open, run, houseRoot, get HOUSE() { return houseRoot(); }, RUN, LANE, mergeRoutines, dueNow, countMissed, renderInboxLine, parseApprovalLine: gw.parseApprovalLine };
