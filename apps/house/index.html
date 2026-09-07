@@ -322,6 +322,7 @@ function approvalCard(m,meta){
  if(prior){prior.els.push(card);if(prior.decision)state.decision=prior.decision;cards[meta.approval_id]=prior;state.settled=prior.settled;if(state.decision)state.settled(state.decision)}
  else cards[meta.approval_id]=state;
  const st=cards[meta.approval_id];
+ st.m=m;st.meta=meta;
  if(!st.decision){
   if(me&&me.species==='human'){
    const btns=document.createElement('div');btns.className='apbtns';
@@ -333,6 +334,19 @@ function approvalCard(m,meta){
   }else{const w=document.createElement('div');w.className='apm';w.textContent='等维护者决定…';card.appendChild(w)}
  }else st.settled(st.decision);
  return card}
+
+/* ===== 审批卡下半截：网关执行结果（K5，缝见 2026-09-07 留条；activity meta.executed===true） ===== */
+const EXEC_ST={succeeded:['🧾 已执行：成了','var(--accent)'],failed:['🧾 已执行：没办成','var(--red)'],denied:['🧾 被拒，没执行','var(--mute)'],expired:['🧾 过期了，没执行','var(--amber)'],timed_out:['🧾 已执行：超时了','var(--red)'],failed_unknown:['🧾 执行结果不明','var(--red)']};
+function approvalExecuted(meta){
+ const st=cards[meta.approval_id];if(!st)return;
+ if(meta.status&&meta.status!=='succeeded'&&meta.status!=='denied'&&me&&me.species==='human'&&st.m&&!pending.has(meta.approval_id)){
+  pending.set(meta.approval_id,{m:st.m,meta:st.meta});renderPending()}   // 没办成的顶回"等你拿主意"
+ const [txt,color]=EXEC_ST[meta.status]||['🧾 已执行：'+String(meta.status||'?'),'var(--mute)'];
+ const cov=meta.coverage&&meta.coverage.completed!=null?(' · '+String(meta.coverage.executor||'')+' '+meta.coverage.completed+'/'+(meta.coverage.requested!=null?meta.coverage.requested:'?')):'';
+ const nxt=meta.next?(' · 下一步：'+(typeof meta.next==='string'?meta.next:(meta.next.kind||'有'))):'';
+ for(const el of st.els){if(el.querySelector('.apexec'))continue;
+  const r=document.createElement('div');r.className='apdone apexec';r.style.color=color;
+  r.textContent=txt+cov+nxt;el.appendChild(r)}}
 
 /* ===== 审批·等维护者 ===== */
 function renderPending(){
@@ -409,6 +423,7 @@ async function loadFeed(){
 function feedPush(a,defer){
  if(feedSeen.has(a.seq))return;feedSeen.add(a.seq);
  if(a.seq>lastActSeq)lastActSeq=a.seq;
+ if(a.kind==='approval_result'&&a.meta&&a.meta.executed)approvalExecuted(a.meta);
  feedItems.push(a);
  if(feedOldest===null||a.seq<feedOldest)feedOldest=a.seq;
  if(!defer)renderFeed()}
