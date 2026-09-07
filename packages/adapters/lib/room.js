@@ -318,7 +318,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
     fs.appendFileSync(path.join(hoDir, 'history.md'), fs.readFileSync(hoPath, 'utf8') + '\n---\n');
   }
   let sleeping = false;
-  const sleep = async () => { if (sleeping) return; sleeping = true; try { await writeHandover(); } catch (e) { fs.writeSync(2, `[交接信失败] ${e.message}\n`); } state.last_sleep = new Date().toISOString(); save(); try { await api('POST', '/activity', { kind: 'sleep', text: `${room.name}：睡了，交接信已写`, meta: { wakes_today: state.wakes_today } }); } catch {} };
+  const sleep = async () => { if (sleeping) return; sleeping = true; try { await writeHandover(); } catch (e) { fs.writeSync(2, `[交接信失败] ${e.message}\n`); } try { if (R.memory && R.memory.compact) R.memory.compact(); } catch (e) { fs.writeSync(2, `[记忆 compact 失败] ${e.message}\n`); } /* 睡前把追加的 update 行折平 */ state.last_sleep = new Date().toISOString(); save(); try { await api('POST', '/activity', { kind: 'sleep', text: `${room.name}：睡了，交接信已写`, meta: { wakes_today: state.wakes_today } }); } catch {} };
   process.on('SIGINT', async () => { await sleep(); process.exit(0); }); process.on('SIGTERM', async () => { await sleep(); process.exit(0); });
   console.log(`[${room.name}] 适配器上线，runtime=${runtimeName}，客厅=${LR}${opts.dry ? '，dry-run' : ''}`);
   await refreshMembers();
