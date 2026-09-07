@@ -119,6 +119,9 @@ class BrokerStore {
     `);
     const credentialColumns = this.db.prepare('PRAGMA table_info(credentials)').all().map(row => row.name);
     if (!credentialColumns.includes('path_style')) this.db.exec("ALTER TABLE credentials ADD COLUMN path_style TEXT NOT NULL DEFAULT 'auto'");
+    const ledgerColumns = this.db.prepare('PRAGMA table_info(ledger)').all().map(row => row.name);   // V2-1B：上游的 cache 用量透传进账本（旧库自动补列）
+    if (!ledgerColumns.includes('cached_tokens')) this.db.exec('ALTER TABLE ledger ADD COLUMN cached_tokens INTEGER');
+    if (!ledgerColumns.includes('cache_creation_tokens')) this.db.exec('ALTER TABLE ledger ADD COLUMN cache_creation_tokens INTEGER');
     if (this.enableMock && this.db.prepare('SELECT 1 FROM credentials WHERE alias=?').get(MOCK_ALIAS)) {
       this.db.close();
       throw new BrokerError(409, 'CRED-BUILTIN-CONFLICT', '数据库里已有名为 mock-cheap 的旧真凭证；启用内建 mock 前请先人工改名或移除，broker 不会静默覆盖。');
@@ -310,8 +313,9 @@ class BrokerStore {
       const actual = input.actualTokens == null ? row.reserve_tokens : Math.max(0, Math.ceil(Number(input.actualTokens)));
       const adjustment = actual - row.reserve_tokens;
       this.db.prepare('UPDATE tokens SET used_tokens=MAX(0, used_tokens+?) WHERE id=?').run(adjustment, row.token_id);
-      this.db.prepare(`UPDATE ledger SET actual_tokens=?, estimated=?, status=?, http_status=?, latency_ms=? WHERE request_id=?`)
-        .run(actual, input.estimated === false ? 0 : 1, String(input.status || 'complete'), input.httpStatus || null, input.latencyMs || null, requestId);
+      const cacheInt = v => (v == null || !Number.isFinite(Number(v))) ? null : Math.max(0, Math.round(Number(v)));
+      this.db.prepare(`UPDATE ledger SET actual_tokens=?, estimated=?, status=?, http_status=?, latency_ms=?, cached_tokens=?, cache_creation_tokens=? WHERE request_id=?`)
+        .run(actual, input.estimated === false ? 0 : 1, String(input.status || 'complete'), input.httpStatus || null, input.latencyMs || null, cacheInt(input.cachedTokens), cacheInt(input.cacheCreationTokens), requestId);
       return this.db.prepare('SELECT * FROM ledger WHERE request_id=?').get(requestId);
     })();
   }

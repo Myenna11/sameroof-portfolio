@@ -127,6 +127,8 @@ test('mock-cheap 在进程内返回显眼的确定性回声，不访问网络并
     assert.equal(ledger[0].status, 'mock_complete');
     assert.equal(ledger[0].estimated, 0);
     assert.equal(ledger[0].actual_tokens, response.json.usage.total_tokens);
+    assert.equal(ledger[0].cached_tokens, 0);
+    assert.equal(response.json.usage.cached_tokens, 0);
 
     const wrongModel = await requestSocket(broker.socketPath, {
       path: '/v1/chat/completions', method: 'POST', token: issued.secret,
@@ -222,7 +224,7 @@ test('数据面只认住户 token、限制 model/purpose，并逐请求结算', 
         id: 'chatcmpl-test',
         object: 'chat.completion',
         choices: [{ index: 0, message: { role: 'assistant', content: '我在。' }, finish_reason: 'stop' }],
-        usage: { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7 }
+        usage: { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7, prompt_tokens_details: { cached_tokens: 2 } }
       });
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(response);
@@ -298,6 +300,11 @@ test('数据面只认住户 token、限制 model/purpose，并逐请求结算', 
     assert.equal(ledger[0].actual_tokens, 7);
     assert.equal(ledger[0].estimated, 0);
     assert.equal(ledger[0].status, 'complete');
+    assert.equal(ledger[0].cached_tokens, 2);                                  // V2-1B：上游的 cache 用量记进账本
+    assert.equal(ledger[0].cache_creation_tokens, 0);
+    assert.equal(ok.json.usage.cached_tokens, 2);                              // 也归一化到回给适配器的 usage 里
+    assert.equal(ok.json.usage.cache_creation_tokens, 0);
+    assert.equal(ok.json.usage.prompt_tokens_details.cached_tokens, 2);        // 上游原字段不动
   } finally {
     await broker.close();
     store.close();

@@ -59,6 +59,17 @@ function estimateReservation(body) {
   return Math.max(1, input + Math.min(output, 200000));
 }
 
+// V2-1B：上游 usage 里的 cache 用量。OpenAI 兼容格式在 prompt_tokens_details.cached_tokens，Anthropic 格式在 cache_read_input_tokens / cache_creation_input_tokens。
+// 归一成 usage.cached_tokens / usage.cache_creation_tokens 两个字段：有 usage 但上游没给 → 0；连 usage 都没有 → null（不记）。
+function cacheUsage(usage) {
+  if (!usage || typeof usage !== 'object') return null;
+  const num = value => (value == null || !Number.isFinite(Number(value))) ? null : Number(value);
+  const details = (usage.prompt_tokens_details && typeof usage.prompt_tokens_details === 'object') ? usage.prompt_tokens_details : {};
+  const cached = num(usage.cache_read_input_tokens) ?? num(details.cached_tokens) ?? num(usage.cached_tokens) ?? 0;
+  const creation = num(usage.cache_creation_input_tokens) ?? num(details.cache_creation_tokens) ?? num(usage.cache_creation_tokens) ?? 0;
+  return { cached_tokens: cached, cache_creation_tokens: creation };
+}
+
 function mockCompletion(body) {
   const model = String(body.model || '');
   if (!/^mock(?:[-./]|$)/.test(model)) throw new BrokerError(400, 'MOCK-MODEL-INVALID', 'mock-cheap 只接受名称以 mock 开头的假模型，避免把它误当真人模型。');
@@ -74,7 +85,7 @@ function mockCompletion(body) {
     created: 0,
     model,
     choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
-    usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens },
+    usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens, cached_tokens: 0, cache_creation_tokens: 0 },
     sameroof_mock: true
   };
 }
@@ -182,6 +193,8 @@ function createBroker(options = {}) {
         }
         store.settle(reservation.requestId, {
           actualTokens: mocked.usage.total_tokens,
+          cachedTokens: 0,
+          cacheCreationTokens: 0,
           estimated: false,
           status: 'mock_complete',
           httpStatus: 200,
@@ -215,13 +228,21 @@ function createBroker(options = {}) {
       }
       const contentType = upstreamResponse.headers.get('content-type') || 'application/json; charset=utf-8';
       let usage = null;
+      let cache = null;
       try {
         const parsed = JSON.parse(responseBuffer.toString('utf8'));
         usage = parsed.usage || null;
+        cache = cacheUsage(usage);
+        if (cache && (usage.cached_tokens !== cache.cached_tokens || usage.cache_creation_tokens !== cache.cache_creation_tokens)) {   // 归一化后的 cache 字段放回 usage，适配器不用认两种格式
+          Object.assign(usage, cache);
+          responseBuffer = Buffer.from(JSON.stringify(parsed), 'utf8');
+        }
       } catch {}
       const actualTokens = usage && Number.isFinite(Number(usage.total_tokens)) ? Number(usage.total_tokens) : null;
       store.settle(reservation.requestId, {
         actualTokens,
+        cachedTokens: cache ? cache.cached_tokens : null,
+        cacheCreationTokens: cache ? cache.cache_creation_tokens : null,
         estimated: actualTokens == null,
         status: upstreamResponse.ok ? 'complete' : 'upstream_error',
         httpStatus: upstreamResponse.status,
