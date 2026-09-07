@@ -1,0 +1,57 @@
+[Unit]
+Description=同屋 能力执行网关
+After=network.target sameroof-living-room.service
+Requires=sameroof-living-room.service
+
+[Service]
+Type=simple
+User=sameroof-gateway
+Group=sameroof
+WorkingDirectory=/opt/sameroof/gateway
+ExecStart=/usr/bin/node /opt/sameroof/gateway/server.js
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+UMask=0077
+
+Environment=HOME=/var/lib/sameroof-gateway
+Environment=SAMEROOF_ROOT=/srv/sameroof
+Environment=SAMEROOF_GATEWAY_STATE_DIR=/var/lib/sameroof-gateway
+Environment=SAMEROOF_GATEWAY_RUN_DIR=/run/sameroof-gateway
+Environment=SAMEROOF_GATEWAY_SOCKET=/run/sameroof-gateway/gateway.sock
+Environment=SAMEROOF_GATEWAY_SERVICE_TOKEN=/var/lib/sameroof-gateway/living-room.token
+
+StateDirectory=sameroof-gateway
+StateDirectoryMode=0700
+RuntimeDirectory=sameroof-gateway
+RuntimeDirectoryMode=0750
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Built-in own-room capability. Keep house policy immutable to the gateway process.
+ReadWritePaths=/srv/sameroof/rooms
+ReadOnlyPaths=/srv/sameroof/house.yaml /srv/sameroof/house.lock
+# Any additional project mounts require a systemd drop-in listing each exact path
+# with ReadWritePaths= or ReadOnlyPaths= to match the reviewed gateway mount entry.
+InaccessiblePaths=/var/lib/sameroof-broker /var/lib/sameroof-living-room
+
+[Install]
+WantedBy=multi-user.target

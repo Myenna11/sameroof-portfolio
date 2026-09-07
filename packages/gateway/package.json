@@ -1,0 +1,15 @@
+{
+  "name": "@sameroof/gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "同屋能力执行网关：审批绑定、路径规则文件动作与 bwrap shell",
+  "main": "server.js",
+  "bin": { "sameroof-gateway": "server.js" },
+  "scripts": { "test": "node --test" },
+  "dependencies": {
+    "@sameroof/jcs": "0.1.0",
+    "@sameroof/schema": "0.1.0",
+    "better-sqlite3": "^13.0.3",
+    "js-yaml": "^5.4.1"
+  }
+}

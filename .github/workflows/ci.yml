@@ -1,0 +1,36 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NODE_ENV: test
+      SAMEROOF_CI_MOCK_ONLY: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install workspace dependencies
+        run: npm ci
+      - name: Install sandbox runtime
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Schema
+        run: npm test -w @sameroof/schema
+      - name: Broker (mock upstream only)
+        run: npm test -w @sameroof/broker
+      - name: CLI
+        run: npm test -w @sameroof/cli
+      - name: Living room
+        run: npm test -w @sameroof/living-room
+      - name: Gateway (includes real bwrap isolation)
+        run: npm test -w @sameroof/gateway
