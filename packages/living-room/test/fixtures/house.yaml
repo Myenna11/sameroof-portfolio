@@ -1,0 +1,24 @@
+# 测试用最小合法 house.yaml（结构照根目录 house.yaml 裁；凭证只是假别名，没有真东西）
+schema_version: 1
+name: 测试小家
+timezone: Asia/Shanghai
+schedule:
+  quiet_hours: "01:00-09:00"
+defaults:
+  runtime: pi
+  plugins: [memory, living-room]
+  heartbeat: {enabled: true, mode: minimal, interval: adaptive, budget: {per_day: {requests: 12, tokens: 50000}, on_exceeded: passive}}
+  context: {recent_messages: 20, recent_max_chars: 4000, memory_hits: 4, memory_recent: 3}
+  approve_timeout: 30m
+  permissions:
+    core.exec: approve
+    core.fs.write: approve
+    living_room.send: allow
+    forum.post_public: approve
+    memory.write.self: allow
+    memory.write.other: deny
+    money.spend: deny
+credentials:
+  - {alias: test-cheap, provider: zhipu, purpose: 测试用假上游}
+notify:
+  admin: 甲

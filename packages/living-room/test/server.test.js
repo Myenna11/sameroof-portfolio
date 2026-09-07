@@ -39,6 +39,7 @@ function fixture() {
   fs.writeFileSync(path.join(root, 'rooms', '甲', 'room.yaml'), 'id: resident_alpha_01\nname: 甲\nspecies: human\n');
   fs.writeFileSync(path.join(root, 'rooms', '乙', 'room.yaml'), 'id: resident_beta_01\nname: 乙\nspecies: agent\n');
   fs.writeFileSync(path.join(root, 'apps', 'house', 'index.html'), '<!doctype html>');
+  fs.copyFileSync(path.join(__dirname, 'fixtures', 'house.yaml'), path.join(root, 'house.yaml'));
   return root;
 }
 
