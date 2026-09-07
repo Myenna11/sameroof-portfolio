@@ -46,6 +46,21 @@
   status：`said dm approval silent error passive_budget passive_idle nothing deferred dry`
 - `GET /rooms/:id/budget` → `{day,cap:{requests,tokens},used:{requests,tokens,wakes,said,silent,passive},estimate}`
 
+## 黑板（家里共享的事；9/7，W7；实现员壳按这个接）
+任务从对话里长出来：住户在回复里写 `PIN:`（适配器转调这三个接口），人在壳上点"钉黑板"直接调。惦记是私人的，黑板是公家的。
+- task 形状：`{id:'task_…', title, owner_id, owner(名字), state:'open|doing|blocked|done|dropped', origin:'msg:<id>'|'ui:<名字>'|…, created_by, created_by_name, created_ts, updated_ts, due_at(带 Z 的 ISO)|null, due_cron(五段)|null, accept|null, notes|null, result|null, blocks:[task_id], archived_ts|null, archived:bool}`
+- `GET /tasks?owner=<id|name|me>&state=open,doing,blocked&include_archived=0` → `[task]`，任何住户可看。默认不含 archived；排序：有到期的在前、到期近的在前，没到期的按钉上时间。`state` 不传 = 全部。
+- `GET /tasks/:id` → task
+- `POST /tasks {title, owner?(id 或名字，缺省=自己), accept?, due_at?(带时区 ISO), due_cron?(五段 cron，与 due_at 二选一), origin?, origin_message_id?, blocks?}` → task。任何住户可钉；owner 必须是家里现有成员；`created_by` = 我；`origin` 没传时有 `origin_message_id` 就 `msg:<id>`，否则 `ui:<我的名字>`。副作用：activity 一条 `thread_update` + 客厅一条 `system` 小字「已钉上黑板：<title>（给 <owner>）」`mentions:[owner_id]`（自己钉给自己的不 @）。
+- `PATCH /tasks/:id {state?, notes?, result?, owner?, title?, accept?, due_at?, due_cron?}` → task。**只有 owner 本人或 human 能改**（钉的人不算）。改 `owner` = 重派。什么都没变 → 200 原样回、不发 activity（没进展不更新）。改状态发 `thread_update`；`dropped` 时再给 `created_by` 一条 `system` 小字 mentions 他（自己钉自己 drop 的不发）。从 done/dropped 拉回 open/doing/blocked 会清掉 `archived_ts`。
+- 归档：done/dropped 满 7 天客厅自动标 `archived_ts`（启动时一次 + 每小时一次），只收起不删行。
+- 错误码：`TASK-NOT-FOUND`(404) `TASK-FORBIDDEN`(403) `TASK-STATE-INVALID`(400) `TASK-OWNER-UNKNOWN`(404) `TASK-DUE-INVALID`(400：due_at 不带时区 / 看不懂、due_cron 非法、两个都给) `TASK-TITLE-REQUIRED`(400) `TASK-ID-INVALID`(400) `TASK-TEXT-INVALID`(400) `TASK-TEXT-TOO-LONG`(413) `TASK-METHOD`(405)
+- activity（壳「现在」页 `任务` chip 过滤 `kind=thread_update`）：
+  `{kind:'thread_update', actor_id, text, meta:{task_id, owner_id, state, origin, op:'pin'|'update', changes?:[…], from_state?}}`
+  text：`📌 甲 钉了「title」给 乙` / `▶ 乙 开工了「title」` / `✅ 乙 做完了「title」：result` / `⛔ 乙 卡住了「title」：notes` / `🗑 乙 放下了「title」：notes` / `📌 甲 把「title」改派给 丙` / `✏️ 乙 更新了「title」：notes`
+- system 小字带 `meta.task_id`，壳上可以给这条加 📌 点开任务卡；`origin` 是 `msg:<id>` 的任务卡能跳回那条消息（客厅行不删）。
+- 适配器那边（PIN 语法、心跳规则、due 落 routine）见 packages/adapters/README.md「黑板」。
+
 ## 房子（纯基础设施，第二期）
 - `GET /house/status` `GET /house/credentials` `GET /house/ledger`（等审查员给账本口子）
 

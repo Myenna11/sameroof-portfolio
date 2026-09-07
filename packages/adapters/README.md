@@ -40,6 +40,43 @@ extensions:
 
 测试：`cd packages/adapters && npm test`。
 
+## 黑板（blackboard，W7）
+
+家里共享的一块软木板，钉的是"事"。**本体在客厅**（`packages/living-room/blackboard-api.js`：`tasks` 表 + `GET/POST /tasks`、`PATCH /tasks/:id`，接口见 docs/API.md「黑板」）；适配器这边只做三件事，纯函数在 `lib/blackboard.js`（`parsePin` / `syncTaskRoutines` / `renderTaskLines`），`room.js` 接线。惦记本（CONCERN/DONE）是私人的，黑板是公家的，两件心事分开放。
+
+### PIN 指令（回复里另起一行，单前缀，靠第二个 token 是不是 task id 区分）
+
+```
+PIN: 把 demo 家的 README 写了 | 验收: 前十分钟两条路 | 给: 度量员 | 到期: 2026-09-08 21:00
+PIN task_mf1abc123: doing
+PIN task_mf1abc123: done 写好了在 README.en.md
+PIN task_mf1abc123: blocked 等 W5
+PIN task_mf1abc123: drop 不该我做
+```
+
+- 钉：只有 `PIN:` 后第一段（标题）必填；`验收:` / `给:` / `到期:` 用 `|` 分隔、可选、顺序无关；`给:` 缺省 = 自己（owner 必须是家里现有成员，客厅查）。认不得的段 → 整行不算。
+- `到期:`：五段 cron（`0 9 * * 1-5`）→ `due_cron`（周期）；否则当 ISO 时间 → `due_at`（一次性）。**时间由房子供给**：带 `Z` / `±HH:MM` 按写的算，不带时区按房子 tz（房间 `schedule.timezone` 非 inherit 时按房间），适配器转成带 Z 的 ISO 再交客厅（客厅只收带时区的）。看不懂 → 整行不算，`run.pin_error` 记一句。
+- 改状态：`doing / done <结果> / blocked <原因> / drop <理由>`（`drop` → `dropped`；`open` 也认，用来拉回来）。`done` 后面的字进 `result`，其它进 `notes`。只有主人本人和人能改，客厅 403 时同样记 `run.pin_error`，不炸整轮。
+- `DONE:` 继续只划惦记本，不动黑板。
+- 钉的时候 `origin` 自动带上这轮 inbox 里最后一条叫我的消息（`msg:<id>`，壳上能跳回去）；没有就客厅填 `ui:<名字>`。
+- 没进展不更新：notes / activity 不为写而写。
+
+### 心跳与醒来
+
+- **每次醒来**（不只心跳）先拉 `GET /tasks?owner=me&state=open,doing,blocked`；非空就在 user 侧 `【为什么醒】` 后面加一段 `【黑板上我的事】`（≤10 条，客厅已按到期近的在前、无到期的按钉上时间排）：
+  `- [doing] task_… 标题（验收: …；到期: 2026-09-08 21:00 Asia/Shanghai）`
+- 心跳 `passive_idle`（不叫模型）的条件改成：inbox 空 **且** 惦记本空 **且** 黑板上我的 open/doing/blocked 也空。黑板有事就该醒来看一眼。
+- 客厅拉不到 `/tasks`（老客厅 404、没开门）→ stderr 一行，这轮当没有，不影响醒来。
+- `state/runs/<id>.jsonl` 每轮多 `tasks:[{id,state,title}]`；PIN 行进 `directives`（k='PIN'），失败进 `pin_error`。
+
+### due 落 routine（routine 是闹钟，黑板是事）
+
+- 启动时、每次拉到任务列表后、以及这轮有 PIN 成功后再拉一次，`syncTaskRoutines(routines, tasks, tz)` 把有 `due_at`/`due_cron` 且 `state ∈ open/doing` 的任务同步进 `routines`（run() 里那个 tick 每 30 秒遍历的数组，现在是可变的）：
+  `{ id: 'task:<task.id>', at | cron, prompt: '黑板任务到期：「<title>」，看一眼该做什么、说一句。', enabled: true, quiet_hours: 'ignore', late_grace: '24h'（仅 at 型） }`
+- 任务 done / dropped / blocked / archived / 从列表里消失 → 对应 `task:` routine 移除（`state.routines['task:…']` 一并清掉）。到期改了 → 同 id 换新，一次性的 `done` 标记清掉让它能再响。
+- 校验走 `buildRoutine(raw, where, tz)`（`mergeRoutines` 也用它，规则一致）。tick 逻辑本身没动；`rtick` 现在无论启动时有没有例行都装着。
+- 到点以 `routine` 车道醒，提示 `【例行】黑板任务到期：「…」…`，user 侧同时有 `【黑板上我的事】`，模型看到的是事，不只是闹钟。
+
 ## 接缝怎么走通（seam-walk）
 
 `test/seam-walk.test.js` 就是 W6 每晚要走的那条链，用真 `run()` + 真客厅（`createLivingRoom`）走一遍：甲在客厅 @乙 → 乙醒（human 车道）→ 回 `APPROVAL:` → 适配器向网关登记 intent → `approval_body` 原样交客厅 → 甲同意/拒绝 → 网关拉 `/internal/gateway/approval-results` 决定流、把结果投回 `/internal/gateway/results` → 客厅 `kind=result` 只投乙 → 乙被 interrupt 叫醒、看到 `[网关结果 succeeded|denied]` → 说一句；最后把网关 socket 关掉，确认 fail closed（runs 记 `gateway_unavailable`，客厅没有新审批）。
