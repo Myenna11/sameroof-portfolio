@@ -8,6 +8,20 @@ const Database = require('better-sqlite3');
 
 const SAFE_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,119}$/;
 const SAFE_RESIDENT = /^resident_[a-z0-9][a-z0-9_-]{2,95}$/;
+const MOCK_ALIAS = 'mock-cheap';
+const MOCK_CREDENTIAL = Object.freeze({
+  alias: MOCK_ALIAS,
+  provider: 'mock',
+  base_url: 'builtin://mock',
+  auth_header: 'authorization',
+  auth_scheme: '',
+  path_style: 'builtin',
+  active: 1,
+  version: 1,
+  created_at: 'built-in',
+  rotated_at: null,
+  builtin: true
+});
 
 function nowIso() {
   return new Date().toISOString();
@@ -40,6 +54,7 @@ class BrokerError extends Error {
 
 class BrokerStore {
   constructor(options = {}) {
+    this.enableMock = options.enableMock === undefined ? process.env.SAMEROOF_ENABLE_MOCK === '1' : options.enableMock === true;
     this.home = path.resolve(options.home || process.env.SAMEROOF_HOME || path.join(os.homedir(), '.sameroof'));
     this.runDir = path.resolve(options.runDir || process.env.SAMEROOF_RUN_DIR || path.join(this.home, 'run'));
     this.stateDir = path.resolve(options.stateDir || process.env.SAMEROOF_STATE_DIR || path.join(this.home, 'state'));
@@ -104,6 +119,10 @@ class BrokerStore {
     `);
     const credentialColumns = this.db.prepare('PRAGMA table_info(credentials)').all().map(row => row.name);
     if (!credentialColumns.includes('path_style')) this.db.exec("ALTER TABLE credentials ADD COLUMN path_style TEXT NOT NULL DEFAULT 'auto'");
+    if (this.enableMock && this.db.prepare('SELECT 1 FROM credentials WHERE alias=?').get(MOCK_ALIAS)) {
+      this.db.close();
+      throw new BrokerError(409, 'CRED-BUILTIN-CONFLICT', '数据库里已有名为 mock-cheap 的旧真凭证；启用内建 mock 前请先人工改名或移除，broker 不会静默覆盖。');
+    }
   }
 
   close() {
@@ -119,6 +138,7 @@ class BrokerStore {
     const authScheme = input.authScheme === undefined ? (authHeader === 'x-api-key' ? '' : 'Bearer') : String(input.authScheme);
     const pathStyle = String(input.pathStyle || 'auto');
     if (!SAFE_NAME.test(alias)) throw new BrokerError(400, 'CRED-ALIAS-INVALID', '凭证别名格式不合法。');
+    if (alias === MOCK_ALIAS) throw new BrokerError(400, 'CRED-BUILTIN-RESERVED', 'mock-cheap 是 broker 内建假上游，不接受真凭证。只在 demo/CI 设置 SAMEROOF_ENABLE_MOCK=1。');
     if (!SAFE_NAME.test(provider)) throw new BrokerError(400, 'CRED-PROVIDER-INVALID', 'provider 格式不合法。');
     if (!apiKey) throw new BrokerError(400, 'CRED-KEY-EMPTY', '真凭证不能为空。');
     if (/[\r\n]/.test(apiKey) || /[\r\n]/.test(authScheme)) throw new BrokerError(400, 'CRED-HEADER-INJECTION', '凭证和认证 scheme 不能包含换行。');
@@ -143,11 +163,22 @@ class BrokerStore {
   }
 
   listCredentials() {
-    return this.db.prepare('SELECT alias,provider,base_url,auth_header,path_style,active,version,created_at,rotated_at FROM credentials ORDER BY alias').all()
+    const rows = this.db.prepare('SELECT alias,provider,base_url,auth_header,path_style,active,version,created_at,rotated_at FROM credentials ORDER BY alias').all()
       .map(row => ({ ...row, active: Boolean(row.active) }));
+    return this.enableMock ? [{ ...MOCK_CREDENTIAL, active: true }, ...rows] : rows;
+  }
+
+  credentialForAlias(alias) {
+    if (alias === MOCK_ALIAS) return this.enableMock ? { ...MOCK_CREDENTIAL } : null;
+    return this.db.prepare('SELECT * FROM credentials WHERE alias=? AND active=1').get(alias) || null;
+  }
+
+  rejectBuiltInMutation(alias) {
+    if (alias === MOCK_ALIAS) throw new BrokerError(400, 'CRED-BUILTIN-IMMUTABLE', 'mock-cheap 是内建假上游，不能改路径、轮换或吊销；关闭 SAMEROOF_ENABLE_MOCK 即停用。');
   }
 
   setCredentialPathStyle(alias, pathStyle) {
+    this.rejectBuiltInMutation(alias);
     if (!['auto', 'openai', 'bare'].includes(pathStyle)) throw new BrokerError(400, 'CRED-PATH-STYLE-INVALID', 'path_style 只能是 auto、openai 或 bare。');
     const result = this.db.prepare('UPDATE credentials SET path_style=? WHERE alias=?').run(pathStyle, alias);
     if (!result.changes) throw new BrokerError(404, 'CRED-NOT-FOUND', '没有这个凭证别名。');
@@ -155,6 +186,7 @@ class BrokerStore {
   }
 
   rotateCredential(alias, apiKey) {
+    this.rejectBuiltInMutation(alias);
     if (!apiKey) throw new BrokerError(400, 'CRED-KEY-EMPTY', '新凭证不能为空。');
     const ts = nowIso();
     const result = this.db.prepare('UPDATE credentials SET api_key=?, active=1, version=version+1, rotated_at=? WHERE alias=?').run(apiKey, ts, alias);
@@ -163,6 +195,7 @@ class BrokerStore {
   }
 
   revokeCredential(alias) {
+    this.rejectBuiltInMutation(alias);
     const result = this.db.prepare('UPDATE credentials SET active=0 WHERE alias=?').run(alias);
     if (!result.changes) throw new BrokerError(404, 'CRED-NOT-FOUND', '没有这个凭证别名。');
     return { alias, active: false };
@@ -177,8 +210,8 @@ class BrokerStore {
     if (!credentials.length) throw new BrokerError(400, 'TOKEN-CREDENTIALS-EMPTY', 'token 至少绑定一个凭证别名。');
     if (!models.length) throw new BrokerError(400, 'TOKEN-MODELS-EMPTY', 'token 至少绑定一个 model。');
     for (const alias of credentials) {
-      const credential = this.db.prepare('SELECT active FROM credentials WHERE alias=?').get(alias);
-      if (!credential || !credential.active) throw new BrokerError(400, 'TOKEN-CREDENTIAL-INVALID', '凭证“' + alias + '”不存在或已吊销。');
+      const credential = this.credentialForAlias(alias);
+      if (!credential) throw new BrokerError(400, 'TOKEN-CREDENTIAL-INVALID', '凭证“' + alias + '”不存在、已吊销或未启用。');
     }
     const ttlSeconds = Math.max(60, Math.min(Number(input.ttlSeconds || 43200), 604800));
     const maxRequests = input.maxRequests == null ? null : Number(input.maxRequests);
@@ -252,7 +285,7 @@ class BrokerStore {
       const credentialAlias = input.credential || (token.credential_aliases.length === 1 ? token.credential_aliases[0] : null);
       if (!credentialAlias) throw new BrokerError(400, 'CRED-SELECT-REQUIRED', 'token 绑定了多个凭证，请明确选择。');
       if (!token.credential_aliases.includes(credentialAlias)) throw new BrokerError(403, 'CRED-NOT-ALLOWED', '这个 token 不能使用该凭证。');
-      const credential = this.db.prepare('SELECT * FROM credentials WHERE alias=? AND active=1').get(credentialAlias);
+      const credential = this.credentialForAlias(credentialAlias);
       if (!credential) throw new BrokerError(403, 'CRED-INACTIVE', '凭证不存在或已吊销。');
       const purpose = String(input.purpose || 'interactive');
       if (!token.purposes.includes('*') && !token.purposes.includes(purpose)) throw new BrokerError(403, 'PURPOSE-NOT-ALLOWED', '这个 token 不能用于 ' + purpose + '。');
@@ -292,4 +325,4 @@ class BrokerStore {
   }
 }
 
-module.exports = { BrokerStore, BrokerError, hashToken };
+module.exports = { BrokerStore, BrokerError, hashToken, MOCK_ALIAS };

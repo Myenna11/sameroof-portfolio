@@ -17,6 +17,21 @@
 
 `GET /v1/models` 返回 token 自己的 model allowlist，不把上游全量模型目录泄露给住户。
 
+## 内建 mock（只给 demo / CI）
+
+`mock-cheap` 是 broker 内建的假上游：不需要 key、不写 credentials 表、不访问网络，返回带
+`sameroof_mock: true` 与 `x-sameroof-mock: true` 的显眼回声。它默认关闭，只有明确设置下面的环境变量才存在：
+
+```bash
+SAMEROOF_ENABLE_MOCK=1 sameroof-broker serve
+SAMEROOF_ENABLE_MOCK=1 sameroof-broker token issue resident_demo_01 \
+  --credential mock-cheap --models mock-chat --ttl 1h
+```
+
+模型名必须以 `mock` 开头；回复正文会写明“不是住户或真人模型”。生产 unit 不设置
+`SAMEROOF_ENABLE_MOCK`，因此即使 house 配置里保留公开别名，也不能签发或使用 mock token。
+`mock-cheap` 是保留别名，不能通过 `cred add/rotate/revoke/path-style` 改造成真上游。
+
 ## 管理命令
 
 真凭证只从 `0600` 文件或 stdin 读取，不接受 `--api-key`，避免进入 shell history：
