@@ -25,13 +25,18 @@ extensions:
       prompt: 看一眼惦记本，把今天要做的事对家里人说一句
       enabled: true              # 可省
       quiet_hours: ignore        # ignore（默认，例行是明写的）| respect（安静时段跳过）
+    - id: remind-meds            # 一次性：at 与 cron 二选一（都给或都不给 → 启动即抛）
+      at: "2026-09-08T21:00+08:00"   # ISO 8601；带 Z 或 ±HH:MM 按写的算，不带时区按房子 tz 解释；只给日期算当天 00:00
+      prompt: 到点了，提醒维护者吃药
+      late_grace: 24h            # 可省，默认 24h；进程没跑错过了，启动后晚这么久以内还补响一次，超过就只 stderr 记一行"错过太久不补"。写 90m / 2d，或分钟数
 ```
 
-- 房子的例行先，房间追加，同 id 房间覆盖房子。字段缺、cron 非法、id 重复 → 启动即抛。
-- 到点以 `routine` 车道醒（human > routine > agent > heartbeat），提示为 `【例行】<prompt>` 加未读客厅记录；inbox 空不算 nothing，没 @ 也不 deferred。
-- 同一分钟只触发一次；进程没跑时错过的不补跑，启动时 stderr 记一行。
+- 房子的例行先，房间追加，同 id 房间覆盖房子。字段缺、cron/at 非法、cron 与 at 同给或都不给、id 重复 → 启动即抛。
+- 到点以 `routine` 车道醒（human > routine > agent > heartbeat），提示为 `【例行】<prompt>` 加未读客厅记录；inbox 空不算 nothing，没 @ 也不 deferred。`at` 型提示末尾多一句"（这是一次性提醒，原定 <房子时区的时间>）"。
+- cron 型同一分钟只触发一次；进程没跑时错过的不补跑，启动时 stderr 记一行。
+- `at` 型响过一次 state 记 `done: true` 和 `fired_at`，之后永不再响（配置里的 `enabled` 是人写的，不动它；要再响就改 `at` 换个 id）。错过的在 `late_grace` 内补响（一次性提醒错过就没了，宁可晚也要响），超过不补。`quiet_hours: respect` 时 `at` 型不跳过而是压着等安静时段过去（grace 内没等到就算了）。
 - 计入当日 `wakes_today` 预算；不归零心跳退避；发言 hop=0。
-- 状态在 `state/adapter-<id>.json` 的 `routines[id] = { last_fired, fired, skipped_quiet }`。
+- 状态在 `state/adapter-<id>.json` 的 `routines[id] = { last_fired, fired, skipped_quiet }`，`at` 型再多 `done, fired_at`（安静时段压着时有 `held_quiet`）。
 
 测试：`cd packages/adapters && npm test`。
 
