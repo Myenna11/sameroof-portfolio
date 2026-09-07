@@ -2,6 +2,7 @@
 'use strict';
 const fs = require('fs'), path = require('path');
 const yaml = require('js-yaml');
+const memoryPlugin = require('@sameroof/plugin-memory');
 
 const readLines = f => fs.existsSync(f) ? fs.readFileSync(f, 'utf8').split('\n').filter(l => l.trim()) : [];
 const readJsonl = (f, limit = 100, before = null) => {
@@ -11,7 +12,8 @@ const readJsonl = (f, limit = 100, before = null) => {
   return filtered.slice(-limit);
 };
 
-function mount({ houseDir, residents, byId, house, writeJson, HttpError }) {
+function mount({ houseDir, residents, byId, house, writeJson: rawWriteJson, HttpError }) {
+  const writeJson = (res, status, value) => { rawWriteJson(res, status, value); return true; };   // 回 true：写完就算开过门。之前回 undefined，server.js 会继续找门 → 404 → res.destroy() 掐掉 keep-alive 连接（W4 顺手修）
   const roomDir = r => r._dir || path.join(houseDir, 'rooms', r.name);
   const findRoom = seg => { const r = byId.get(seg) || residents.find(x => x.name === seg); if (!r) throw new HttpError(404, 'ROOM-NOT-FOUND', '没这间屋。'); return r; };
   const canSee = (me, r) => me.species === 'human' || me.id === r.id;   // 人能看全屋；agent 只能看自己
@@ -45,9 +47,9 @@ function mount({ houseDir, residents, byId, house, writeJson, HttpError }) {
           state: st ? { wakes_today: st.wakes_today, day: st.day, last_wake: st.last_wake, last_sleep: st.last_sleep } : null,
         });
       }
-      case 'memory': {
-        const rows = readJsonl(path.join(dir, 'memory', 'memories.jsonl'), limit, before);
-        return writeJson(res, 200, rows.map(x => ({ id: x.id, ts: x.ts, content: x.content, source: x.source, by: x.by, confidence: x.confidence, reviewed: !!x.reviewed, archived: !!x.archived, hits: x.hits || 0, tags: x.tags || [] })));
+      case 'memory': {   // v0.2：经插件折叠读（旧行补默认值、update 行折进去）；reviewed 留作兼容 = review==='approved'
+        const rows = memoryPlugin.open(dir).list({ limit, before });
+        return writeJson(res, 200, rows.map(x => ({ id: x.id, ts: x.ts, content: x.content, source: x.source, by: x.by, confidence: x.confidence, reviewed: x.review === 'approved', review: x.review, authored: !!x.authored, version_status: x.version_status, fact_key: x.fact_key, supersedes: x.supersedes, superseded_by: x.superseded_by, merged_into: x.merged_into, redacted: !!x.redacted, archived: !!x.archived, hits: x.hits || 0, tags: x.tags || [] })));
       }
       case 'handover': {
         const latest = path.join(dir, 'handover', 'latest.md'), hist = path.join(dir, 'handover', 'history.md');

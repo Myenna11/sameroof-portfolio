@@ -14,6 +14,7 @@ const { TokenStore } = require('./tokens');
 const { SlidingWindowLimiter, AuthFailureLimiter } = require('./rate-limit');
 const { PushClient, PushClientError } = require('./push-client');
 const roomsApi = require('./rooms-api');
+const memoryApi = require('./memory-api');
 const { resolveHouseRoot } = require('@sameroof/house-root');
 const jcs = require('@sameroof/jcs');
 
@@ -248,6 +249,7 @@ function createLivingRoom(options = {}) {
     for (const listener of listeners) { try { listener.send(ev); } catch {} }
     return ev;
   }
+  const memoryHandle = memoryApi.mount({ houseDir, residents, byId, writeJson, readJson, HttpError, emitActivity });   // 记忆审核队列（W4）：挂在 /rooms/:id/memory/… 下，先于只读的 rooms-api
   const presence = new Map();
   const sseByResident = new Map();
   const sseByIp = new Map();
@@ -538,7 +540,7 @@ function createLivingRoom(options = {}) {
         return;
       }
 
-      if (url.pathname.startsWith('/rooms/')) { if (await roomsHandle(req, url, me, res)) return; }
+      if (url.pathname.startsWith('/rooms/')) { if (await memoryHandle(req, url, me, res)) return; if (await roomsHandle(req, url, me, res)) return; }
 
       if (req.method === 'POST' && url.pathname === '/activity') {           // 住户（适配器）报自己的事件；actor 只认 token
         const body = await readJson(req);
