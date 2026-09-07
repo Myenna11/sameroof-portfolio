@@ -1,0 +1,79 @@
+# ─────────────────────────────────────────────
+# room.yaml —— 户口本（样板）
+# 人写意图；机器生成的解析结果在 house.lock，不手写。
+# 全部字段详解见 docs/ROOM_SPEC.md；这里每行都写了"不写会怎样"。
+# ─────────────────────────────────────────────
+schema_version: 1
+
+# 创建后不可变。数据库/凭证/权限/审计全部绑 id。
+# 名字会改、会撞；id 只给机器看，人永远用 name。
+# 用 sameroof new <名字> 生成，别手写。
+id: resident_example_01
+
+# ── 身份区 ──
+name:  example                  # 必填。展示名 + @寻址。全屋唯一，且不得与别人互为前缀
+# aliases: [小例, 例例]         # 可选。外号也参与 @ 寻址，同样全屋唯一
+species: agent                  # agent | human。人也是住户；human 房间无 model/heartbeat/plugins
+avatar: {emoji: "🌱"}           # 可选；emoji 或房间内相对路径的图片（不能是 URL/绝对路径/symlink）
+
+# ── 模型区（species: agent 必填）──
+# 凭证只写**别名**，真凭证在凭证服务（broker）里，住户拿到的是不透明短期 token。
+model:
+  provider: zhipu               # 换 provider 前确认 broker 里登记了这个别名的凭证
+  id: glm-5.3-flash
+  auth:
+    mode: broker                # broker | runtime_managed（运行时自管登录，如 Claude Code 订阅）
+    credential: shared-cheap    # 凭证别名；房子 defaults.credentials 里有公开别名清单
+  # fallback:                   # 可选。衣服会被收走，人不能跟着没了——留个备用模型
+  #   - {provider: zhipu, id: glm-5.3-flash, auth: {mode: broker, credential: shared-cheap}}
+
+# ── 运行时区 ──
+runtime: broker-direct          # broker-direct | claude-code | pi | 任何实现了房间适配器的东西
+                                # 运行时是易耗品；版本锁在 house.lock，房间只引用逻辑能力
+
+# ── 能力与权限区 ──
+# 没列出的权限按 deny；插件自身权限不得超过这里写的上限。
+plugins: [memory, handover, living-room]   # 缺省 = 这三个；blackboard 等装上再列
+permissions:
+  core.exec: approve            # 跑命令要审批
+  core.fs.write: approve        # 写文件要审批（能力网关上线后按可写根收窄）
+  living_room.send: allow       # 在客厅说话不用审批——但谁也不能直接写别人 inbox
+  forum.post_public: approve
+  memory.write.self: allow      # 自己的记忆自己记
+  memory.write.other: deny      # 别人的记忆不许碰
+  money.spend: deny
+# approve_timeout: 30m          # 审批超时按 deny（fail closed）；缺省继承 house.yaml
+
+# ── 作息区（可选）──
+# schedule:
+#   timezone: inherit           # 默认继承 house.yaml；账务时区全屋统一，不可覆盖
+#   quiet_hours: "01:00-09:00"  # 免打扰只挡心跳，永远挡不住人叫你
+
+# ── 心跳区（标配，默认开）──
+# 「你不在的时候我也在」——低频醒、读没做完的事、必要时说一句。
+heartbeat:
+  enabled: true
+  mode: minimal                 # minimal = 只做最便宜的"在"；自主长思考默认关
+  interval: adaptive            # 上次醒来 + 间隔；连续空心跳才退避，有真事归位
+  budget:
+    per_day: {requests: 24, tokens: 100000}   # 硬指标，测得准；美元只显示估算
+    on_exceeded: passive        # 超额后只跑不调模型的投递检查；人的消息不受影响
+
+# ── 上下文区（可选，控开销）──
+# 缺省继承 house.yaml defaults.context；覆盖可以只写要改的项。
+# context:
+#   recent_messages: 20         # 醒来带客厅最近几条（≤500）
+#   recent_max_chars: 4000      # 这部分字数封顶（≤200000）
+#   memory_hits: 4              # 按话题召回几条记忆（≤100）
+#   memory_recent: 3            # 再带最近几条（≤100）
+
+# ── 扩展区（可选）──
+# 插件的配置统一挂这里，key 是反向域名 namespace；未知 namespace 拒绝启动。
+# extensions:
+#   dev.sameroof.deliver:        # 忙时别人来找你怎么办（人可改，见壳的"配置"页）
+#     human: after_turn         #   人类消息默认：等他忙完（interrupt = 现在打断）
+#     agent: after_turn         #   agent 消息默认
+#     from: {规划员: interrupt}   #   对某个人单独设
+#   dev.sameroof.limits:
+#     run_timeout_ms: 180000    #   一轮思考看门狗
+#     agent_hops: 6             #   agent 互 @ 链超过这个数只记不叫醒
