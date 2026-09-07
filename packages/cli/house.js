@@ -1,10 +1,12 @@
 // 同屋 CLI · 规划员的子命令：new / check / explain / pair / status。lock 归审查员（lock.js）。
 'use strict';
-const fs = require('node:fs'), path = require('node:path'), { execSync } = require('node:child_process');
-const yaml = require('/root/sameroof/packages/living-room/node_modules/js-yaml');
-const HOUSE_DEFAULT = '/root/sameroof';
-const h = (opts) => path.resolve(opts.house || process.env.SAMEROOF_HOUSE || HOUSE_DEFAULT);
-const loadYaml = f => yaml.load(fs.readFileSync(f, 'utf8'));
+const fs = require('node:fs'), os = require('node:os'), path = require('node:path'), { execSync } = require('node:child_process');
+const YAML = require('yaml');
+const { resolveHouseRoot } = require('@sameroof/house-root');
+const h = opts => opts.house
+  ? resolveHouseRoot(path.resolve(opts.house), { ...process.env, SAMEROOF_ROOT: path.resolve(opts.house) })
+  : resolveHouseRoot();
+const loadYaml = f => YAML.parse(fs.readFileSync(f, 'utf8'), { maxAliasCount: 50, uniqueKeys: true });
 const rooms = root => fs.readdirSync(path.join(root, 'rooms')).map(d => path.join(root, 'rooms', d, 'room.yaml')).filter(fs.existsSync).map(f => ({ file: f, dir: path.dirname(f), ...loadYaml(f) }));
 const slug = s => 'resident_' + (s.replace(/[^a-z0-9]+/gi, '').toLowerCase() || require('node:crypto').randomBytes(3).toString('hex')) + '_01';
 
@@ -24,14 +26,14 @@ const cmds = {
       doc.runtime = opts.runtime || (provider === 'claude-code' ? 'claude-code' : runtimeManaged ? 'pi' : 'broker-direct');
     } else doc.notify = { channel: 'push' };
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'room.yaml'), yaml.dump(doc, { lineWidth: 120, noRefs: true, flowLevel: 3 }));
+    fs.writeFileSync(path.join(dir, 'room.yaml'), YAML.stringify(doc, { lineWidth: 120 }));
     if (!opts.human) fs.writeFileSync(path.join(dir, 'SOUL.md'), `# ${name}\n\n（谁都还没写。这里放性格、说话方式、底线。运行时只读，改动要经人审批。）\n`);
     console.log(`建好了：rooms/${name}/  id=${id}${doc.model ? `  穿 ${doc.model.provider}/${doc.model.id}，走 ${doc.model.auth.mode}` : '  （人）'}`);
     console.log(`下一步：${doc.model && doc.model.auth.mode === 'broker' ? `确认 house.yaml credentials 里有别名 ${doc.model.auth.credential}，然后 sameroof-broker token issue ${id} ...` : doc.model ? `让 ${doc.runtime} 自己登录（pi /login ${doc.model.provider}）` : '跑 sameroof pair ' + name + ' 拿配对链接'}；写 SOUL.md；sameroof check；sameroof lock`);
   },
   /** sameroof check */
   check(args, opts) {
-    const root = h(opts); const { validateHouse } = require('/root/sameroof/packages/schema');
+    const root = h(opts); const { validateHouse } = require('@sameroof/schema');
     const errs = validateHouse(root);
     if (!errs.length) { console.log('全屋校验通过。'); return; }
     for (const e of errs) console.log(`${e.severity === 'error' ? '✗' : '!'} ${path.relative(root, e.file)}:${e.line || '?'} — ${e.message_zh} [${e.code}]`);
@@ -61,7 +63,7 @@ const cmds = {
   pair(args, opts) {
     const root = h(opts); const name = args[0]; if (!name) throw new Error('用法：sameroof pair <名字> [--api 地址] [--rotate]');
     const r = rooms(root).find(x => x.name === name || x.id === name); if (!r) throw new Error('没这间屋：' + name);
-    const tokens = require('/root/sameroof/packages/living-room/tokens.js');
+    const tokens = require('@sameroof/living-room/tokens.js');
     const rec = opts.rotate ? tokens.rotate(r.id) : tokens.issue(r.id);
     const secret = rec.secret || rec.token || rec; const api = opts.api || 'https://house.sameroof.example';
     console.log(`sameroof://pair?api=${api}&token=${secret}`);
@@ -86,7 +88,7 @@ Object.assign(cmds, {
     const tar = path.join(out, `sameroof-${stamp}.tar`);
     const items = ['rooms', 'house.yaml', 'house.lock', 'state'].filter(x => fs.existsSync(path.join(root, x)));
     execSync(`tar -cf "${tar}" -C "${root}" ${items.map(x => `"${x}"`).join(' ')}`, { stdio: 'inherit' });
-    const tk = path.join(process.env.HOME || '/root', '.sameroof', 'run', 'living-room-tokens.json');
+    const tk = path.join(process.env.HOME || os.homedir(), '.sameroof', 'run', 'living-room-tokens.json');
     if (fs.existsSync(tk)) execSync(`tar -rf "${tar}" -C "${path.dirname(tk)}" living-room-tokens.json`);
     if (opts.plain) { console.log(`明文备份：${tar}（高敏感！只在你自己的盘上）`); return; }
     try { execSync(`gpg --batch --yes --symmetric --cipher-algo AES256 --passphrase-fd 0 -o "${tar}.gpg" "${tar}"`, { stdio: ['inherit', 'inherit', 'inherit'] }); }

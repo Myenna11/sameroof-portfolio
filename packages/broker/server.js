@@ -2,6 +2,7 @@
 'use strict';
 
 const fs = require('fs');
+const crypto = require('crypto');
 const http = require('http');
 const path = require('path');
 const { BrokerStore, BrokerError } = require('./store');
@@ -56,6 +57,26 @@ function estimateReservation(body) {
   const output = Number(body.max_completion_tokens || body.max_tokens || 4096);
   if (!Number.isSafeInteger(output) || output < 0) throw new BrokerError(400, 'MAX-TOKENS-INVALID', 'max_tokens 必须是非负整数。');
   return Math.max(1, input + Math.min(output, 200000));
+}
+
+function mockCompletion(body) {
+  const model = String(body.model || '');
+  if (!/^mock(?:[-./]|$)/.test(model)) throw new BrokerError(400, 'MOCK-MODEL-INVALID', 'mock-cheap 只接受名称以 mock 开头的假模型，避免把它误当真人模型。');
+  if (!Array.isArray(body.messages)) throw new BrokerError(400, 'MESSAGES-INVALID', 'mock chat/completions 需要 messages 数组。');
+  const last = [...body.messages].reverse().find(item => item && item.role === 'user');
+  const raw = typeof last?.content === 'string' ? last.content : JSON.stringify(last?.content ?? '（没有 user 消息）');
+  const content = '【mock 回声：这不是住户或真人模型】' + raw.slice(0, 2000);
+  const promptTokens = Math.max(1, Math.ceil(Buffer.byteLength(JSON.stringify(body.messages), 'utf8') / 4));
+  const completionTokens = Math.max(1, Math.ceil(Buffer.byteLength(content, 'utf8') / 4));
+  return {
+    id: 'chatcmpl-mock-' + crypto.createHash('sha256').update(JSON.stringify(body)).digest('hex').slice(0, 16),
+    object: 'chat.completion',
+    created: 0,
+    model,
+    choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
+    usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens },
+    sameroof_mock: true
+  };
 }
 
 async function readResponseLimited(response) {
@@ -151,6 +172,26 @@ function createBroker(options = {}) {
         model: String(body.model),
         reserveTokens: estimateReservation(body)
       });
+
+      if (reservation.credential.provider === 'mock') {
+        let mocked;
+        try { mocked = mockCompletion(body); }
+        catch (error) {
+          store.settle(reservation.requestId, { actualTokens: 0, estimated: false, status: 'request_rejected', httpStatus: error.status || 400, latencyMs: Date.now() - started });
+          throw error;
+        }
+        store.settle(reservation.requestId, {
+          actualTokens: mocked.usage.total_tokens,
+          estimated: false,
+          status: 'mock_complete',
+          httpStatus: 200,
+          latencyMs: Date.now() - started
+        });
+        return json(res, 200, mocked, {
+          'x-sameroof-request-id': reservation.requestId,
+          'x-sameroof-mock': 'true'
+        });
+      }
 
       let upstreamResponse;
       try {
@@ -266,4 +307,4 @@ async function main() {
 
 if (require.main === module) main().catch(error => { console.error(error); process.exit(1); });
 
-module.exports = { createBroker, buildUpstreamUrl, estimateReservation };
+module.exports = { createBroker, buildUpstreamUrl, estimateReservation, mockCompletion };

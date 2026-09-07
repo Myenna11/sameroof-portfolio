@@ -68,6 +68,80 @@ test('上游 path style 正确处理智谱 v4 与标准 OpenAI 路径', () => {
   );
 });
 
+test('mock-cheap 默认关闭；启用后无需真凭证且不能被改写', () => {
+  const disabled = new BrokerStore({ home: tempHome(), enableMock: false });
+  assert.equal(disabled.listCredentials().some(x => x.alias === 'mock-cheap'), false);
+  assert.throws(
+    () => disabled.issueToken({ residentId: 'resident_agent_01', credentials: ['mock-cheap'], models: ['mock-chat'] }),
+    error => error instanceof BrokerError && error.code === 'TOKEN-CREDENTIAL-INVALID'
+  );
+  disabled.close();
+
+  const store = new BrokerStore({ home: tempHome(), enableMock: true });
+  const mock = store.listCredentials().find(x => x.alias === 'mock-cheap');
+  assert.deepEqual({ provider: mock.provider, base_url: mock.base_url, path_style: mock.path_style, builtin: mock.builtin },
+    { provider: 'mock', base_url: 'builtin://mock', path_style: 'builtin', builtin: true });
+  assert.equal(Object.hasOwn(mock, 'api_key'), false);
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM credentials').get().n, 0);
+  assert.throws(
+    () => store.addCredential({ alias: 'mock-cheap', provider: 'zhipu', baseUrl: 'https://example.com', apiKey: 'secret' }),
+    error => error instanceof BrokerError && error.code === 'CRED-BUILTIN-RESERVED'
+  );
+  assert.throws(() => store.revokeCredential('mock-cheap'), error => error instanceof BrokerError && error.code === 'CRED-BUILTIN-IMMUTABLE');
+  const issued = store.issueToken({ residentId: 'resident_agent_01', credentials: ['mock-cheap'], models: ['mock-chat'] });
+  assert.equal(store.authenticate(issued.secret).credential_aliases[0], 'mock-cheap');
+  store.close();
+
+  const legacyHome = tempHome();
+  const legacy = new BrokerStore({ home: legacyHome, enableMock: false });
+  legacy.db.prepare(`INSERT INTO credentials(alias,provider,base_url,api_key,auth_header,auth_scheme,path_style,created_at)
+    VALUES(?,?,?,?,?,?,?,?)`).run('mock-cheap', 'zhipu', 'https://example.com', 'old-secret', 'authorization', 'Bearer', 'openai', new Date().toISOString());
+  legacy.close();
+  assert.throws(
+    () => new BrokerStore({ home: legacyHome, enableMock: true }),
+    error => error instanceof BrokerError && error.code === 'CRED-BUILTIN-CONFLICT'
+  );
+});
+
+test('mock-cheap 在进程内返回显眼的确定性回声，不访问网络并正常记账', async () => {
+  const store = new BrokerStore({ home: tempHome(), enableMock: true });
+  const issued = store.issueToken({
+    residentId: 'resident_agent_01', credentials: ['mock-cheap'], models: ['mock-chat'], maxRequests: 3, maxTokens: 10000
+  });
+  const broker = createBroker({ store, socketPath: path.join(store.runDir, 'broker.sock') });
+  const previousFetch = global.fetch;
+  global.fetch = async () => { throw new Error('mock 不得访问网络'); };
+  await broker.listen();
+  try {
+    const response = await requestSocket(broker.socketPath, {
+      path: '/v1/chat/completions', method: 'POST', token: issued.secret,
+      body: { model: 'mock-chat', messages: [{ role: 'user', content: '管道测试' }] }
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers['x-sameroof-mock'], 'true');
+    assert.equal(response.json.sameroof_mock, true);
+    assert.match(response.json.choices[0].message.content, /不是住户或真人模型/);
+    assert.match(response.json.choices[0].message.content, /管道测试/);
+    const ledger = store.listLedger();
+    assert.equal(ledger[0].provider, 'mock');
+    assert.equal(ledger[0].status, 'mock_complete');
+    assert.equal(ledger[0].estimated, 0);
+    assert.equal(ledger[0].actual_tokens, response.json.usage.total_tokens);
+
+    const wrongModel = await requestSocket(broker.socketPath, {
+      path: '/v1/chat/completions', method: 'POST', token: issued.secret,
+      body: { model: 'mock-chat', messages: 'not-an-array' }
+    });
+    assert.equal(wrongModel.status, 400);
+    assert.equal(wrongModel.json.error.code, 'MESSAGES-INVALID');
+    assert.ok(store.listLedger().some(row => row.status === 'request_rejected'));
+  } finally {
+    global.fetch = previousFetch;
+    await broker.close();
+    store.close();
+  }
+});
+
 test('凭证列表绝不返回 api_key，数据库和 token 文件为 0600', () => {
   const home = tempHome();
   const store = new BrokerStore({ home });

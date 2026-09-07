@@ -81,6 +81,15 @@
     "context": {
       "$ref": "#/$defs/context"
     },
+    "deliver": {
+      "$ref": "#/$defs/deliver"
+    },
+    "limits": {
+      "$ref": "#/$defs/limits"
+    },
+    "routines": {
+      "$ref": "#/$defs/routines"
+    },
     "avatar": {
       "$ref": "#/$defs/avatar"
     },
@@ -157,7 +166,8 @@
         "properties": {
           "model": false,
           "heartbeat": false,
-          "plugins": false
+          "plugins": false,
+          "routines": false
         }
       },
       "else": {
@@ -168,6 +178,94 @@
     }
   ],
   "$defs": {
+    "deliverMode": {
+      "enum": [
+        "interrupt",
+        "after_turn",
+        "inject"
+      ]
+    },
+    "deliver": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "human": {
+          "$ref": "#/$defs/deliverMode"
+        },
+        "agent": {
+          "$ref": "#/$defs/deliverMode"
+        },
+        "from": {
+          "type": "object",
+          "propertyNames": {
+            "minLength": 1,
+            "maxLength": 96
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/deliverMode"
+          }
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "run_timeout_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 3600000
+        },
+        "agent_hops": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 99
+        }
+      }
+    },
+    "routine": {
+      "type": "object",
+      "required": [
+        "id",
+        "cron",
+        "prompt"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+        },
+        "cron": {
+          "type": "string",
+          "minLength": 9,
+          "maxLength": 160
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8000
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "quiet_hours": {
+          "enum": [
+            "ignore",
+            "respect"
+          ],
+          "default": "ignore"
+        }
+      }
+    },
+    "routines": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/routine"
+      },
+      "maxItems": 64
+    },
     "context": {
       "type": "object",
       "additionalProperties": false,
