@@ -5,6 +5,7 @@ const fs = require('fs');
 const { BrokerStore, BrokerError } = require('./store');
 const { createBroker } = require('./server');
 const { PushCredentialStore } = require('./push');
+const { LedgerReport } = require('./report');
 
 function parse(argv) {
   const positional = [];
@@ -54,6 +55,9 @@ sameroof-broker token list
 sameroof-broker token revoke|quarantine|activate <token_id>
 sameroof-broker push init --subject <https://...|mailto:...> [--rotate]
 sameroof-broker push status
+sameroof-broker report init [--rotate]      # 给房子签只读报表凭证（report-client.token）
+sameroof-broker report status
+sameroof-broker report daily [--days 7] [--tz Asia/Shanghai]
 sameroof-broker ledger [--limit 50]
 
 真凭证永远不接受 --api-key，避免进入 shell history。token secret 只在签发时显示一次，并写入 0600 token 文件。`);
@@ -71,6 +75,10 @@ async function run(argv = process.argv.slice(2)) {
   const store = new BrokerStore();
   try {
     const push = new PushCredentialStore({ stateDir: store.stateDir });
+    const report = new LedgerReport({ store });
+    if (p[0] === 'report' && p[1] === 'init') return print(report.initialize(f.rotate === true));
+    if (p[0] === 'report' && p[1] === 'status') return print(report.status());
+    if (p[0] === 'report' && p[1] === 'daily') return print(report.daily({ days: f.days || 7, tz: f.tz || 'UTC' }));
     if (p[0] === 'push' && p[1] === 'init') return print(push.initialize(required(f.subject, '缺 --subject。'), f.rotate === true));
     if (p[0] === 'push' && p[1] === 'status') return print(push.status());
 

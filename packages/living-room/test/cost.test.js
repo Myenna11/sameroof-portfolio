@@ -38,3 +38,20 @@ test('GET /cost：按天聚合 input/output/cached/wakes/calls，缺 usage 只�
     assert.ok(!r.body.residents.some(x => x.resident === '甲'));
   } finally { await room.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test('GET /cost 带 ledger 段：broker 报表拉到就合并住户名；拉不到只给 ledger_error 不炸', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sameroof-cost2-'));
+  for (const [n, y] of [['甲', 'id: resident_alpha_01\nname: 甲\nspecies: human\n'], ['乙', 'id: resident_beta_01\nname: 乙\nspecies: agent\nruntime: broker-direct\n']]) { fs.mkdirSync(path.join(root, 'rooms', n), { recursive: true }); fs.writeFileSync(path.join(root, 'rooms', n, 'room.yaml'), y); }
+  fs.mkdirSync(path.join(root, 'apps', 'house'), { recursive: true }); fs.writeFileSync(path.join(root, 'apps', 'house', 'index.html'), '<!doctype html>');
+  fs.copyFileSync(path.join(__dirname, 'fixtures', 'house.yaml'), path.join(root, 'house.yaml'));
+  let seen = null;
+  const okClient = { daily: async q => { seen = q; return { days: ['d1'], timezone: q.tz, residents: [{ resident_id: 'resident_beta_01', days: [{ day: 'd1', requests: 3, tokens: 900, cached: 100 }], total: { requests: 3, tokens: 900, cached: 100 }, by_model: [] }] }; } };
+  const badClient = { daily: async () => { const e = new Error('凭证没配'); e.code = 'REPORT-NOT-CONFIGURED'; throw e; } };
+  for (const [client, check] of [[okClient, r => { assert.equal(r.ledger.residents[0].resident, '乙'); assert.equal(r.ledger.residents[0].total.tokens, 900); assert.equal(r.ledger_error, null); assert.equal(seen.days, 2); assert.ok(seen.tz); }], [badClient, r => { assert.equal(r.ledger, null); assert.equal(r.ledger_error.code, 'REPORT-NOT-CONFIGURED'); assert.equal(r.source, 'state/runs'); }]]) {
+    const room = createLivingRoom({ houseDir: root, runDir: path.join(root, 'run'), dataDir: path.join(root, 'state-' + Math.random().toString(36).slice(2)), port: 0, reportClient: client });
+    try { const port = (await room.listen()).port; const alpha = room.tokenStore.issue('resident_alpha_01').token;
+      const r = await request(port, '/cost?days=2', { token: alpha }); assert.equal(r.status, 200); check(r.body);
+    } finally { await room.close(); }
+  }
+  fs.rmSync(root, { recursive: true, force: true });
+});

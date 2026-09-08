@@ -13,6 +13,7 @@ const Database = require('better-sqlite3');
 const { TokenStore } = require('./tokens');
 const { SlidingWindowLimiter, AuthFailureLimiter } = require('./rate-limit');
 const { PushClient, PushClientError } = require('./push-client');
+const { ReportClient } = require('./report-client');
 const roomsApi = require('./rooms-api');
 const memoryApi = require('./memory-api');
 const blackboardApi = require('./blackboard-api');
@@ -189,6 +190,7 @@ function createLivingRoom(options = {}) {
   const tokenFile = path.join(runDir, 'living-room-tokens.json');
   const tokenStore = options.tokenStore || new TokenStore({ file: tokenFile });
   const notificationClient = options.notificationClient || new PushClient();
+  const reportClient = options.reportClient || new ReportClient(options.report || {});   // V2-LEDGER：broker 只读报表；测试可注入
   tokenStore.ensure(residents.map(resident => resident.id));
 
   const db = new Database(path.join(dataDir, 'house.db'));
@@ -607,7 +609,11 @@ function createLivingRoom(options = {}) {
           const total = Object.values(byDay).reduce((a, b) => ({ wakes: a.wakes + b.wakes, calls: a.calls + b.calls, with_usage: a.with_usage + b.with_usage, input: a.input + b.input, output: a.output + b.output, cached: a.cached + b.cached, cache_creation: a.cache_creation + b.cache_creation }), { wakes: 0, calls: 0, with_usage: 0, input: 0, output: 0, cached: 0, cache_creation: 0 });
           return { resident_id: r.id, resident: r.name, runtime: r.runtime || null, days: dayList.map(d => byDay[d]), total };
         });
-        return writeJson(res, 200, { days: dayList, timezone: tz, source: 'state/runs', residents: perResident });
+        // ledger 段：broker 自己算好的凭证账本（只有走 broker 的住户）。拉不到不炸，只带 ledger_error 让前端说明。
+        let ledger = null, ledgerError = null;
+        try { ledger = await reportClient.daily({ days, tz }); } catch (e) { ledgerError = { code: e.code || 'REPORT-ERROR', message: String(e.message || e).slice(0, 200) }; }
+        if (ledger && Array.isArray(ledger.residents)) for (const r of ledger.residents) r.resident = byId.get(r.resident_id)?.name || r.resident_id;
+        return writeJson(res, 200, { days: dayList, timezone: tz, source: 'state/runs', residents: perResident, ledger, ledger_error: ledgerError });
       }
       // V2-SEARCH：跨班搜索。扫 state/shift-<id>.jsonl（本班活的）+ state/shifts/*.jsonl（归档）；回放 retract；只搜 user/assistant（system 是人设不是对话）。
       // 人 only。命中按 ts 倒序；片段取第一处命中前后各 50 字。resident 可给名字或 id。

@@ -7,6 +7,7 @@ const http = require('http');
 const path = require('path');
 const { BrokerStore, BrokerError } = require('./store');
 const { PushCredentialStore } = require('./push');
+const { LedgerReport } = require('./report');
 
 const MAX_BODY = 2 * 1024 * 1024;
 const MAX_RESPONSE = 20 * 1024 * 1024;
@@ -138,6 +139,7 @@ function createBroker(options = {}) {
   });
   const ownsStore = !options.store;
   const pushCredentials = options.pushCredentials || new PushCredentialStore({ stateDir: store.stateDir });
+  const ledgerReport = options.ledgerReport || new LedgerReport({ store, stateDir: store.stateDir });
   const socketPath = path.resolve(options.socketPath || process.env.SAMEROOF_BROKER_SOCKET || path.join(store.runDir, 'broker.sock'));
   const socketMode = options.socketMode === undefined
     ? Number.parseInt(process.env.SAMEROOF_BROKER_SOCKET_MODE || '600', 8)
@@ -151,6 +153,11 @@ function createBroker(options = {}) {
     try {
       if (req.method === 'GET' && req.url === '/health') return json(res, 200, { ok: true });
 
+      if (req.method === 'GET' && req.url.split('?')[0] === '/internal/report/daily') {   // V2-LEDGER：只读报表，房子凭 report-client.token 调
+        ledgerReport.authorize(bearer(req));
+        const q = new URL(req.url, 'http://broker').searchParams;
+        return json(res, 200, ledgerReport.daily({ days: q.get('days') || 7, tz: q.get('tz') || 'UTC' }));
+      }
       if (req.method === 'GET' && req.url === '/internal/web-push/public-key') {
         return json(res, 200, pushCredentials.publicKey(bearer(req)));
       }

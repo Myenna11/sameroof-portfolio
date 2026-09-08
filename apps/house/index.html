@@ -1042,7 +1042,16 @@ async function renderCostChart(){
   const ratio=s.input>0?Math.round(100*s.cached/s.input):null;
   sp.appendChild(document.createTextNode(s.name+' '+fmtK(s.vals.reduce((a,b)=>a+b,0))+(ratio!=null?' · 缓存命中 '+ratio+'%':'')+(s.withUsage<s.wakes?' · '+(s.wakes-s.withUsage)+' 次醒来没带 usage':'')));
   lg.appendChild(sp)}
- box.appendChild(lg)}
+ box.appendChild(lg);
+ // ledger 段：broker 自己记的凭证账本（只有走 broker 的住户）。runs 是房子看到的，ledger 是花钱那一侧看到的，两边对得上才算账准
+ const lgr=document.createElement('div');lgr.className='lg';lgr.style.marginTop='8px';
+ if(d.ledger&&d.ledger.residents&&d.ledger.residents.length){
+  lgr.appendChild(Object.assign(document.createElement('span'),{textContent:'🧾 凭证账本（broker）：'}));
+  for(const r of d.ledger.residents){const t=r.total||{};const ratio=t.tokens>0&&t.cached?Math.round(100*t.cached/t.tokens):null;
+   lgr.appendChild(Object.assign(document.createElement('span'),{textContent:r.resident+' '+(t.requests||0)+' 次 · '+fmtK(t.tokens||0)+' tok'+(ratio!=null?' · 缓存 '+ratio+'%':'')+(t.errors?' · '+t.errors+' 次出错':'')+(t.estimated?' · '+t.estimated+' 次估算':'')}))}
+ }else if(d.ledger_error){lgr.appendChild(Object.assign(document.createElement('span'),{textContent:'🧾 凭证账本拉不到：'+d.ledger_error.message}))}
+ else{lgr.appendChild(Object.assign(document.createElement('span'),{textContent:'🧾 凭证账本：这几天没人走 broker'}))}
+ box.appendChild(lgr)}
 
 $('#runsrefresh').onclick=()=>renderRunsView();
 setInterval(()=>{if(curView==='runs'&&document.visibilityState==='visible')renderRunsView()},30000);
