@@ -252,6 +252,8 @@ async function run(roomName, runtimeName, think, opts = {}) {
         dmCtx = blocks.join('\n');
       }
       // ---- 提示按"变化频率"排：system 只放一班内稳定的（人设、规矩、交接信、惦记本、小本）----
+      // 网关动作列表从 house/room permissions 算（GATEWAY.md §6：ceiling 缺或 deny 即拒；房间没写继承 house）——提示和策略对得上，不写死
+      const gwActions = ['core.fs.read', 'core.fs.write', 'core.exec'].filter(a => { const c = ((R.house.defaults || {}).permissions || {})[a]; const rv = (room.permissions || {})[a]; const eff = rv === undefined ? c : rv; return c && c !== 'deny' && eff && eff !== 'deny'; });
       const system = [
         soul || `你是${room.name}。`,
         '',
@@ -260,8 +262,8 @@ async function run(roomName, runtimeName, think, opts = {}) {
         '- 一次可以只回一个人；几个人说了话，回的时候说清楚回的是谁。',
         '- 家里的人（human）直接 @ 了你，至少应一声，哪怕就一句。(静默) 是给没被叫的时候用的。',
         '- 不想让全家看见就私信：整条回复以 DM: 收件人 开头。',
-        gw.available(room.id)
-          ? '- 你只搬字，不能执行命令。要做高危动作（读写文件、跑命令），整条回复只写一行：APPROVAL: <action> <JSON 参数>，房子会登记到网关等人审批，结果以"网关结果"投回你的收件箱。例：APPROVAL: core.fs.write {"root_id":"own-room","path":"notes/today.md","content":"今天的记录…","encoding":"utf8","mode":"replace"}（动作有 core.fs.read / core.fs.write / core.exec；参数必须是严格 JSON 对象，键不重复，别夹别的字）。'
+        gw.available(room.id) && gwActions.length
+          ? `- 你只搬字，不能执行命令。要做高危动作（读写文件、跑命令），整条回复只写一行：APPROVAL: <action> <JSON 参数>，房子会登记到网关等人审批，结果以"网关结果"投回你的收件箱。例：APPROVAL: core.fs.write {"root_id":"own-room","path":"notes/today.md","content":"今天的记录…","encoding":"utf8","mode":"replace"}（你现在被开放的动作：${gwActions.join(' / ')}；别的动作网关会拒；参数必须是严格 JSON 对象，键不重复，别夹别的字）。`
           : '- 你只搬字，不能执行命令。能力网关还没上线，现在也没法申请动手（别写 APPROVAL，写了也登记不上）；想看什么文件、想改什么，直接在客厅说，让人帮你。',
         R.memory ? '- 值得以后还记得的事，在回复末尾另起一行写 REMEMBER: 一句话（可多行）。房子会存下来，标记为你自己写的、未审。' : '',
         '- 你自己房间的钥匙（同样另起一行）：CONCERN: 一句话 记进惦记本；DONE: 一句话 划掉做完的；NOTE: 一句话 记在自己的小本上；' + (R.memory ? 'FORGET: 一句话 把记忆里对上的那条冷藏（不删）。' : ''),
