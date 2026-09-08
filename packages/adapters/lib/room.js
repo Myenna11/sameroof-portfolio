@@ -219,7 +219,21 @@ async function run(roomName, runtimeName, think, opts = {}) {
         ((R.house.defaults || {}).context) || ((R.house.extensions || {})['dev.sameroof.context']) || {},
         room.context || ((room.extensions || {})['dev.sameroof.context']) || {});
       const turn = shiftTurns();
-      if (turn === 0 || !inc) inc = { memoryIds: new Set(), taskSnap: null, membersLine: '', dmPartners: new Set() };
+      if (turn === 0 || !inc) {
+        inc = { memoryIds: new Set(), taskSnap: null, membersLine: '', dmPartners: new Set(), stableMem: '' };
+        // V2-W8e 撑前缀：一班内不变的记忆进 system。稳定 = 人审过的（approved）或被召回过 ≥2 次的；按 approved 优先、hits 降序、新的优先，
+        // 塞到 ctx.system_memory_max_chars（缺省 6000）为止。这些 id 视为"本班已发"，user 侧召回只发剩下的（pending/新增）。
+        if (R.memory) {
+          const all = R.memory.recent(500);
+          const stable = all.filter(m => m && m.id && ((m.review || (m.reviewed ? 'approved' : 'pending')) === 'approved' || (m.hits || 0) >= (ctx.system_memory_min_hits ?? 2)))
+            .sort((x, y) => (((y.review === 'approved') - (x.review === 'approved')) || ((y.hits || 0) - (x.hits || 0)) || String(y.ts || '').localeCompare(String(x.ts || ''))));
+          const budget = ctx.system_memory_max_chars ?? 6000; const picked = []; let used = 0;
+          for (const m of stable) { const len = String(m.content || '').length + 24; if (used + len > budget) break; picked.push(m); used += len; }
+          picked.sort((x, y) => String(x.ts || '').localeCompare(String(y.ts || '')));            // 进 system 按时间正序，读起来像一本子
+          if (picked.length) { inc.stableMem = '【我的长期记忆（这一班不变）】\n' + R.memory.render(picked); for (const m of picked) inc.memoryIds.add(m.id); }
+          run.system_memories = picked.length;
+        }
+      }
       const incremental = turn > 0;                                       // 本班第 2 轮起：只发新增（首轮全发，住户要靠它建立认知）
       run.turn = turn; run.incremental = incremental;
       let remembered = '';
@@ -227,8 +241,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
         const q = inbox.map(m => m.text).join(' ') || handover;
         const hits = R.memory.recall(q, ctx.memory_hits); const recent = R.memory.recent(ctx.memory_recent).filter(m => !hits.find(h => h.id === m.id));
         let list = [...hits, ...recent];
-        if (incremental) { const f = C.freshMemories(list, inc.memoryIds); list = f.fresh; for (const id of f.ids) inc.memoryIds.add(id); }
-        else for (const m of list) if (m && m.id) inc.memoryIds.add(m.id);
+        { const f = C.freshMemories(list, inc.memoryIds); list = f.fresh; for (const id of f.ids) inc.memoryIds.add(id); }   // 首轮：去掉已进 system 的；增量轮：去掉本班发过的
         if (list.length) remembered = (incremental ? '【新想起来的事】\n' : '【我记得的事】\n') + R.memory.render(list);
       }
       // ---- 上下文三条规则（细节与打分表见 lib/context.js 与 README"上下文怎么拼"）----
@@ -285,6 +298,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
         '【上次交接信】', handover,
         R.keys.concerns().length ? '【我惦记的事】\n' + R.keys.concerns().join('\n') : '',
         R.keys.notes().length ? '【我自己的小本】\n' + R.keys.notes().join('\n') : '',
+        inc.stableMem,                                                                               // V2-W8e：稳定记忆撑前缀（本班不变，吃缓存）
       ].filter(x => x !== '').join('\n');
       // 每次醒都变的一律放 user：时间、在场的人、为什么醒、召回、刚才的话、私信往来、未读。system 一班内基本不动，prompt cache 才吃得到。
       const mLine = C.membersLine(members);
