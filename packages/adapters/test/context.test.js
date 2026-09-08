@@ -79,3 +79,31 @@ test('pickRecent：空候选、limit 0 都安全', () => {
   assert.deepEqual(pickRecent([], { limit: 5, score: () => 0, render: renderId }), { lines: [], picked: [], scored: [] });
   assert.deepEqual(pickRecent([msg()], { limit: 0, score: () => 0, render: renderId }).lines, []);
 });
+
+// ---- V2-W8d 增量上下文 ----
+const { freshMemories, snapshotTasks, diffTasks, membersLine } = require('../lib/context');
+test('freshMemories：按 id 去重，只留没发过的，并返回这次要标记的 id', () => {
+  const sent = new Set(['m1']);
+  const r = freshMemories([{ id: 'm1', content: 'a' }, { id: 'm2', content: 'b' }, { content: '无 id' }, null], sent);
+  assert.deepEqual(r.fresh.map(m => m.id), ['m2']); assert.deepEqual(r.ids, ['m2']);
+  for (const id of r.ids) sent.add(id);
+  assert.deepEqual(freshMemories([{ id: 'm2' }, { id: 'm1' }], sent).fresh, []);
+});
+test('diffTasks：新钉 / 改状态 / 改到期 / 划掉 各报一次，没变不报，快照可回灌', () => {
+  const t1 = [{ id: 'a', state: 'open', title: 'A', due_at: '2026-09-09T00:00:00Z' }, { id: 'b', state: 'doing', title: 'B' }];
+  const d0 = diffTasks(null, t1);
+  assert.deepEqual(d0.added.map(t => t.id), ['a', 'b']); assert.equal(d0.changed.length, 0); assert.equal(d0.removed.length, 0);
+  const d1 = diffTasks(d0.snapshot, t1);
+  assert.deepEqual([d1.added.length, d1.changed.length, d1.removed.length], [0, 0, 0]);
+  const t2 = [{ id: 'a', state: 'done', title: 'A', due_at: '2026-09-09T00:00:00Z' }, { id: 'c', state: 'open', title: 'C' }];
+  const d2 = diffTasks(d0.snapshot, t2);
+  assert.deepEqual(d2.added.map(t => t.id), ['c']); assert.deepEqual(d2.changed.map(t => t.id), ['a']); assert.deepEqual(d2.removed.map(t => t.id), ['b']);
+  const t3 = [{ id: 'c', state: 'open', title: 'C', due_at: '2026-09-10T00:00:00Z' }];
+  assert.deepEqual(diffTasks(d2.snapshot, t3).changed.map(t => t.id), ['c']);
+  assert.deepEqual(snapshotTasks(t3), { c: { state: 'open', title: 'C', due: '2026-09-10T00:00:00Z' } });
+});
+test('membersLine：一行；上线状态变了字符串就不同', () => {
+  const a = membersLine([{ name: '甲', species: 'human', online: true }, { name: '乙', species: 'agent', online: false }]);
+  const b = membersLine([{ name: '甲', species: 'human', online: true }, { name: '乙', species: 'agent', online: true }]);
+  assert.equal(a, '【家里的人】甲(human·在线)、乙(agent)'); assert.notEqual(a, b);
+});

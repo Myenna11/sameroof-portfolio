@@ -170,6 +170,10 @@ async function run(roomName, runtimeName, think, opts = {}) {
   let active = null;                                                // { lane, reason, ctrl, startedAt }
   let hb = null;                                                    // 心跳调度句柄
   const shift = [];                                                 // 这一班发生的事，睡前写进交接信
+  // V2-W8d 增量上下文：本班第 2 轮起 user 只发新增。inc 记住这一班已发过的记忆 id、黑板快照、家里的人一行、私信伙伴；
+  // think.shift.turns()==0（新班 / 归档后）就重置回"全发"。持久化 shift 重启后 turns>0 但 inc 为空 → 记忆/黑板会多发一次，无害。
+  let inc = null;
+  const shiftTurns = () => (think.shift && typeof think.shift.turns === 'function') ? think.shift.turns() : 0;
   function requestWake(lane, reason, deliver = 'after_turn') {
     if (stopped) return Promise.resolve();
     if (active) {
@@ -214,11 +218,18 @@ async function run(roomName, runtimeName, think, opts = {}) {
       const ctx = Object.assign({ recent_messages: 20, recent_max_chars: 4000, memory_hits: 4, memory_recent: 3, frame_max_chars: 400 },
         ((R.house.defaults || {}).context) || ((R.house.extensions || {})['dev.sameroof.context']) || {},
         room.context || ((room.extensions || {})['dev.sameroof.context']) || {});
+      const turn = shiftTurns();
+      if (turn === 0 || !inc) inc = { memoryIds: new Set(), taskSnap: null, membersLine: '', dmPartners: new Set() };
+      const incremental = turn > 0;                                       // 本班第 2 轮起：只发新增（首轮全发，住户要靠它建立认知）
+      run.turn = turn; run.incremental = incremental;
       let remembered = '';
       if (R.memory) {
         const q = inbox.map(m => m.text).join(' ') || handover;
         const hits = R.memory.recall(q, ctx.memory_hits); const recent = R.memory.recent(ctx.memory_recent).filter(m => !hits.find(h => h.id === m.id));
-        const list = [...hits, ...recent]; if (list.length) remembered = '【我记得的事】\n' + R.memory.render(list);
+        let list = [...hits, ...recent];
+        if (incremental) { const f = C.freshMemories(list, inc.memoryIds); list = f.fresh; for (const id of f.ids) inc.memoryIds.add(id); }
+        else for (const m of list) if (m && m.id) inc.memoryIds.add(m.id);
+        if (list.length) remembered = (incremental ? '【新想起来的事】\n' : '【我记得的事】\n') + R.memory.render(list);
       }
       // ---- 上下文三条规则（细节与打分表见 lib/context.js 与 README"上下文怎么拼"）----
       // 1. remembered 不进 system，放 user 开头（system 只放一班内稳定的：人设、规矩、交接信、惦记本、小本）
@@ -229,7 +240,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
       const scoreOpts = { roomId: room.id, inbox, members, now: Date.now() };
       const frame = (m, ts, tag, maxChars = ctx.frame_max_chars) => C.renderFrame(m, { roomId: room.id, members, ts, tag, maxChars });
       const pick = (rows, limit, maxChars, ts) => C.pickRecent(rows, { limit, maxChars, score: m => C.scoreRecent(m, scoreOpts), render: m => frame(m, ts) });
-      if (ctx.recent_messages > 0) {
+      if (ctx.recent_messages > 0 && !incremental) {                  // 增量轮不灌"刚才的话"：他自己就在这段对话里，客厅里别人的新话走未读
         const pool = Math.min(60, ctx.recent_messages * 2);
         const hist = await api('GET', `/history?before=${Number.MAX_SAFE_INTEGER}&limit=${Math.min(200, pool + inbox.length)}`).catch(() => []);  // 最近的（不是最早的）；多拿 inbox.length 条免得未读吃掉候选池
         const older = (Array.isArray(hist) ? hist : []).filter(m => !unreadIds.has(m.id)).slice(-pool);
@@ -243,6 +254,8 @@ async function run(roomName, runtimeName, think, opts = {}) {
         const partners = [...new Set(inbox.filter(m => m.kind === 'dm').map(m => m.from_id))].filter(Boolean);
         const blocks = []; const n = ctx.dm_recent || 10; const pool = Math.min(60, n * 2);
         for (const pid of partners.slice(0, 3)) {
+          if (incremental && inc.dmPartners.has(pid)) continue;           // 这一班已经带过他的往来，后面的都在对话里
+          inc.dmPartners.add(pid);
           const h = await api('GET', `/dm/history?with=${encodeURIComponent(pid)}&limit=${Math.min(200, pool + inbox.length)}`).catch(() => []);
           const rows = (Array.isArray(h) ? h : []).filter(m => !unreadIds.has(m.id)).slice(-pool);
           if (!rows.length) continue;
@@ -274,28 +287,47 @@ async function run(roomName, runtimeName, think, opts = {}) {
         R.keys.notes().length ? '【我自己的小本】\n' + R.keys.notes().join('\n') : '',
       ].filter(x => x !== '').join('\n');
       // 每次醒都变的一律放 user：时间、在场的人、为什么醒、召回、刚才的话、私信往来、未读。system 一班内基本不动，prompt cache 才吃得到。
-      const wakeHead = [
-        R.houseTime(),
-        `【家里的人】${members.map(m => `${m.name}(${m.species}${m.online ? '·在线' : ''})`).join('、')}`,
-        `【为什么醒】${reason}`,
-        myTasks.length ? '【黑板上我的事】\n' + BB.renderTaskLines(myTasks, R.tz).join('\n') : '',
-        remembered, recentCtx, dmCtx,
-      ].filter(x => x !== '').join('\n');
+      const mLine = C.membersLine(members);
+      const td = C.diffTasks(inc.taskSnap, myTasks); inc.taskSnap = td.snapshot;
+      let wakeHead;
+      if (!incremental) {
+        wakeHead = [
+          R.houseTime(), mLine, `【为什么醒】${reason}`,
+          myTasks.length ? '【黑板上我的事】\n' + BB.renderTaskLines(myTasks, R.tz).join('\n') : '',
+          remembered, recentCtx, dmCtx,
+        ].filter(x => x !== '').join('\n');
+      } else {
+        const tz = R.tz; const nowLine = `【现在】${new Intl.DateTimeFormat('zh-CN', { timeZone: tz, dateStyle: 'short', timeStyle: 'short' }).format(new Date())}（本班第 ${turn + 1} 轮）`;
+        const bb = [];
+        if (td.added.length) bb.push('新钉的：\n' + BB.renderTaskLines(td.added, tz).join('\n'));
+        if (td.changed.length) bb.push('变了的：\n' + BB.renderTaskLines(td.changed, tz).join('\n'));
+        if (td.removed.length) bb.push('不在黑板上了：' + td.removed.map(t => `${t.id}「${t.title}」`).join('、'));
+        wakeHead = [
+          nowLine,
+          mLine !== inc.membersLine ? mLine : '',
+          `【为什么醒】${reason}`,
+          bb.length ? '【黑板变化】\n' + bb.join('\n') : '',
+          remembered, dmCtx,
+        ].filter(x => x !== '').join('\n');
+      }
+      inc.membersLine = mLine;
       const inboxText = '【你没读的客厅记录（按时间）】\n' + inbox.map(m => m.kind === 'result' ? renderInboxLine(m, room.id) : frame(m, 'short', `${m.kind === 'dm' ? '(私信给你)' : ''}${m.mentions && m.mentions.includes(room.id) ? '(叫了你)' : ''}`, 0)).join('\n');   // 未读不截断，只做工具留壳；网关结果单独渲染
       const user = wakeHead + '\n\n' + (routine ? `【例行】${routine.prompt}` + (routine.at ? `（这是一次性提醒，原定 ${fmtAt(atMs(routine), R.tz)}）` : '') + (inbox.length ? '\n\n' + inboxText : '') + '\n\n例行的事做完就说一句，没什么要说就回 (静默)。'
-        : inbox.length ? inboxText + '\n\n看完决定：要不要说、对谁说。只回新的；上面"刚才的话"里已经有人回过的、你自己说过的，不要再回一遍。像家里人说话，不要列清单；没什么要说就回 (静默)。'
+        : inbox.length ? inboxText + (incremental ? '\n\n看完决定：要不要说、对谁说。只回新的；这一班里你已经说过的不要再说一遍。像家里人说话，不要列清单；没什么要说就回 (静默)。' : '\n\n看完决定：要不要说、对谁说。只回新的；上面"刚才的话"里已经有人回过的、你自己说过的，不要再回一遍。像家里人说话，不要列清单；没什么要说就回 (静默)。')
         : '心跳醒来。客厅没人叫你，但惦记本或黑板上有你的事。要是确实该对家里人说一句就说，没有就回 (静默)。');
+      const frozenSystem = (incremental && think.shift && Array.isArray(think.shift.messages) && think.shift.messages.length && think.shift.messages[0].role === 'system') ? think.shift.messages[0].content : system;   // 本班 system 冻结：惦记本/小本改了也不打断累积（他自己写的他知道；下一班再进 system）
+      run.system_frozen = frozenSystem !== system;
       run.heard = inbox.map(m => ({ id: m.id, from: m.from, kind: m.kind, text: m.text.slice(0, 300), mentioned: !!(m.mentions && m.mentions.includes(room.id)) }));
       run.context = { system_chars: system.length, user_chars: user.length, memories_recalled: remembered ? remembered.split('\n').length - 1 : 0, recent_lines: recentCtx ? recentCtx.split('\n').length - 1 : 0, dm_lines: dmCtx ? dmCtx.split('\n').length : 0, recent_scored: recentScored, system_preview: system.slice(0, 1200), user_preview: user.slice(0, 1200) };
       // 跳数：人说的话 hop=0；agent 回话 = 听到的 agent 消息里最大 hop + 1。超过上限的链只写不叫醒（防两个 agent 无限对聊）
       const hopIn = inbox.filter(m => !isHuman(m.from_id)).reduce((a, m) => Math.max(a, Number((m.meta || {}).hop) || 0), 0);
       const hopOut = (room.species === 'human' || routine) ? 0 : hopIn + 1;   // 例行醒来是新起点，不接 agent 链
-      if (opts.dry) { console.log('==== SYSTEM ====\n' + system + '\n==== USER ====\n' + user); console.log('[dry-run] 只看不说，不发客厅、不标已读、不写记忆'); run.status = 'dry'; return; }
+      if (opts.dry) { console.log('==== SYSTEM ====\n' + frozenSystem + '\n==== USER ====\n' + user); console.log('[dry-run] 只看不说，不发客厅、不标已读、不写记忆'); run.status = 'dry'; return; }
       run.model_calls = 1;
-      const first = unpackReply(await abortable(Promise.resolve(think(system, user, signal)), signal)); addUsage(run, first.usage);
+      const first = unpackReply(await abortable(Promise.resolve(think(frozenSystem, user, signal)), signal)); addUsage(run, first.usage);
       let reply = first.text.trim();
       run.raw_reply = reply.slice(0, 2000);
-      if (!reply && inbox.some(m => m.mentions && m.mentions.includes(room.id))) { fs.writeSync(2, `[${room.name}] 被叫了却回空，再试一次\n`); const again = unpackReply(await abortable(Promise.resolve(think(system, user + '\n\n（上一次你回了空白。被叫了至少应一声。）', signal)), signal)); addUsage(run, again.usage); reply = again.text.trim(); run.model_calls = 2; run.raw_reply = reply.slice(0, 2000); }
+      if (!reply && inbox.some(m => m.mentions && m.mentions.includes(room.id))) { fs.writeSync(2, `[${room.name}] 被叫了却回空，再试一次\n`); const again = unpackReply(await abortable(Promise.resolve(think(frozenSystem, user + '\n\n（上一次你回了空白。被叫了至少应一声。）', signal)), signal)); addUsage(run, again.usage); reply = again.text.trim(); run.model_calls = 2; run.raw_reply = reply.slice(0, 2000); }
       fs.writeSync(2, `[${room.name} 原始回复] ${reply.slice(0, 80).replace(/\n/g, ' ')}\n`);
       run.directives = [];
       { const lines = reply.split('\n'); const keep = [];

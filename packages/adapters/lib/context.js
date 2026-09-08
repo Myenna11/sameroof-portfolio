@@ -52,3 +52,27 @@ function pickRecent(msgs, { limit = 20, maxChars = 0, score, render } = {}) {
   return { lines: take.map(x => x.line), picked: take.map(x => x.m), scored: byScore.map(x => ({ id: x.m.id, score: x.score })) };
 }
 module.exports = { isTool, toolName, frameBody, renderFrame, scoreRecent, pickRecent };
+
+// ---- V2-W8d 增量上下文（本班第 2 轮起只发新增）——纯函数，room.js 调用 ----
+// 记忆去重：只留没发过的；返回 { fresh, ids }（ids 是这次要标记为已发的）
+function freshMemories(list, sentIds) {
+  const fresh = (list || []).filter(m => m && m.id && !sentIds.has(m.id));
+  return { fresh, ids: fresh.map(m => m.id) };
+}
+// 黑板快照：id → 可比较的形状（状态/标题/到期）
+function snapshotTasks(tasks) {
+  const snap = {};
+  for (const t of tasks || []) if (t && t.id) snap[t.id] = { state: t.state || '', title: String(t.title || '').slice(0, 80), due: t.due_at || t.due_cron || '' };
+  return snap;
+}
+// 黑板差量：新钉的 / 变了的 / 没了的。相同的不报。
+function diffTasks(prevSnap, tasks) {
+  const now = snapshotTasks(tasks); const prev = prevSnap || {};
+  const added = [], changed = [], removed = [];
+  for (const t of tasks || []) { if (!t || !t.id) continue; const p = prev[t.id]; if (!p) added.push(t); else if (p.state !== now[t.id].state || p.title !== now[t.id].title || p.due !== now[t.id].due) changed.push(t); }
+  for (const id of Object.keys(prev)) if (!now[id]) removed.push({ id, ...prev[id] });
+  return { added, changed, removed, snapshot: now };
+}
+// 家里的人：一行；变了才发（上线/下线/新面孔）
+function membersLine(members) { return `【家里的人】${(members || []).map(m => `${m.name}(${m.species}${m.online ? '·在线' : ''})`).join('、')}`; }
+module.exports.freshMemories = freshMemories; module.exports.snapshotTasks = snapshotTasks; module.exports.diffTasks = diffTasks; module.exports.membersLine = membersLine;
