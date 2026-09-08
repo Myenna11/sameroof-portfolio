@@ -13,3 +13,4 @@ rooms/*/concerns*.md
 rooms/*/notes.md
 backups/
 state/runs/
+state/cache-probe/
