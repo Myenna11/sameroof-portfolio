@@ -644,6 +644,17 @@ function createLivingRoom(options = {}) {
         return writeJson(res, 200, { removed: deletePush.run(body.endpoint, me.id).changes > 0 });
       }
 
+      // V2-AP：待审列表。只给人看；默认 status=pending，也可 all/allowed/denied/expired。顺手把过期的 pending 标成 expired（网关那边本来就按 expires 拒，这里只是让人看得准）。
+      if (req.method === 'GET' && url.pathname === '/approval') {
+        if (me.species !== 'human') throw new HttpError(403, 'APPROVAL-HUMAN-ONLY', '只有人能看审批列表。');
+        const status = url.searchParams.get('status') || 'pending';
+        if (!['pending', 'all', 'allowed', 'denied', 'expired'].includes(status)) throw new HttpError(400, 'APPROVAL-STATUS-INVALID', 'status 只能是 pending / all / allowed / denied / expired。');
+        const limit = positiveInt(url.searchParams.get('limit'), 50, 1, 200, 'APPROVAL-LIMIT-INVALID');
+        db.prepare("UPDATE approvals SET status='expired' WHERE status='pending' AND expires_ts < ?").run(new Date().toISOString());
+        const rows = (status === 'all' ? db.prepare('SELECT * FROM approvals ORDER BY created_ts DESC LIMIT ?').all(limit)
+          : db.prepare('SELECT * FROM approvals WHERE status=? ORDER BY created_ts DESC LIMIT ?').all(status, limit));
+        return writeJson(res, 200, rows.map(a => ({ approval_id: a.id, resident_id: a.resident_id, resident_name: byId.get(a.resident_id)?.name || a.resident_id, action: a.action, params: (() => { try { return JSON.parse(a.params); } catch { return null; } })(), params_digest: a.params_digest, status: a.status, decided_by: a.decided_by || null, created_ts: a.created_ts, expires_ts: a.expires_ts, gateway_request_id: a.gateway_request_id || null, digest_kind: a.digest_kind })));
+      }
       if (req.method === 'POST' && url.pathname === '/approval') {
         rateOrThrow(approvalLimiter, me.id, '申请审批');
         const body = await readJson(req);

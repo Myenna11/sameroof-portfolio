@@ -356,7 +356,7 @@ function approvalCard(m,meta){
  const card=document.createElement('div');card.className='apcard';
  const t=document.createElement('div');t.className='apt';t.textContent='🙋 审批请求';
  const b=document.createElement('div');b.className='apb';b.textContent=String(m.text||'');
- const mi=document.createElement('div');mi.className='apm';mi.textContent='编号 '+meta.approval_id;
+ const mi=document.createElement('div');mi.className='apm';mi.textContent='编号 '+meta.approval_id+(m.ts?' · '+fmtFull(m.ts):'');
  card.append(t,b,mi);
  const state={decision:null,settled:(decision,by)=>{state.decision=decision;pending.delete(meta.approval_id);
   for(const el of state.els){const btns=el.querySelector('.apbtns');if(btns)btns.remove();if(el.querySelector('.apdone'))continue;const r=document.createElement('div');r.className='apdone';r.textContent=decision==='allowed'?('✅ '+(by?by+' ':'')+'已同意'):decision==='expired'?'⌛ 已过期':('❌ '+(by?by+' ':'')+'已拒绝');el.appendChild(r)}}};
@@ -373,7 +373,9 @@ function approvalCard(m,meta){
     btn.onclick=()=>{for(const x of btns.children)x.disabled=true;req('POST','/approval/'+meta.approval_id,{decision:v}).then(()=>st.settled(v==='allow'?'allowed':'denied','我')).catch(e=>{alert(e.message);for(const x of btns.children)x.disabled=false})};
     btns.appendChild(btn)}
    card.appendChild(btns);
-   req('GET','/approval/'+meta.approval_id).then(d=>{if(d.expires_ts)mi.textContent+=' · 有效期至 '+fmtFull(d.expires_ts);if(d.status&&d.status!=='pending')st.settled(d.status,d.decided_by&&name(d.decided_by))}).catch(()=>{});
+   req('GET','/approval/'+meta.approval_id).then(d=>{if(d.expires_ts)mi.textContent+=' · 有效期至 '+fmtFull(d.expires_ts);
+    if(d.params&&typeof d.params==='object'&&!card.querySelector('.apparams')){const pr=document.createElement('div');pr.className='apm apparams';pr.style.whiteSpace='pre-wrap';pr.style.wordBreak='break-all';const pp={...d.params};if(typeof pp.content==='string'&&pp.content.length>200)pp.content=pp.content.slice(0,200)+'…('+d.params.content.length+' 字)';pr.textContent=(d.action||'')+' '+JSON.stringify(pp);card.insertBefore(pr,mi)}
+    if(d.status&&d.status!=='pending')st.settled(d.status,d.decided_by&&name(d.decided_by))}).catch(()=>{});
   }else{const w=document.createElement('div');w.className='apm';w.textContent='等维护者决定…';card.appendChild(w)}
  }else st.settled(st.decision);
  return card}
@@ -390,6 +392,20 @@ function approvalExecuted(meta){
  for(const el of st.els){if(el.querySelector('.apexec'))continue;
   const r=document.createElement('div');r.className='apdone apexec';r.style.color=color;
   r.textContent=txt+cov+nxt;el.appendChild(r)}}
+
+
+/* ===== 审批·从客厅拉待审（V2-AP）：刷新/断线后不靠 50 条历史碰运气 ===== */
+async function loadPendingApprovals(){
+ if(!(me&&me.species==='human'))return;
+ let rows=[];try{rows=await req('GET','/approval?status=pending&limit=100')}catch(e){return}
+ let changed=false;
+ for(const a of rows){
+  if(pending.has(a.approval_id))continue;
+  const c=cards[a.approval_id];if(c&&c.decision)continue;
+  const m={kind:'system',from_id:a.resident_id,text:(a.resident_name||a.resident_id)+' 想 '+a.action+'，等审批。',ts:a.created_ts};
+  const meta={approval_id:a.approval_id,action:a.action,params_digest:a.params_digest,gateway_request_id:a.gateway_request_id,digest_kind:a.digest_kind,params:a.params};
+  pending.set(a.approval_id,{m,meta});changed=true}
+ if(changed)renderPending()}
 
 /* ===== 审批·等维护者 ===== */
 function renderPending(){
@@ -1054,6 +1070,7 @@ async function gapFill(){
   const acts=await req('GET','/activity?limit=60');
   for(const a of acts)feedPush(a,true);
   renderFeed();
+  loadPendingApprovals();
  }catch(e){}}
 
 /* ===== 实时 ===== */
@@ -1088,6 +1105,7 @@ async function boot(){if(!api||!tok)return ppair();
  if(loungeState.firstSeq)lastSeq=latest[latest.length-1].seq;
  for(const m of latest){if(m.kind==='system')build(m)}
  loungeRender(latest);
+ loadPendingApprovals();
  const inbox=await req('GET','/inbox');
  const pubIds=[];
  for(const m of inbox){if(m.kind==='dm'){const d=dmGet(m.from_id);if(!d.msgs.some(x=>x.id===m.id)){d.msgs.push(m);d.msgs.sort((a,b)=>a.seq-b.seq);d.unread++}if(m.id)seen.add(m.id)}else{receive(m,true);if(m.id)pubIds.push(m.id)}}
