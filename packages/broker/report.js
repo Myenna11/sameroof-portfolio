@@ -67,3 +67,36 @@ class LedgerReport {
   }
 }
 module.exports = { LedgerReport };
+
+// ---- V2-DOCTOR 前缀漂移：同一住户连续两次上游请求的 wire body 做公共前缀比对，报第几个字符开始分叉 ----
+// 健康的累积会话：新 body = 旧 body 去掉结尾的 "}]" 等几个字符 + 追加的 assistant/user。分叉点 ≥ 旧 body 长度 − TAIL 就算稳。
+// 分叉在更前面 = 前缀被改了（system 变了、messages 被重排/压缩、参数顺序变了…），缓存从那一字节起全废。只在内存里留每住户最近 keep 条。
+// 稳的定义：分叉点 ≥ 上一条 body 里 messages 数组收尾的位置（新 body 只在那之后变：'}]'→'},{'）。
+// 用 JSON.stringify(body.messages) 在 wire body 里定位数组，比固定尾巴容差准（短 body 时固定容差会吞掉 system 里的真分叉）。
+const DRIFT_TAIL = 160;   // 只在定位不到 messages 时兜底
+class PrefixDoctor {
+  constructor({ keep = 50, maxBody = 2 * 1024 * 1024 } = {}) { this.keep = keep; this.maxBody = maxBody; this.last = new Map(); this.log = new Map(); }
+  observe({ residentId, requestId, wireBody, body, model }) {
+    const now = wireBody.length > this.maxBody ? wireBody.slice(0, this.maxBody) : wireBody;
+    let msgEnd = null; try { const M = JSON.stringify(body && body.messages); const k = M ? now.indexOf(M) : -1; if (k >= 0) msgEnd = k + M.length - 1; } catch {}
+    const prev = this.last.get(residentId);
+    let rec = { ts: new Date().toISOString(), request_id: requestId, model, body_len: wireBody.length, prev_request_id: null, prev_len: null, drift_at: null, stable: null, note: '首条，无可比' };
+    if (prev) {
+      let i = 0; const n = Math.min(prev.body.length, now.length); while (i < n && prev.body.charCodeAt(i) === now.charCodeAt(i)) i++;
+      const need = prev.msgEnd != null ? prev.msgEnd - 1 : prev.body.length - DRIFT_TAIL;
+      const stable = i >= need;
+      rec = { ...rec, prev_request_id: prev.request_id, prev_len: prev.body.length, prev_messages_end: prev.msgEnd, drift_at: i, stable,
+        note: stable ? '前缀稳，只在结尾追加' : (prev.model !== model ? '换了模型' : i < 64 ? '开头就不一样（model/键序？）' : '中段分叉：前缀被改了'),
+        ...(stable ? {} : { was: prev.body.slice(Math.max(0, i - 60), i + 60), now: now.slice(Math.max(0, i - 60), i + 60) }) };
+    }
+    this.last.set(residentId, { body: now, request_id: requestId, model, msgEnd });
+    const list = this.log.get(residentId) || []; list.push(rec); if (list.length > this.keep) list.splice(0, list.length - this.keep); this.log.set(residentId, list);
+    return rec;
+  }
+  report({ resident = null, limit = 20 } = {}) {
+    const ids = resident ? [resident] : [...this.log.keys()];
+    return { generated_at: new Date().toISOString(), residents: ids.map(id => { const rows = (this.log.get(id) || []).slice(-Math.max(1, Math.min(200, Number(limit) || 20)));
+      const cmp = rows.filter(r => r.stable !== null); return { resident_id: id, observed: rows.length, compared: cmp.length, unstable: cmp.filter(r => !r.stable).length, rows }; }) };
+  }
+}
+module.exports.PrefixDoctor = PrefixDoctor;

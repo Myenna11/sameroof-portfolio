@@ -58,6 +58,7 @@ sameroof-broker push status
 sameroof-broker report init [--rotate]      # 给房子签只读报表凭证（report-client.token）
 sameroof-broker report status
 sameroof-broker report daily [--days 7] [--tz Asia/Shanghai]
+sameroof-broker report drift [--resident <id>] [--limit 20]   # 前缀漂移（走 socket 问活的 broker；内存态，重启清零）
 sameroof-broker ledger [--limit 50]
 
 真凭证永远不接受 --api-key，避免进入 shell history。token secret 只在签发时显示一次，并写入 0600 token 文件。`);
@@ -79,6 +80,12 @@ async function run(argv = process.argv.slice(2)) {
     if (p[0] === 'report' && p[1] === 'init') return print(report.initialize(f.rotate === true));
     if (p[0] === 'report' && p[1] === 'status') return print(report.status());
     if (p[0] === 'report' && p[1] === 'daily') return print(report.daily({ days: f.days || 7, tz: f.tz || 'UTC' }));
+    if (p[0] === 'report' && p[1] === 'drift') {                                   // 内存态在活进程里，得经 socket 问
+      const secret = require('fs').readFileSync(report.clientTokenFile, 'utf8').trim();
+      const sock = process.env.SAMEROOF_BROKER_SOCKET || require('path').join(store.runDir, 'broker.sock');
+      const q = (f.resident ? '&resident=' + encodeURIComponent(f.resident) : '') + '&limit=' + (f.limit || 20);
+      return new Promise((resolve, reject) => { const r = require('http').request({ socketPath: sock, path: '/internal/report/prefix-drift?x=1' + q, headers: { authorization: 'Bearer ' + secret } }, res => { let t = ''; res.on('data', c => t += c); res.on('end', () => { try { print(JSON.parse(t)); resolve(); } catch (e) { reject(new Error(t.slice(0, 200))); } }); }); r.on('error', reject); r.end(); });
+    }
     if (p[0] === 'push' && p[1] === 'init') return print(push.initialize(required(f.subject, '缺 --subject。'), f.rotate === true));
     if (p[0] === 'push' && p[1] === 'status') return print(push.status());
 

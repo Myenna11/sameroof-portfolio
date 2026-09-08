@@ -7,7 +7,7 @@ const http = require('http');
 const path = require('path');
 const { BrokerStore, BrokerError } = require('./store');
 const { PushCredentialStore } = require('./push');
-const { LedgerReport } = require('./report');
+const { LedgerReport, PrefixDoctor } = require('./report');
 
 const MAX_BODY = 2 * 1024 * 1024;
 const MAX_RESPONSE = 20 * 1024 * 1024;
@@ -140,6 +140,7 @@ function createBroker(options = {}) {
   const ownsStore = !options.store;
   const pushCredentials = options.pushCredentials || new PushCredentialStore({ stateDir: store.stateDir });
   const ledgerReport = options.ledgerReport || new LedgerReport({ store, stateDir: store.stateDir });
+  const prefixDoctor = options.prefixDoctor || new PrefixDoctor();   // V2-DOCTOR：只在内存，重启清零
   const socketPath = path.resolve(options.socketPath || process.env.SAMEROOF_BROKER_SOCKET || path.join(store.runDir, 'broker.sock'));
   const socketMode = options.socketMode === undefined
     ? Number.parseInt(process.env.SAMEROOF_BROKER_SOCKET_MODE || '600', 8)
@@ -153,6 +154,11 @@ function createBroker(options = {}) {
     try {
       if (req.method === 'GET' && req.url === '/health') return json(res, 200, { ok: true });
 
+      if (req.method === 'GET' && req.url.split('?')[0] === '/internal/report/prefix-drift') {   // V2-DOCTOR：同住户连续请求的前缀分叉
+        ledgerReport.authorize(bearer(req));
+        const q = new URL(req.url, 'http://broker').searchParams;
+        return json(res, 200, prefixDoctor.report({ resident: q.get('resident'), limit: q.get('limit') || 20 }));
+      }
       if (req.method === 'GET' && req.url.split('?')[0] === '/internal/report/daily') {   // V2-LEDGER：只读报表，房子凭 report-client.token 调
         ledgerReport.authorize(bearer(req));
         const q = new URL(req.url, 'http://broker').searchParams;
@@ -191,6 +197,8 @@ function createBroker(options = {}) {
         reserveTokens: estimateReservation(body)
       });
 
+      const wireBody = JSON.stringify(body);                                          // 上游真正看到的字节；doctor 就比这个
+      try { const rid = reservation.token.resident_id; const drift = prefixDoctor.observe({ residentId: rid, requestId: reservation.requestId, wireBody, body, model: String(body.model) }); if (drift.stable === false) console.error(`[doctor] ${drift.note} resident=${rid} drift_at=${drift.drift_at}/${drift.prev_len}`); } catch {}
       if (reservation.credential.provider === 'mock') {
         let mocked;
         try { mocked = mockCompletion(body); }
@@ -218,7 +226,7 @@ function createBroker(options = {}) {
         upstreamResponse = await fetch(buildUpstreamUrl(reservation.credential.base_url, req.url, reservation.credential.path_style), {
           method: 'POST',
           headers: safeUpstreamHeaders(req, reservation.credential),
-          body: JSON.stringify(body),
+          body: wireBody,
           redirect: 'error',
           signal: AbortSignal.timeout(Number(options.timeoutMs || 120000))
         });

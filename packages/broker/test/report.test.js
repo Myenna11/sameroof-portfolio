@@ -65,3 +65,42 @@ test('/internal/report/daily：缺凭证 503、错凭证 401、对凭证 200；i
     assert.equal((await req(broker.socketPath, '/internal/report/daily', secret)).status, 401);   // 旧的作废
   } finally { await broker.close(); store.close(); fs.rmSync(home, { recursive: true, force: true }); }
 });
+
+test('PrefixDoctor：累积会话只在结尾追加 → stable；system 改一字 → 中段分叉并给出 was/now 摘录；换模型标出', () => {
+  const { PrefixDoctor } = require('../report');
+  const d = new PrefixDoctor({ keep: 5 });
+  const mkB = (sys, msgs, model = 'glm') => ({ model, messages: [{ role: 'system', content: sys }, ...msgs], stream: false, max_tokens: 4000 });
+  const mk = (...a) => JSON.stringify(mkB(...a));
+  const S = '你是甲。'.repeat(50);
+  let r = d.observe({ residentId: 'a', requestId: 'r1', wireBody: mk(S, [{ role: 'user', content: '在吗' }]), body: mkB(S, [{ role: 'user', content: '在吗' }]), model: 'glm' });
+  assert.equal(r.stable, null);
+  r = d.observe({ residentId: 'a', requestId: 'r2', wireBody: mk(S, [{ role: 'user', content: '在吗' }, { role: 'assistant', content: '在' }, { role: 'user', content: '晚安' }]), body: mkB(S, [{ role: 'user', content: '在吗' }, { role: 'assistant', content: '在' }, { role: 'user', content: '晚安' }]), model: 'glm' });
+  assert.equal(r.stable, true); assert.ok(r.drift_at >= r.prev_messages_end - 1); assert.equal(r.prev_request_id, 'r1');
+  r = d.observe({ residentId: 'a', requestId: 'r3', wireBody: mk(S + '（惦记本多了一行）', [{ role: 'user', content: '在吗' }, { role: 'assistant', content: '在' }, { role: 'user', content: '晚安' }, { role: 'assistant', content: '嗯' }, { role: 'user', content: '？' }]), body: mkB(S + '（惦记本多了一行）', [{ role: 'user', content: '在吗' }, { role: 'assistant', content: '在' }, { role: 'user', content: '晚安' }, { role: 'assistant', content: '嗯' }, { role: 'user', content: '？' }]), model: 'glm' });
+  assert.equal(r.stable, false); assert.equal(r.note, '中段分叉：前缀被改了'); assert.ok(r.drift_at < r.prev_messages_end); assert.ok(r.was && r.now && r.was !== r.now);
+  r = d.observe({ residentId: 'a', requestId: 'r4', wireBody: mk(S, [{ role: 'user', content: '在吗' }], 'glm-pro'), body: mkB(S, [{ role: 'user', content: '在吗' }], 'glm-pro'), model: 'glm-pro' });
+  assert.equal(r.stable, false); assert.equal(r.note, '换了模型');
+  const rep = d.report({ resident: 'a' });
+  assert.equal(rep.residents[0].observed, 4); assert.equal(rep.residents[0].compared, 3); assert.equal(rep.residents[0].unstable, 2);
+  for (let i = 0; i < 10; i++) d.observe({ residentId: 'a', requestId: 'x' + i, wireBody: mk(S, []), body: mkB(S, []), model: 'glm' });
+  assert.equal(d.report({ resident: 'a' }).residents[0].observed, 5);   // keep=5
+  assert.deepEqual(d.report({ resident: 'nobody' }).residents[0].rows, []);
+});
+
+test('/internal/report/prefix-drift：凭报表凭证；经 broker 发两次 mock 请求后能看到 stable 判断', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sameroof-report-'));
+  const store = new BrokerStore({ home, enableMock: true });
+  const broker = createBroker({ store, socketPath: path.join(store.runDir, 'broker.sock') });
+  await broker.listen();
+  try {
+    const rep = new LedgerReport({ store }); rep.initialize(); const secret = fs.readFileSync(rep.clientTokenFile, 'utf8').trim();
+    const issued = store.issueToken({ residentId: 'resident_agent_01', credentials: ['mock-cheap'], models: ['mock-chat'] });
+    const post = msgs => new Promise((resolve, reject) => { const b = Buffer.from(JSON.stringify({ model: 'mock-chat', messages: msgs })); const r = http.request({ socketPath: broker.socketPath, path: '/v1/chat/completions', method: 'POST', headers: { authorization: 'Bearer ' + issued.secret, 'content-type': 'application/json', 'content-length': b.length } }, res => { res.resume(); res.on('end', () => resolve(res.statusCode)); }); r.on('error', reject); r.end(b); });
+    assert.equal(await post([{ role: 'system', content: 'S' }, { role: 'user', content: 'a' }]), 200);
+    assert.equal(await post([{ role: 'system', content: 'S' }, { role: 'user', content: 'a' }, { role: 'assistant', content: 'x' }, { role: 'user', content: 'b' }]), 200);
+    assert.equal((await req(broker.socketPath, '/internal/report/prefix-drift', 'bad')).status, 401);
+    const r = await req(broker.socketPath, '/internal/report/prefix-drift?resident=resident_agent_01', secret);
+    assert.equal(r.status, 200); const R = r.json.residents[0];
+    assert.equal(R.observed, 2); assert.equal(R.compared, 1); assert.equal(R.unstable, 0); assert.equal(R.rows[1].stable, true);
+  } finally { await broker.close(); store.close(); fs.rmSync(home, { recursive: true, force: true }); }
+});
