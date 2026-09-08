@@ -17,7 +17,7 @@ if ! getent passwd sameroof-broker >/dev/null; then
 fi
 
 install -d -o root -g root -m 0755 /opt/sameroof/broker
-install -o root -g root -m 0644 "$src/package.json" "$src/package-lock.json" "$src/server.js" "$src/store.js" "$src/push.js" /opt/sameroof/broker/
+install -o root -g root -m 0644 "$src/package.json" "$src/package-lock.json" "$src/server.js" "$src/store.js" "$src/push.js" "$src/report.js" /opt/sameroof/broker/
 install -o root -g root -m 0755 "$src/brokerctl.js" /opt/sameroof/broker/brokerctl.js
 cd /opt/sameroof/broker
 npm ci --omit=dev --no-audit --no-fund
