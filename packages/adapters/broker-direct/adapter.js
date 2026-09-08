@@ -3,7 +3,7 @@
 'use strict';
 const fs = require('fs'), path = require('path'), http = require('http');
 const { open, run, RUN, HOUSE } = require('../lib/room');
-const { wrapThink, createPersistentShift } = require('../lib/shift-messages');
+const { wrapThink, createPersistentShift, COMPACT_PROMPT } = require('../lib/shift-messages');
 const ROOM = process.argv[2] || '检索员';
 const R = open(ROOM);
 const tokenPath = path.join(RUN, 'tokens', R.room.id);
@@ -12,7 +12,13 @@ const readToken = () => fs.readFileSync(tokenPath, 'utf8').trim();
 const SOCK = path.join(RUN, 'broker.sock');
 // V2-W8：持久化 shift——JSONL 落盘，进程重启从文件恢复，sleep 时归档。
 const shiftPath = path.join(HOUSE, 'state', `shift-${R.room.id}.jsonl`);
-const shift = createPersistentShift(shiftPath);
+// 阈值：room.yaml 的 model.context_window（token 数）有就用，没有默认 60k；压缩在 70% 处触发
+// 第三级压缩复用 call()：单发一条 compact prompt，不进这一班
+const shift = createPersistentShift(shiftPath, {
+  maxTokens: Number((R.room.model || {}).context_window) || 60000,
+  keepTurns: Number((R.room.model || {}).keep_turns) || 12,
+  compactFn: async dialogue => { const r = await call([{ role: 'system', content: COMPACT_PROMPT }, { role: 'user', content: dialogue }], null, readToken()); return (r && r.text) || ''; },
+});
 const think = wrapThink(async (messages, signal) => {
   try { return await call(messages, signal, readToken()); }
   catch (e) { if (!/broker 401/.test(String(e.message))) throw e; fs.writeSync(2, `[broker] 401，重读 token 再试一次\n`); return call(messages, signal, readToken()); }

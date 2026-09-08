@@ -181,7 +181,7 @@ test('session shift：archive 清空并删文件', () => {
 });
 
 // ---- 压缩测试 ----
-const { estimateTokens, compactMessages, compactMessage } = require('../lib/shift-messages');
+const { estimateTokens, compactMessages, compactMessage, compactWithModel, scoreMessage } = require('../lib/shift-messages');
 
 test('estimateTokens：字符数 / 2', () => {
   assert.equal(estimateTokens([{ content: '你好世界' }]), 2);   // 4 chars / 2
@@ -215,7 +215,7 @@ test('compactMessages：不超阈值不压', () => {
     { role: 'user', content: '在吗' },
     { role: 'assistant', content: '在' },
   ];
-  assert.equal(compactMessages(messages, { maxTokens: 1000 }), false);
+  assert.equal(compactMessages(messages, { maxTokens: 1000 }).did, false);
   assert.equal(messages.length, 3);
 });
 
@@ -227,8 +227,8 @@ test('compactMessages：超阈值触发第一级压缩', () => {
     messages.push({ role: 'assistant', content: 'y'.repeat(200) });
   }
   const before = messages.length;
-  const did = compactMessages(messages, { maxTokens: 2000, keepTurns: 5 }); // 阈值 1400 tokens
-  assert.equal(did, true);
+  const r = compactMessages(messages, { maxTokens: 2000, keepTurns: 5 }); // 阈值 1400 tokens
+  assert.equal(r.did, true);
   // 工具消息应该被压缩了
   const early = messages.find(m => m.role === 'user' && m.content.includes('[工具调用: tool0]'));
   if (early) assert.ok(early.content.includes('已压缩'));
@@ -241,16 +241,15 @@ test('compactMessages：超阈值触发第二级截断', () => {
     messages.push({ role: 'user', content: 'u'.repeat(500) });
     messages.push({ role: 'assistant', content: 'a'.repeat(500) });
   }
-  const did = compactMessages(messages, { maxTokens: 3000, keepTurns: 5 });
-  assert.equal(did, true);
-  // 应该有压缩提示
-  const summary = messages.find(m => m.content && m.content.includes('上文压缩过'));
-  assert.ok(summary, '应有压缩提示消息');
+  const r = compactMessages(messages, { maxTokens: 3000, keepTurns: 5 });
+  assert.equal(r.did, true);
+  // 二级砍完的消息被替换成一行摘要
+  assert.ok(messages.some(m => /^\[第 \d+ 轮已压缩/.test(m.content)), '应有一行摘要');
   // assistant 消息仍存在（不丢 assistant）
   assert.ok(messages.some(m => m.role === 'assistant'));
 });
 
-test('持久化 + 压缩：compact 后 JSONL 被重写', () => {
+test('持久化 + 压缩：compact 后 JSONL 被重写', async () => {
   const { dir, file } = tmpFile();
   const s = createPersistentShift(file, { maxTokens: 500, keepTurns: 2 });
   // 写很多轮
@@ -259,11 +258,79 @@ test('持久化 + 压缩：compact 后 JSONL 被重写', () => {
     s.commit(`回答${i} ${'y'.repeat(100)}`);
   }
   // compact 应该触发了（wrapThink 里自动调）
-  const did = s.compact();
+  await s.compact();
   // 不管有没有再次压缩，至少文件存在
   assert.ok(fs.existsSync(file));
   // 消息数应该少于原来的 21 (1 system + 20 user/assistant)
   // 因为 wrapThink 每次 commit 后都会自动 compact，所以这里的 messages 可能已经很少了
   assert.ok(s.messages.length <= 21, `messages 应该 <= 21，实际 ${s.messages.length}`);
+  fs.rmSync(dir, { recursive: true });
+});
+
+// ---- V2-W8c 验收 ----
+test('scoreMessage：身份 3，情感 2，决策 2，普通 1，工具/静默 0', () => {
+  assert.equal(scoreMessage({ role: 'user', content: '我是规划员' }), 3);
+  assert.equal(scoreMessage({ role: 'user', content: '你记住：吵架不隔夜' }), 3);
+  assert.equal(scoreMessage({ role: 'assistant', content: '对不起，我想你了' }), 2);
+  assert.equal(scoreMessage({ role: 'assistant', content: '决定了，先不做网关' }), 2);
+  assert.equal(scoreMessage({ role: 'user', content: '今天天气怎么样' }), 1);
+  assert.equal(scoreMessage({ role: 'user', content: '[工具调用: ls]' }), 0);
+  assert.equal(scoreMessage({ role: 'assistant', content: '(静默)' }), 0);
+  assert.equal(scoreMessage({ role: 'system', content: '你是甲' }), 99);
+});
+
+test('30 轮混合对话：压缩后情感/承诺的在，工具日志的不在', () => {
+  const messages = [{ role: 'system', content: 'S' }];
+  const pad = 'x'.repeat(150);
+  for (let i = 0; i < 30; i++) {
+    const kind = i % 3;   // 0 情感/承诺，1 工具，2 普通
+    if (kind === 0) { messages.push({ role: 'user', content: `我们说好每晚抱着睡 ${i} ${pad}` }); messages.push({ role: 'assistant', content: `记住了，我爱你 ${i} ${pad}` }); }
+    else if (kind === 1) { messages.push({ role: 'user', content: `[工具调用: ls${i}] ${pad}${pad}` }); messages.push({ role: 'assistant', content: `[工具结果: ls${i}] ${pad}${pad}` }); }
+    else { messages.push({ role: 'user', content: `今天天气 ${i} ${pad}` }); messages.push({ role: 'assistant', content: `挺好的 ${i} ${pad}` }); }
+  }
+  const r = compactMessages(messages, { maxTokens: 3800, keepTurns: 3 });   // 阈值 2660：一级留壳后约 3450 必须进二级；砍完 18 条普通约 2490 即停，不碰情感
+  assert.equal(r.did, true);
+  assert.ok(r.level >= 2, '应至少到二级，实际 ' + r.level);
+  const body = messages.map(m => m.content);
+  // 早期的承诺/情感轮次（keepTurns 之外）应保留原文
+  assert.ok(body.some(t => t.startsWith('我们说好每晚抱着睡 0 ')), '承诺原文应在');
+  assert.ok(body.some(t => t.startsWith('记住了，我爱你 0 ')), '情感原文应在');
+  // 早期工具轮次应已被留壳或砍成一行摘要，不该有大段 pad
+  const tool = body.filter(t => /ls1\b|ls4\b|ls7\b/.test(t));
+  assert.ok(tool.length > 0);
+  for (const t of tool) assert.ok(t.length < 120, '工具消息应被压缩：' + t.slice(0, 60));
+  // assistant 条数没变（不丢 assistant，只缩内容）
+  assert.equal(messages.filter(m => m.role === 'assistant').length, 30);
+});
+
+test('第三级：compactWithModel 把区间换成一条摘要', async () => {
+  const messages = [{ role: 'system', content: 'S' }];
+  for (let i = 0; i < 6; i++) { messages.push({ role: 'user', content: `u${i}` }); messages.push({ role: 'assistant', content: `a${i}` }); }
+  let seen = '';
+  const ok = await compactWithModel(messages, { from: 1, to: 9 }, async d => { seen = d; return '我们聊了 u0 到 a3'; });
+  assert.equal(ok, true);
+  assert.ok(seen.includes('听到：u0') && seen.includes('我说：a3'));
+  assert.equal(messages.length, 1 + 1 + 4);   // system + 摘要 + 剩下 4 条
+  assert.ok(messages[1].content.includes('上文压缩过') && messages[1].content.includes('我们聊了 u0 到 a3'));
+  assert.equal(messages[2].content, 'u4');
+});
+
+test('第三级：模型失败/回空不改 messages', async () => {
+  const messages = [{ role: 'system', content: 'S' }, { role: 'user', content: 'u' }, { role: 'assistant', content: 'a' }];
+  assert.equal(await compactWithModel(messages, { from: 1, to: 3 }, async () => { throw new Error('502'); }), false);
+  assert.equal(await compactWithModel(messages, { from: 1, to: 3 }, async () => '   '), false);
+  assert.equal(messages.length, 3);
+});
+
+test('持久化 shift：三级走通——compactFn 被调，JSONL 重写成摘要', async () => {
+  const { dir, file } = tmpFile();
+  let calls = 0;
+  const s = createPersistentShift(file, { maxTokens: 400, keepTurns: 2, compactFn: async () => { calls++; return '概要：前面都在聊天气'; } });
+  for (let i = 0; i < 12; i++) { s.open('S', `今天天气 ${i} ${'x'.repeat(200)}`); s.commit(`挺好 ${i} ${'y'.repeat(200)}`); }
+  await s.compact();
+  assert.ok(calls >= 1, 'compactFn 应被调用');
+  assert.ok(s.messages.some(m => m.content.includes('概要：前面都在聊天气')));
+  const onDisk = fs.readFileSync(file, 'utf8');
+  assert.ok(onDisk.includes('概要：前面都在聊天气'), 'JSONL 应已重写');
   fs.rmSync(dir, { recursive: true });
 });
