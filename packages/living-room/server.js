@@ -609,6 +609,37 @@ function createLivingRoom(options = {}) {
         });
         return writeJson(res, 200, { days: dayList, timezone: tz, source: 'state/runs', residents: perResident });
       }
+      // V2-SEARCH：跨班搜索。扫 state/shift-<id>.jsonl（本班活的）+ state/shifts/*.jsonl（归档）；回放 retract；只搜 user/assistant（system 是人设不是对话）。
+      // 人 only。命中按 ts 倒序；片段取第一处命中前后各 50 字。resident 可给名字或 id。
+      if (req.method === 'GET' && url.pathname === '/search') {
+        if (me.species !== 'human') throw new HttpError(403, 'SEARCH-HUMAN-ONLY', '只有家人能搜历史。');
+        const q = String(url.searchParams.get('q') || '').trim();
+        if (!q || q.length > 200) throw new HttpError(400, 'SEARCH-Q-INVALID', 'q 必填，200 字以内。');
+        const limit = positiveInt(url.searchParams.get('limit'), 20, 1, 200, 'SEARCH-LIMIT-INVALID');
+        const who = url.searchParams.get('resident');
+        const target = who ? (byId.get(who) || byName.get(norm(who))) : null;
+        if (who && !target) throw new HttpError(404, 'SEARCH-RESIDENT-NOT-FOUND', '没这个住户。');
+        const stateDir = path.join(houseDir, 'state');
+        const files = [];
+        try { for (const f of fs.readdirSync(stateDir)) if (/^shift-.+\.jsonl$/.test(f)) files.push({ file: path.join(stateDir, f), rid: f.slice(6, -6), live: true }); } catch {}
+        try { for (const f of fs.readdirSync(path.join(stateDir, 'shifts'))) { const m = /^(.+?)-shift-(.+)\.jsonl$/.exec(f); if (m) files.push({ file: path.join(stateDir, 'shifts', f), rid: m[2], live: false, archived_at: m[1] }); } } catch {}
+        const needle = q.toLowerCase(); const hits = [];
+        for (const f of files) {
+          if (target && f.rid !== target.id) continue;
+          let text; try { text = fs.readFileSync(f.file, 'utf8'); } catch { continue; }
+          const msgs = [];                                                   // 回放：msg 追加，retract 撤最后一条 user（与 shift-messages.js 的恢复逻辑一致）
+          for (const line of text.split('\n')) { if (!line.trim()) continue; let e; try { e = JSON.parse(line); } catch { continue; }
+            if (e.op === 'msg' && e.role && e.content != null) msgs.push(e); else if (e.op === 'retract' && msgs.length && msgs[msgs.length - 1].role === 'user') msgs.pop(); }
+          msgs.forEach((m, turn) => {
+            if (m.role === 'system') return;
+            const c = String(m.content); const i = c.toLowerCase().indexOf(needle); if (i < 0) return;
+            hits.push({ resident_id: f.rid, resident: byId.get(f.rid)?.name || f.rid, shift_file: path.relative(houseDir, f.file), live: f.live, ts: m.ts || null, role: m.role, turn,
+              content_snippet: (i > 50 ? '…' : '') + c.slice(Math.max(0, i - 50), i + needle.length + 50) + (i + needle.length + 50 < c.length ? '…' : '') });
+          });
+        }
+        hits.sort((a, b) => String(b.ts || '').localeCompare(String(a.ts || '')));
+        return writeJson(res, 200, { q, total: hits.length, files_scanned: files.filter(f => !target || f.rid === target.id).length, hits: hits.slice(0, limit) });
+      }
       if (req.method === 'GET' && url.pathname === '/dm/history') {
         const withName = url.searchParams.get('with') || ''; const other = byId.get(withName) || byName.get(withName.normalize('NFKC').toLowerCase());
         if (!other) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', '没这个人。');
