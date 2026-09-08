@@ -583,6 +583,32 @@ function createLivingRoom(options = {}) {
           .sort((a, b) => String(b.ts || '').localeCompare(String(a.ts || ''))).slice(0, limit);
         return writeJson(res, 200, rows);
       }
+      // V2-COST：按天 × 住户聚合 token 用量。数据源是房子自己的账 state/runs/*.jsonl（每次醒来记的 usage，已含 broker 归一化的 cached_tokens），
+      // 不开 broker 的 ledger（那是它的私有状态，0700 另一个用户，DECISIONS #11）；且 ledger 只有走 broker 的住户，claude-code / pi 住户不在里面。
+      // 天按房子的账务时区切（house.timezone），跟"今日预算"同一口径。
+      if (req.method === 'GET' && url.pathname === '/cost') {
+        if (me.species !== 'human') throw new HttpError(403, 'COST-HUMAN-ONLY', '只有家人能看花销。');
+        const days = positiveInt(url.searchParams.get('days'), 7, 1, 90, 'COST-DAYS-INVALID');
+        const tz = houseTz();
+        const dayOf = ts => { try { return new Intl.DateTimeFormat('sv-SE', { timeZone: tz }).format(new Date(ts)); } catch { return null; } };
+        const today = dayOf(Date.now());
+        const dayList = []; for (let i = days - 1; i >= 0; i--) { const d = new Date(Date.parse(today + 'T12:00:00Z') - i * 86400000); dayList.push(d.toISOString().slice(0, 10)); }
+        const since = dayList[0];
+        const agents = residents.filter(r => r.species !== 'human');
+        const perResident = agents.map(r => {
+          const byDay = Object.fromEntries(dayList.map(d => [d, { day: d, wakes: 0, calls: 0, with_usage: 0, input: 0, output: 0, cached: 0, cache_creation: 0 }]));
+          for (const run of roomsApi.readJsonl(path.join(houseDir, 'state', 'runs', `${r.id}.jsonl`), 5000)) {
+            const d = run.ts && dayOf(run.ts); if (!d || d < since || !byDay[d]) continue;
+            const b = byDay[d]; b.wakes++; b.calls += Number(run.model_calls) || 0;
+            const u = run.usage; if (!u) continue; b.with_usage++;
+            b.input += Number(u.prompt_tokens ?? u.input_tokens) || 0; b.output += Number(u.completion_tokens ?? u.output_tokens) || 0;
+            b.cached += Number(u.cached_tokens) || 0; b.cache_creation += Number(u.cache_creation_tokens) || 0;
+          }
+          const total = Object.values(byDay).reduce((a, b) => ({ wakes: a.wakes + b.wakes, calls: a.calls + b.calls, with_usage: a.with_usage + b.with_usage, input: a.input + b.input, output: a.output + b.output, cached: a.cached + b.cached, cache_creation: a.cache_creation + b.cache_creation }), { wakes: 0, calls: 0, with_usage: 0, input: 0, output: 0, cached: 0, cache_creation: 0 });
+          return { resident_id: r.id, resident: r.name, runtime: r.runtime || null, days: dayList.map(d => byDay[d]), total };
+        });
+        return writeJson(res, 200, { days: dayList, timezone: tz, source: 'state/runs', residents: perResident });
+      }
       if (req.method === 'GET' && url.pathname === '/dm/history') {
         const withName = url.searchParams.get('with') || ''; const other = byId.get(withName) || byName.get(withName.normalize('NFKC').toLowerCase());
         if (!other) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', '没这个人。');

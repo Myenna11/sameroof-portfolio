@@ -181,6 +181,13 @@ summary{cursor:pointer;color:var(--mute);font-size:13px}
 .runstats .st .v{font-family:var(--mono);font-size:20px;line-height:1.3;margin-top:2px}
 .runstats .st .sm{font-size:11px;color:var(--mute);margin-top:2px}
 .runtbl{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:6px 10px;margin:14px 12px;overflow-x:auto}
+.costchart{margin:6px 12px 10px;background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:10px 12px 6px}
+.costchart .ct{font-size:13px;font-weight:600;font-family:var(--serif);display:flex;align-items:center;gap:8px}
+.costchart .ct .sub{font-weight:400;color:var(--mute);font-size:12px}
+.costchart svg{width:100%;height:auto;display:block;margin-top:4px}
+.costchart .lg{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--mute);margin-top:4px}
+.costchart .lg i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:4px;vertical-align:-1px}
+.costchart .empty{padding:8px 0}
 .runtbl table{width:100%;border-collapse:collapse;font-size:13px;white-space:nowrap}
 .runtbl th{text-align:left;color:var(--mute);font-weight:500;font-size:12px;padding:6px 8px;border-bottom:1px solid var(--line)}
 .runtbl td{padding:6px 8px;border-bottom:1px solid var(--line2);vertical-align:top}
@@ -283,6 +290,7 @@ summary{cursor:pointer;color:var(--mute);font-size:13px}
  <section class="view" id="view-runs">
   <div class="hd"><h1>运行</h1><span class="sub" id="runssub">每个住户每次醒来</span><span class="sp"></span><button class="loadmore" id="runsrefresh" type="button">刷新</button></div>
   <div class="runstats" id="runstats"></div>
+  <div class="costchart" id="costchart"></div>
   <div class="runtbl" id="runstbl"></div>
  </section>
  <section class="view" id="view-quota">
@@ -969,6 +977,7 @@ async function renderRunsView(){
  let all;
  try{all=await req('GET','/runs?limit=200')}catch(e){box.innerHTML='';$('#runstats').innerHTML='';const d=document.createElement('div');d.className='empty';d.textContent='拉不到运行记录：'+e.message;box.appendChild(d);return}
  renderRunStats(all);
+ renderCostChart();
  const rows=all.slice(0,30);
  box.innerHTML='';
  if(!rows.length){box.innerHTML='<div class="empty">还没有人醒过</div>';return}
@@ -1002,6 +1011,39 @@ function renderRunStats(all){
  tile('输入 tokens',fmtN(inTok),cached?'命中缓存 '+fmtN(cached):'');
  tile('输出 tokens',fmtN(outTok),withUsage?'来自 '+withUsage+' 次调用':'');
 }
+
+/* ===== V2-COST：最近 7 天 token 折线（SVG 手画，不引库）。数据 /cost 来自 state/runs（房子自己的账），不是 broker ledger ===== */
+const COST_COLORS=['#c96f2e','#3b7dd8','#3fa25a','#a349a4','#d7a11c','#c0392b','#16a085'];
+const fmtK=n=>n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e4?(n/1e3).toFixed(1)+'k':String(n);
+async function renderCostChart(){
+ const box=$('#costchart');if(!box)return;
+ if(me&&me.species!=='human'){box.innerHTML='';return}
+ let d;try{d=await req('GET','/cost?days=7')}catch(e){box.innerHTML='<div class="empty">拉不到花销：'+esc(e.message)+'</div>';return}
+ const res=(d.residents||[]).filter(r=>r.total&&r.total.wakes>0);
+ const days=d.days||[];
+ box.innerHTML='';
+ const head=document.createElement('div');head.className='ct';head.innerHTML='📊 最近 7 天 tokens <span class="sub">输入+输出 · 按住户 · 天按 '+esc(d.timezone||'')+'</span>';box.appendChild(head);
+ if(!res.length||!days.length){const e=document.createElement('div');e.className='empty';e.textContent='这几天没人醒过';box.appendChild(e);return}
+ const series=res.map((r,i)=>({name:r.resident,color:COST_COLORS[i%COST_COLORS.length],vals:r.days.map(x=>x.input+x.output),cached:r.total.cached,input:r.total.input,wakes:r.total.wakes,withUsage:r.total.with_usage,runtime:r.runtime}));
+ const W=360,H=150,L=38,R=8,T=10,B=22;const max=Math.max(1,...series.flatMap(s=>s.vals));
+ const x=i=>L+(days.length===1?0:(W-L-R)*i/(days.length-1)),y=v=>T+(H-T-B)*(1-v/max);
+ const ns='http://www.w3.org/2000/svg';const svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox','0 0 '+W+' '+H);
+ const el=(t,a,txt)=>{const n=document.createElementNS(ns,t);for(const k in a)n.setAttribute(k,a[k]);if(txt!=null)n.textContent=txt;svg.appendChild(n);return n};
+ for(const f of [0,.5,1]){const yy=y(max*f);el('line',{x1:L,x2:W-R,y1:yy,y2:yy,stroke:'var(--line)','stroke-width':.6});el('text',{x:L-4,y:yy+3.5,'text-anchor':'end','font-size':9,fill:'var(--mute)'},fmtK(Math.round(max*f)))}
+ days.forEach((dd,i)=>{el('text',{x:x(i),y:H-6,'text-anchor':'middle','font-size':9,fill:'var(--mute)'},dd.slice(5).replace('-','/'))});
+ for(const s of series){
+  const pts=s.vals.map((v,i)=>x(i).toFixed(1)+','+y(v).toFixed(1)).join(' ');
+  el('polyline',{points:pts,fill:'none',stroke:s.color,'stroke-width':2,'stroke-linejoin':'round','stroke-linecap':'round'});
+  s.vals.forEach((v,i)=>{if(v>0)el('circle',{cx:x(i),cy:y(v),r:2.6,fill:s.color})});
+ }
+ box.appendChild(svg);
+ const lg=document.createElement('div');lg.className='lg';
+ for(const s of series){const sp=document.createElement('span');const sw=document.createElement('i');sw.style.background=s.color;sp.appendChild(sw);
+  const ratio=s.input>0?Math.round(100*s.cached/s.input):null;
+  sp.appendChild(document.createTextNode(s.name+' '+fmtK(s.vals.reduce((a,b)=>a+b,0))+(ratio!=null?' · 缓存命中 '+ratio+'%':'')+(s.withUsage<s.wakes?' · '+(s.wakes-s.withUsage)+' 次醒来没带 usage':'')));
+  lg.appendChild(sp)}
+ box.appendChild(lg)}
+
 $('#runsrefresh').onclick=()=>renderRunsView();
 setInterval(()=>{if(curView==='runs'&&document.visibilityState==='visible')renderRunsView()},30000);
 async function renderHouse(){
