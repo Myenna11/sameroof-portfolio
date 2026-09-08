@@ -2,19 +2,21 @@
 // 同屋 · 适配器 · broker-direct：不夹 CLI，直接经 Unix socket 调凭证 broker 的 OpenAI 兼容接口。住户拿不到任何真 key。
 'use strict';
 const fs = require('fs'), path = require('path'), http = require('http');
-const { open, run, RUN } = require('../lib/room');
-const { wrapThink } = require('../lib/shift-messages');
+const { open, run, RUN, HOUSE } = require('../lib/room');
+const { wrapThink, createPersistentShift } = require('../lib/shift-messages');
 const ROOM = process.argv[2] || '检索员';
 const R = open(ROOM);
 const tokenPath = path.join(RUN, 'tokens', R.room.id);
 if (!fs.existsSync(tokenPath)) { console.error(`${ROOM} 没有 broker token：${tokenPath}。让户主签一个：sameroof-broker token issue ${R.room.id} ...`); process.exit(2); }
-const readToken = () => fs.readFileSync(tokenPath, 'utf8').trim();   // 每次都从文件读：broker 的住户 token 是短期的（DECISIONS #12），审查员换了文件不用重启
+const readToken = () => fs.readFileSync(tokenPath, 'utf8').trim();
 const SOCK = path.join(RUN, 'broker.sock');
-// 一班之内的对话累积在 think.shift.messages 里（V2-1A）：system 只发一次，之后 user/assistant 往后接；出错/回空自动撤回那条 user。
+// V2-W8：持久化 shift——JSONL 落盘，进程重启从文件恢复，sleep 时归档。
+const shiftPath = path.join(HOUSE, 'state', `shift-${R.room.id}.jsonl`);
+const shift = createPersistentShift(shiftPath);
 const think = wrapThink(async (messages, signal) => {
   try { return await call(messages, signal, readToken()); }
   catch (e) { if (!/broker 401/.test(String(e.message))) throw e; fs.writeSync(2, `[broker] 401，重读 token 再试一次\n`); return call(messages, signal, readToken()); }
-});
+}, shift);
 function call(messages, signal, brokerToken) {
   const body = JSON.stringify({ model: R.room.model.id, messages, stream: false, max_tokens: 4000, thinking: { type: 'enabled', effort: 'low' } });
   fs.writeSync(2, `[broker] 发 ${messages.length} 条消息（这一班累积）\n`);
