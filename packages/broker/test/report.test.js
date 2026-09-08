@@ -71,17 +71,20 @@ test('PrefixDoctor：累积会话只在结尾追加 → stable；system 改一�
   const d = new PrefixDoctor({ keep: 5 });
   const mkB = (sys, msgs, model = 'glm') => ({ model, messages: [{ role: 'system', content: sys }, ...msgs], stream: false, max_tokens: 4000 });
   const mk = (...a) => JSON.stringify(mkB(...a));
+  const o2 = (dd, id, sys, msgs, model = 'glm') => dd.observe({ residentId: 'a', requestId: id, wireBody: mk(sys, msgs, model), body: mkB(sys, msgs, model), model });
   const S = '你是甲。'.repeat(50);
   let r = d.observe({ residentId: 'a', requestId: 'r1', wireBody: mk(S, [{ role: 'user', content: '在吗' }]), body: mkB(S, [{ role: 'user', content: '在吗' }]), model: 'glm' });
   assert.equal(r.stable, null);
   r = d.observe({ residentId: 'a', requestId: 'r2', wireBody: mk(S, [{ role: 'user', content: '在吗' }, { role: 'assistant', content: '在' }, { role: 'user', content: '晚安' }]), body: mkB(S, [{ role: 'user', content: '在吗' }, { role: 'assistant', content: '在' }, { role: 'user', content: '晚安' }]), model: 'glm' });
   assert.equal(r.stable, true); assert.ok(r.drift_at >= r.prev_messages_end - 1); assert.equal(r.prev_request_id, 'r1');
   r = d.observe({ residentId: 'a', requestId: 'r3', wireBody: mk(S + '（惦记本多了一行）', [{ role: 'user', content: '在吗' }, { role: 'assistant', content: '在' }, { role: 'user', content: '晚安' }, { role: 'assistant', content: '嗯' }, { role: 'user', content: '？' }]), body: mkB(S + '（惦记本多了一行）', [{ role: 'user', content: '在吗' }, { role: 'assistant', content: '在' }, { role: 'user', content: '晚安' }, { role: 'assistant', content: '嗯' }, { role: 'user', content: '？' }]), model: 'glm' });
-  assert.equal(r.stable, false); assert.equal(r.note, '中段分叉：前缀被改了'); assert.ok(r.drift_at < r.prev_messages_end); assert.ok(r.was && r.now && r.was !== r.now);
+  assert.equal(r.stable, false); assert.equal(r.note, 'system 中途变了（前缀全废）'); assert.ok(r.drift_at < r.prev_messages_end); assert.ok(r.was && r.now && r.was !== r.now);
   r = d.observe({ residentId: 'a', requestId: 'r4', wireBody: mk(S, [{ role: 'user', content: '在吗' }], 'glm-pro'), body: mkB(S, [{ role: 'user', content: '在吗' }], 'glm-pro'), model: 'glm-pro' });
   assert.equal(r.stable, false); assert.equal(r.note, '换了模型');
+  // 新班首轮（system 换了、只有 2 条）→ 新血统，不报不稳
+  r = o2(d, 'r5', 'S2', [{ role: 'user', content: '新班' }]); assert.equal(r.stable, null); assert.match(r.note, /新血统/);
   const rep = d.report({ resident: 'a' });
-  assert.equal(rep.residents[0].observed, 4); assert.equal(rep.residents[0].compared, 3); assert.equal(rep.residents[0].unstable, 2);
+  assert.equal(rep.residents[0].observed, 5); assert.equal(rep.residents[0].compared, 3); assert.equal(rep.residents[0].unstable, 2);
   for (let i = 0; i < 10; i++) d.observe({ residentId: 'a', requestId: 'x' + i, wireBody: mk(S, []), body: mkB(S, []), model: 'glm' });
   assert.equal(d.report({ resident: 'a' }).residents[0].observed, 5);   // keep=5
   assert.deepEqual(d.report({ resident: 'nobody' }).residents[0].rows, []);

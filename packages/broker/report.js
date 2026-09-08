@@ -79,17 +79,22 @@ class PrefixDoctor {
   observe({ residentId, requestId, wireBody, body, model }) {
     const now = wireBody.length > this.maxBody ? wireBody.slice(0, this.maxBody) : wireBody;
     let msgEnd = null; try { const M = JSON.stringify(body && body.messages); const k = M ? now.indexOf(M) : -1; if (k >= 0) msgEnd = k + M.length - 1; } catch {}
-    const prev = this.last.get(residentId);
-    let rec = { ts: new Date().toISOString(), request_id: requestId, model, body_len: wireBody.length, prev_request_id: null, prev_len: null, drift_at: null, stable: null, note: '首条，无可比' };
+    // 血统 = 住户 + system 内容摘要（permafrost 的 lineage）：换了 system（新班、睡前便条、压缩摘要）是另一条血统，不跟上一条比，报"新血统"
+    let lineage = residentId; try { const sys = body && Array.isArray(body.messages) && body.messages[0] && body.messages[0].role === 'system' ? String(body.messages[0].content) : ''; lineage = residentId + ':' + require('crypto').createHash('sha256').update(sys).digest('hex').slice(0, 12); } catch {}
+    let prev = this.last.get(lineage); let midShift = false;
+    const nMsgs = body && Array.isArray(body.messages) ? body.messages.length : 0;
+    const lastAny = this.last.get(residentId + ':any');
+    if (!prev && lastAny && nMsgs >= 4) { prev = lastAny; midShift = true; }   // 新血统但已经堆了一段对话：system 中途被改（惦记本/小本进了 system 又变了）——前缀全废，要报
+    let rec = { ts: new Date().toISOString(), request_id: requestId, model, lineage: lineage.slice(residentId.length + 1), body_len: wireBody.length, prev_request_id: null, prev_len: null, drift_at: null, stable: null, note: prev ? '' : (lastAny ? '新血统（system 变了，新班/便条），无可比' : '首条，无可比') };
     if (prev) {
       let i = 0; const n = Math.min(prev.body.length, now.length); while (i < n && prev.body.charCodeAt(i) === now.charCodeAt(i)) i++;
       const need = prev.msgEnd != null ? prev.msgEnd - 1 : prev.body.length - DRIFT_TAIL;
       const stable = i >= need;
       rec = { ...rec, prev_request_id: prev.request_id, prev_len: prev.body.length, prev_messages_end: prev.msgEnd, drift_at: i, stable,
-        note: stable ? '前缀稳，只在结尾追加' : (prev.model !== model ? '换了模型' : i < 64 ? '开头就不一样（model/键序？）' : '中段分叉：前缀被改了'),
+        note: stable ? '前缀稳，只在结尾追加' : (midShift ? 'system 中途变了（前缀全废）' : prev.model !== model ? '换了模型' : i < 64 ? '开头就不一样（model/键序？）' : '中段分叉：前缀被改了'),
         ...(stable ? {} : { was: prev.body.slice(Math.max(0, i - 60), i + 60), now: now.slice(Math.max(0, i - 60), i + 60) }) };
     }
-    this.last.set(residentId, { body: now, request_id: requestId, model, msgEnd });
+    const entry = { body: now, request_id: requestId, model, msgEnd }; this.last.set(lineage, entry); this.last.set(residentId + ':any', entry);
     const list = this.log.get(residentId) || []; list.push(rec); if (list.length > this.keep) list.splice(0, list.length - this.keep); this.log.set(residentId, list);
     return rec;
   }
