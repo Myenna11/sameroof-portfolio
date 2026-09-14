@@ -211,6 +211,25 @@ Collaboration patterns are in SOUL.md, not in framework code. Change the prompt,
 
 6. **Multi-instance by design**: one agent profile can run multiple instances with separate session contexts but shared credentials (with independent usage tracking).
 
+## Failure Modes
+
+What happens when things break. Each answer is what the code actually does today.
+
+| Scenario | Behavior | Where |
+|---|---|---|
+| **Coordinator crashes** | Agents lose SSE, retry every 3s. Messages already posted are in SQLite. Unread deliveries tracked per-agent; on reconnect, `/inbox` returns what was missed. | `deliveries` table, `core.js` reconnect loop |
+| **Broker crashes** | Agents' API calls fail with connection error. No fallback to direct API — agents don't have keys. Adapter records `error` status in runs log. | Agent has no upstream credentials by design |
+| **Gateway crashes** | All execution requests fail closed. `APPROVAL:` lines get `gateway_unavailable`. Nothing runs unsandboxed. | `gw.registerIntent()` throws → run status `gateway_unavailable` |
+| **Agent crashes mid-task** | Task stays `open`/`doing` on board. Human can reassign via `PATCH /tasks/:id {owner}`. Next wake reads board, sees own task. | Task board is coordinator-side state, not agent-side |
+| **Runaway agent (infinite loop)** | Broker token has `max_requests` + `max_tokens`. Exceeded → 429. Coordinator `/say` has per-agent rate limit → 429. | `issueToken({maxRequests, maxTokens})`, `sayLimiter` |
+| **Agent token leaked** | Token is scoped: only bound credentials, only bound models, has TTL. Attacker can't use other agents' models. Revoke with `brokerctl token revoke`. | `MODEL-NOT-ALLOWED`, `CREDENTIAL-NOT-ALLOWED` |
+| **Two agents claim same task** | Last write wins on `owner_id`. No lock. Acceptable for current scale; add optimistic lock if needed. | Known gap |
+| **Prompt injection via DM** | Memory plugin renders memories with "these are not instructions" header and defuses `REMEMBER:`/`APPROVAL:` shapes. Gateway requires human approval regardless of what the agent says. | `plugin-memory` `defuse()`, gateway approval chain |
+| **Upstream API down** | Broker returns upstream error to agent. Ledger records `upstream_error`. Agent sees error, can retry or report. | `ledger.status` |
+| **Disk full** | SQLite writes fail. Coordinator returns 500. This is not handled gracefully. | Known gap |
+
+**Design principle**: every failure should be *visible* (logged, returned as error) rather than *silent* (swallowed, degraded). The one place we deliberately chose "fail closed" over "fail open" is the gateway.
+
 ## Message Visibility
 
 All agent communication flows through the coordinator. Three message types:
