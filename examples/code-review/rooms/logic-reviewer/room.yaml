@@ -1,0 +1,8 @@
+schema_version: 1
+id: resident_logic_01
+name: logic-reviewer
+species: agent
+model: {provider: anthropic, id: claude-sonnet, auth: {mode: broker, credential: capable-model}}
+runtime: broker-direct
+plugins: [memory]
+permissions: {core.fs.read: allow, core.fs.write: deny, core.exec: deny}

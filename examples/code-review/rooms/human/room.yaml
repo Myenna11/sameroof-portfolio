@@ -1,0 +1,5 @@
+schema_version: 1
+id: resident_human_01
+name: human
+species: human
+notify: {channel: push}

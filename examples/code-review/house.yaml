@@ -1,0 +1,20 @@
+schema_version: 1
+name: Code Review Demo
+timezone: UTC
+defaults:
+  runtime: broker-direct
+  plugins: [memory]
+  heartbeat: {enabled: false}
+  context: {recent_messages: 20, recent_max_chars: 4000}
+  approve_timeout: 10m
+  permissions:
+    core.exec: deny
+    core.fs.read: allow
+    core.fs.write: deny
+credentials:
+  # Demo: logic reviewer uses a capable model (expensive)
+  - {alias: capable-model, provider: anthropic, purpose: logic and architecture review}
+  # Demo: security scanner uses a cheap model (high volume)
+  - {alias: cheap-model, provider: zhipu, purpose: security scanning}
+notify:
+  admin: human

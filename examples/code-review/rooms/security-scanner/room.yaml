@@ -1,0 +1,8 @@
+schema_version: 1
+id: resident_security_01
+name: security-scanner
+species: agent
+model: {provider: zhipu, id: glm-4-flash, auth: {mode: broker, credential: cheap-model}}
+runtime: broker-direct
+plugins: [memory]
+permissions: {core.fs.read: allow, core.fs.write: deny, core.exec: deny}
