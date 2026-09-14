@@ -16,6 +16,8 @@ jobs:
       SAMEROOF_CI_MOCK_ONLY: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -25,7 +27,12 @@ jobs:
       - name: Install sandbox runtime (bubblewrap)
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - name: Hygiene — trailing whitespace / conflict markers
-        run: git diff --check HEAD~1 || git diff --check $(git rev-list --max-parents=0 HEAD)
+        # fetch-depth:2 above so HEAD~1 exists. Two checks:
+        #  (1) this commit's own changes  (2) the whole tree at HEAD — catches anything that slipped in earlier.
+        # (Old command 'git diff --check HEAD~1 || …root…' silently degraded to an empty diff on depth-1 checkouts.)
+        run: |
+          git diff --check HEAD~1 HEAD
+          git diff --check $(git hash-object -t tree /dev/null) HEAD
       - name: Repo config validates and lock is current
         run: |
           node packages/cli/index.js check
