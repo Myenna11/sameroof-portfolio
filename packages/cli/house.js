@@ -50,43 +50,86 @@ const cmds = {
     console.log('     sameroof serve');
   },
 
-  /** sameroof serve [--port N]：启动 broker + coordinator + 所有 agent 适配器 */
+  /** sameroof serve [--port N] [--no-agents]：启动 broker + coordinator + 所有 agent 适配器 */
   serve(args, opts) {
     const root = h(opts);
     const port = parseInt(opts.port || '8790', 10);
-    const house = loadYaml(path.join(root, 'house.yaml'));
-
-    // 1. Start broker
-    const brokerPort = parseInt(opts['broker-port'] || '8791', 10);
-    console.log('Starting broker on port ' + brokerPort + '...');
-    const broker = require('child_process').fork(
-      path.join(root, 'packages', 'broker', 'server.js'),
-      [], { env: { ...process.env, PORT: String(brokerPort), SAMEROOF_ROOT: root }, stdio: 'inherit' }
-    );
-
-    // 2. Start coordinator (living-room)
-    console.log('Starting coordinator on port ' + port + '...');
-    const { createLivingRoom } = require(path.join(root, 'packages', 'living-room', 'server'));
-    const runDir = path.join(process.env.HOME || os.homedir(), '.sameroof', 'run');
+    const { spawn } = require('node:child_process');
+    const home = process.env.HOME || os.homedir();
+    const runDir = path.join(home, '.sameroof', 'run');
     fs.mkdirSync(runDir, { recursive: true, mode: 0o700 });
-    const lr = createLivingRoom({ houseDir: root, runDir, dataDir: path.join(root, 'state'), port });
-    lr.listen().then(info => {
-      console.log('Coordinator running on port ' + info.port);
+    fs.mkdirSync(path.join(runDir, 'tokens'), { recursive: true, mode: 0o700 });
+    const children = [];
+    const log = (who, msg) => console.log(`[${who}] ${msg}`);
 
-      // 3. Start agent adapters
+    (async () => {
+      // 1. Broker (in-process, Unix socket)
+      const { BrokerStore } = require('@sameroof/broker/store');
+      const { createBroker } = require('@sameroof/broker/server');
+      const store = new BrokerStore();
+      const broker = createBroker({ store });
+      await broker.listen();
+      log('broker', 'listening on ' + path.basename(broker.socketPath));
+      const creds = store.db.prepare('SELECT alias FROM credentials WHERE active=1').all().map(r => r.alias);
+      if (!creds.length) log('broker', 'warning: no credentials. Add one: sameroof cred add <alias> --provider X --base-url URL --api-key KEY');
+
+      // 2. Coordinator (in-process)
+      const { createLivingRoom } = require('@sameroof/living-room/server');
+      const lr = createLivingRoom({ houseDir: root, runDir, dataDir: path.join(root, 'state'), port });
+      const info = await lr.listen();
+      log('coordinator', 'http://127.0.0.1:' + info.port + '  (console: /console)');
+
+      // 3. Tokens + adapters
       const agentRooms = rooms(root).filter(r => (r.species || 'agent') === 'agent');
-      console.log('Starting ' + agentRooms.length + ' agent(s)...');
-      for (const r of agentRooms) {
-        console.log('  ' + r.name + ' (' + (r.model ? r.model.provider + '/' + r.model.id : 'no model') + ')');
+      const humanRooms = rooms(root).filter(r => r.species === 'human');
+      for (const r of humanRooms) {
+        const t = lr.tokenStore.issue(r.id);
+        log('token', `${r.name} (human): ${t.created ? 'issued' : 'exists'} — sameroof pair ${r.name} to get it`);
       }
-      console.log('');
-      console.log('Same Roof running. ' + agentRooms.length + ' agent(s) + coordinator + broker.');
-      console.log('Open http://localhost:' + info.port + ' or use the API.');
-      console.log('Press Ctrl+C to stop.');
-    }).catch(e => { console.error('Failed to start coordinator:', e.message); process.exit(1); });
+      if (opts['no-agents']) { log('serve', 'skipping agents (--no-agents)'); }
+      else for (const r of agentRooms) {
+        lr.tokenStore.issue(r.id);   // coordinator token
+        const brokerTokenFile = path.join(runDir, 'tokens', r.id);
+        const credAlias = r.model && r.model.auth && r.model.auth.credential;
+        const modelId = r.model && r.model.id;
+        if (r.model && r.model.auth && r.model.auth.mode === 'broker') {
+          if (!creds.includes(credAlias)) { log(r.name, `skip: credential "${credAlias}" not in broker`); continue; }
+          if (!fs.existsSync(brokerTokenFile)) {
+            store.issueToken({ residentId: r.id, credentials: [credAlias], models: [modelId], ttlSeconds: 604800 });
+            log(r.name, `broker token issued → ${credAlias} / ${modelId}`);
+          }
+        }
+        const runtime = r.runtime || 'broker-direct';
+        const adapterDir = path.join(root, 'packages', 'adapters', runtime);
+        const adapterFile = path.join(adapterDir, 'adapter.js');
+        if (!fs.existsSync(adapterFile)) { log(r.name, `skip: no adapter for runtime "${runtime}"`); continue; }
+        const child = spawn(process.execPath, [adapterFile, r.name], {
+          cwd: adapterDir, stdio: ['ignore', 'inherit', 'inherit'],
+          env: { ...process.env, HOME: home, SAMEROOF_ROOT: root, SAMEROOF_LR: 'http://127.0.0.1:' + info.port }
+        });
+        child.on('exit', code => { if (!shuttingDown) log(r.name, `adapter exited (${code})`); });
+        children.push({ name: r.name, child });
+        log(r.name, `adapter started (${runtime}, pid ${child.pid})`);
+      }
 
-    process.on('SIGINT', () => { console.log('\nShutting down...'); broker.kill(); process.exit(0); });
-    process.on('SIGTERM', () => { broker.kill(); process.exit(0); });
+      console.log('');
+      console.log(`Same Roof running: ${children.length} agent(s), coordinator on :${info.port}, broker on socket.`);
+      console.log('Ctrl+C to stop.');
+
+      let shuttingDown = false;
+      const shutdown = async () => {
+        if (shuttingDown) return; shuttingDown = true;
+        console.log('\nShutting down...');
+        for (const { name, child } of children) { child.kill('SIGTERM'); }
+        await new Promise(r => setTimeout(r, 1500));
+        for (const { child } of children) { if (!child.killed) child.kill('SIGKILL'); }
+        await lr.close().catch(() => {});
+        await broker.close().catch(() => {});
+        process.exit(0);
+      };
+      process.on('SIGINT', shutdown);
+      process.on('SIGTERM', shutdown);
+    })().catch(e => { console.error('serve failed:', e.message); process.exit(1); });
   },
 
   /** sameroof cred add <alias> --provider X --base-url URL --api-key KEY */

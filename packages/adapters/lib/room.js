@@ -239,7 +239,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
       let remembered = '';
       if (R.memory) {
         const q = inbox.map(m => m.text).join(' ') || handover;
-        const hits = R.memory.recall(q, ctx.memory_hits); const recent = R.memory.recent(ctx.memory_recent).filter(m => !hits.find(h => h.id === m.id));
+        const hits = await R.memory.recall(q, ctx.memory_hits); const recent = R.memory.recent(ctx.memory_recent).filter(m => !hits.find(h => h.id === m.id));
         let list = [...hits, ...recent];
         { const f = C.freshMemories(list, inc.memoryIds); list = f.fresh; for (const id of f.ids) inc.memoryIds.add(id); }   // 首轮：去掉已进 system 的；增量轮：去掉本班发过的
         if (list.length) remembered = (incremental ? '【新想起来的事】\n' : '【我记得的事】\n') + R.memory.render(list);
