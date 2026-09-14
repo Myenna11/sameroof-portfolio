@@ -25,7 +25,7 @@ const cmds = {
         runtime: 'broker-direct',
         plugins: ['memory'],
         heartbeat: { enabled: false },
-        context: { recent_messages: 20, recent_max_chars: 4000 },
+        context: { recent_messages: 20, recent_max_chars: 4000, memory_hits: 4, memory_recent: 3 },
         approve_timeout: '30m',
         permissions: {
           'core.exec': 'approve',
@@ -166,9 +166,21 @@ const cmds = {
     if (!opts.human) {
       const [provider, mid] = String(opts.model || 'zhipu/glm-5.3-flash').split('/');
       const runtimeManaged = ['kimi-coding', 'claude-code', 'openai-codex'].includes(provider);
-      doc.model = { provider, id: mid, auth: runtimeManaged ? { mode: 'runtime_managed', credential: opts.credential || provider + '-sub' } : { mode: 'broker', credential: opts.credential || 'shared-cheap' } };
+      doc.model = { provider, id: mid, auth: runtimeManaged ? { mode: 'runtime_managed', credential: opts.credential || provider + '-sub' } : { mode: 'broker', credential: opts.credential || provider + '-key' } };
       doc.runtime = opts.runtime || (provider === 'claude-code' ? 'claude-code' : runtimeManaged ? 'pi' : 'broker-direct');
     } else doc.notify = { channel: 'push' };
+    // Register credential alias in house.yaml if the agent uses broker mode and alias isn't listed yet
+    if (doc.model && doc.model.auth.mode === 'broker') {
+      const houseFile = path.join(root, 'house.yaml');
+      const houseDoc = loadYaml(houseFile);
+      houseDoc.credentials = houseDoc.credentials || [];
+      const alias = doc.model.auth.credential;
+      if (!houseDoc.credentials.some(c => c && c.alias === alias)) {
+        houseDoc.credentials.push({ alias, provider: doc.model.provider, purpose: name });
+        fs.writeFileSync(houseFile, YAML.stringify(houseDoc, { lineWidth: 120 }));
+        console.log(`Registered credential alias "${alias}" in house.yaml (add the real key: sameroof cred add ${alias} --provider ${doc.model.provider} --base-url URL --api-key KEY)`);
+      }
+    }
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, 'room.yaml'), YAML.stringify(doc, { lineWidth: 120 }));
     if (!opts.human) fs.writeFileSync(path.join(dir, 'SOUL.md'), `# ${name}\n\n（谁都还没写。这里放性格、说话方式、底线。运行时只读，改动要经人审批。）\n`);

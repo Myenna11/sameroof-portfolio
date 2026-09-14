@@ -22,15 +22,16 @@ jobs:
           cache: npm
       - name: Install workspace dependencies
         run: npm ci
-      - name: Install sandbox runtime
+      - name: Install sandbox runtime (bubblewrap)
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
-      - name: Schema
-        run: npm test -w @sameroof/schema
-      - name: Broker (mock upstream only)
-        run: npm test -w @sameroof/broker
-      - name: CLI
-        run: npm test -w @sameroof/cli
-      - name: Living room
-        run: npm test -w @sameroof/living-room
-      - name: Gateway (includes real bwrap isolation)
-        run: npm test -w @sameroof/gateway
+      - name: All package tests
+        run: npm test
+      - name: Demo smoke (mock mode, no API key)
+        run: node examples/code-review/demo.js | tail -5
+      - name: CLI smoke
+        run: |
+          node packages/cli/index.js init /tmp/ci-ws
+          node packages/cli/index.js new bot --model zhipu/glm-4-flash --house /tmp/ci-ws
+          node packages/cli/index.js new me --human --house /tmp/ci-ws
+          node packages/cli/index.js check --house /tmp/ci-ws
+          ls /tmp/ci-ws/rooms
