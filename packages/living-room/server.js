@@ -374,7 +374,9 @@ function createLivingRoom(options = {}) {
       return null;
     }
     const match = /^Bearer\s+([^\s]+)$/i.exec(String(req.headers.authorization || ''));
-    const residentId = match ? tokenStore.authenticate(match[1]) : null;
+    // Also accept ?token= for SSE (browser EventSource cannot set headers). Only on /events.
+    const qsToken = (!match && req.url && req.url.startsWith('/events')) ? new URL(req.url, 'http://x').searchParams.get('token') : null;
+    const residentId = match ? tokenStore.authenticate(match[1]) : qsToken ? tokenStore.authenticate(qsToken) : null;
     const resident = residentId ? byId.get(residentId) : null;
     if (!resident) {
       const failed = authFailureKey ? authFailures.fail(authFailureKey) : { allowed: true };
@@ -389,6 +391,15 @@ function createLivingRoom(options = {}) {
 
   function staticResponse(req, res, pathname) {
     if (req.method !== 'GET' && req.method !== 'HEAD') return false;
+    // /console → apps/console/index.html (new UI); everything else → apps/house/
+    if (pathname === '/console' || pathname === '/console/') {
+      const consoleFile = path.join(houseDir, 'apps', 'console', 'index.html');
+      if (!fs.existsSync(consoleFile)) return false;
+      const body = fs.readFileSync(consoleFile);
+      res.writeHead(200, { ...securityHeaders(false), 'cache-control': 'no-cache', 'content-type': 'text/html; charset=utf-8', 'content-length': body.length });
+      if (req.method === 'GET') res.end(body); else res.end();
+      return true;
+    }
     const names = new Map([['/', 'index.html'], ['/index.html', 'index.html'], ['/manifest.json', 'manifest.json'], ['/sw.js', 'sw.js']]);
     if (!names.has(pathname)) return false;
     const file = path.join(staticDir, names.get(pathname));
