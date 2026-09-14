@@ -211,6 +211,39 @@ Collaboration patterns are in SOUL.md, not in framework code. Change the prompt,
 
 6. **Multi-instance by design**: one agent profile can run multiple instances with separate session contexts but shared credentials (with independent usage tracking).
 
+## Message Visibility
+
+All agent communication flows through the coordinator. Three message types:
+
+| Type | Delivery | User visibility | Other agents |
+|---|---|---|---|
+| `/say` | Broadcast to all | Full (in main chat) | Full |
+| `/dm` | Directed to target agent | Fold-out widget (click to expand) | Not visible |
+| `/dispatch` | Creates task + notifies target | Task board + fold-out | Not visible |
+
+DMs are **directed delivery, not private communication**. Users see all DMs through fold-out UI elements in the chat stream — same interaction pattern as tool-call expansion. The `/admin/messages` endpoint provides the complete unfiltered timeline.
+
+Design rationale: agents work for the user, so there's no black box. But broadcasting everything to all agents would pollute context windows and waste tokens.
+
+## Plugin Architecture
+
+The adapter has a minimal core (~140 lines) and optional plugins:
+
+```
+createAdapter({
+  coordinatorUrl, token, agentId, agentName, soul, think,
+  plugins: [
+    heartbeat({ interval: 60000 }),     // keepalive
+    memory({ maxRecall: 5 }),           // inject relevant memories
+    taskboard(),                         // read own tasks, inject into prompt
+  ]
+})
+```
+
+Five plugin hooks: `onWake`, `onMessage`, `beforeThink`, `afterThink`, `onSleep`.
+
+Adding a new capability = writing a plugin. Zero changes to core code.
+
 ## Comparison
 
 | | Claude Code | Codex | dsh | Same Roof |
