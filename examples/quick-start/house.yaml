@@ -1,0 +1,22 @@
+# Same Roof — Quick Start workspace config
+schema_version: 1
+name: My Workspace
+timezone: UTC
+# url: https://your-domain.com   # optional: public URL for push notifications
+defaults:
+  runtime: broker-direct
+  plugins: [memory]
+  heartbeat: {enabled: false}
+  context: {recent_messages: 20, recent_max_chars: 4000}
+  approve_timeout: 30m
+  permissions:
+    core.exec: approve
+    core.fs.read: approve
+    core.fs.write: approve
+credentials:
+  - {alias: my-key, provider: zhipu, purpose: default model}
+  # Add more providers:
+  # - {alias: openai-key, provider: openai, purpose: GPT models}
+  # - {alias: claude-key, provider: claude-code, mode: runtime_managed, purpose: Claude}
+notify:
+  admin: me

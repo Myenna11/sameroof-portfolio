@@ -1,0 +1,8 @@
+schema_version: 1
+id: resident_reviewer_01
+name: reviewer
+species: agent
+model: {provider: zhipu, id: glm-4-flash, auth: {mode: broker, credential: my-key}}
+runtime: broker-direct
+plugins: [memory]
+permissions: {core.exec: deny, core.fs.read: approve, core.fs.write: deny}
