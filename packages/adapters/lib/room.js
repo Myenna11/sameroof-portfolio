@@ -46,7 +46,7 @@ function open(roomName, openOpts = {}) {
   const houseTime = () => {
     const now = new Date(); const fmt = new Intl.DateTimeFormat('zh-CN', { timeZone: tz, dateStyle: 'full', timeStyle: 'short' }).format(now);
     const slept = state.last_sleep ? Math.round((now - new Date(state.last_sleep)) / 60000) : null;
-    return `【房子供给的时间】现在是 ${fmt}（${tz}）。` + (state.last_sleep ? `你上次睡是 ${state.last_sleep}，睡了约 ${slept} 分钟。` : '这是你在这间屋子里第一次醒来。') + ` 今天你已醒来 ${state.wakes_today} 次。`;
+    return `【时间】${fmt}（${tz}）。上次活跃：${state.last_sleep || '首次启动'}。本日调用 ${state.wakes_today} 次。`;
   };
   const inQuiet = () => {
     const q = (room.heartbeat && room.heartbeat.quiet_hours) || (room.schedule && room.schedule.quiet_hours) || (house.schedule && house.schedule.quiet_hours); if (!q) return false;
@@ -71,7 +71,7 @@ function open(roomName, openOpts = {}) {
   };
   const runsDir = path.join(houseRoot(), 'state', 'runs'); fs.mkdirSync(runsDir, { recursive: true });
   const recordRun = rec => { try { fs.appendFileSync(path.join(runsDir, `${room.id}.jsonl`), JSON.stringify(rec) + '\n'); } catch {}
-    const brief = (rec.lane === 'routine' && { said: '例行的事，说了一句', silent: '例行看过了，没什么要说' }[rec.status]) || { said: '说了一句', dm: '发了私信', approval: '请求了审批', approval_invalid: 'APPROVAL 格式不对，没登记', gateway_unavailable: '网关不可用，审批没登记', approval_rejected: '客厅没收审批', silent: '看了看，没说话', error: '出错了', passive_budget: '预算用完，只看不说', passive_idle: '心跳，没事', nothing: '醒了，没人找', deferred: '有新话但没叫我', dry: 'dry-run' }[rec.status] || rec.status;
+    const brief = (rec.lane === 'routine' && { said: '例行的事，responded', silent: 'routine: no action' }[rec.status]) || { said: 'responded', dm: 'sent dm', approval: 'requested approval', approval_invalid: 'invalid approval format', gateway_unavailable: 'gateway unavailable', approval_rejected: 'approval rejected', silent: 'no action', error: 'error', passive_budget: 'budget exhausted', passive_idle: 'idle', nothing: 'no pending', deferred: 'deferred', dry: 'dry-run' }[rec.status] || rec.status;
     const kind = rec.status === 'error' ? 'error' : (rec.model_calls ? 'model_call' : 'wake');
     api('POST', '/activity', { kind, text: `${room.name}：${brief}`, meta: { run_id: rec.id, reason: rec.reason, status: rec.status, ms: rec.ms, usage: rec.usage || null, model_calls: rec.model_calls || 0, error: rec.error || null } }).catch(() => {}); };
   const plugins = room.plugins || (house.defaults || {}).plugins || [];
@@ -201,14 +201,14 @@ async function run(roomName, runtimeName, think, opts = {}) {
     const routine = lane === 'routine' ? routineById(reason.replace(/^routine:/, '')) : null; if (routine) run.routine_id = routine.id;
     const t0 = Date.now();
     try {
-      if (!R.budgetLeft()) { console.log('[预算] 今日请求数用完，passive'); run.status = 'passive_budget'; return; }
+      if (!R.budgetLeft()) { console.log('[预算] daily request budget exhausted, passive mode'); run.status = 'passive_budget'; return; }
       const inbox = await api('GET', '/inbox'); if (!Array.isArray(inbox)) throw new Error('客厅没开门: ' + JSON.stringify(inbox));
       const myTasks = await fetchTasks(); syncTasks(myTasks);              // 黑板上我的事（每次醒来都看一眼，顺手把 due 落成 routine；没叫我也同步）
       // 例行醒来：inbox 空也不算 nothing，没 @ 我也不 deferred——例行本来就不是因为有人叫
       if (!routine && inbox.length === 0 && reason !== 'heartbeat') { run.status = 'nothing'; return; }
       if (!routine && reason !== 'heartbeat' && !inbox.some(m => m.kind === 'dm' || (m.mentions && m.mentions.includes(room.id)))) { console.log('[醒] 有新话但没叫我，留到心跳再看'); run.status = 'deferred'; return; }
       if (inbox.length === 0 && reason === 'heartbeat') {
-        if (!R.keys.concerns().length && !myTasks.length) { console.log('[心跳] 没人叫我，惦记本和黑板都是空的，不叫模型'); run.status = 'passive_idle'; return; }
+        if (!R.keys.concerns().length && !myTasks.length) { console.log('[心跳] idle: no pending tasks or messages, skipping model call'); run.status = 'passive_idle'; return; }
       }
       run.tasks = myTasks.map(t => ({ id: t.id, state: t.state, title: String(t.title).slice(0, 80) }));
       await refreshMembers();
@@ -398,8 +398,8 @@ async function run(roomName, runtimeName, think, opts = {}) {
   async function writeHandover() {
     const hoDir = path.join(R.roomDir, 'handover'); fs.mkdirSync(hoDir, { recursive: true });
     const hoPath = path.join(hoDir, 'latest.md');
-    const facts = shift.length ? shift.map(s => `- ${s.at.slice(11, 16)} 听到：${s.heard.join(' / ').slice(0, 200)}\n  我说：${s.said.slice(0, 200)}`).join('\n') : '- 这一班没人叫我，我也没说话。';
-    const render = note => `# 交接信 · ${room.name}\n\n写于 ${R.houseTime().replace('【房子供给的时间】', '')}\n\n## 我想对明天的自己说\n${note || '（这一班没来得及写，看下面的事实）'}\n\n## 房子记下的事实\n${facts}\n`;
+    const facts = shift.length ? shift.map(s => `- ${s.at.slice(11, 16)} 听到：${s.heard.join(' / ').slice(0, 200)}\n  我说：${s.said.slice(0, 200)}`).join('\n') : '- no interactions this session。';
+    const render = note => `# 交接信 · ${room.name}\n\n写于 ${R.houseTime().replace('【时间】', '')}\n\n## 我想对明天的自己说\n${note || '（这一班没来得及写，看下面的事实）'}\n\n## 房子记下的事实\n${facts}\n`;
     fs.writeFileSync(hoPath, render(''));                       // 先把事实落盘（checkpoint 是底）
     console.log(`[${room.name}] 交接信·事实已写`);
     if (shift.length && !opts.dry) {                            // 再让本人补一句（交接信是面）
@@ -411,7 +411,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
     fs.appendFileSync(path.join(hoDir, 'history.md'), fs.readFileSync(hoPath, 'utf8') + '\n---\n');
   }
   let sleeping = false;
-  const sleep = async () => { if (sleeping) return; sleeping = true; try { await writeHandover(); } catch (e) { fs.writeSync(2, `[交接信失败] ${e.message}\n`); } try { if (think.shift && think.shift.archive) think.shift.archive(); } catch (e) { fs.writeSync(2, `[shift归档失败] ${e.message}\n`); } try { if (R.memory && R.memory.compact) R.memory.compact(); } catch (e) { fs.writeSync(2, `[记忆 compact 失败] ${e.message}\n`); } state.last_sleep = new Date().toISOString(); save(); try { await api('POST', '/activity', { kind: 'sleep', text: `${room.name}：睡了，交接信已写`, meta: { wakes_today: state.wakes_today } }); } catch {} };
+  const sleep = async () => { if (sleeping) return; sleeping = true; try { await writeHandover(); } catch (e) { fs.writeSync(2, `[交接信失败] ${e.message}\n`); } try { if (think.shift && think.shift.archive) think.shift.archive(); } catch (e) { fs.writeSync(2, `[shift归档失败] ${e.message}\n`); } try { if (R.memory && R.memory.compact) R.memory.compact(); } catch (e) { fs.writeSync(2, `[记忆 compact 失败] ${e.message}\n`); } state.last_sleep = new Date().toISOString(); save(); try { await api('POST', '/activity', { kind: 'sleep', text: `${room.name}：session ended, handover saved`, meta: { wakes_today: state.wakes_today } }); } catch {} };
   process.on('SIGINT', async () => { await sleep(); process.exit(0); }); process.on('SIGTERM', async () => { await sleep(); process.exit(0); });
   console.log(`[${room.name}] 适配器上线，runtime=${runtimeName}，客厅=${lrBase}${opts.dry ? '，dry-run' : ''}`);
   await refreshMembers();
