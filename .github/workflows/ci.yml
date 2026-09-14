@@ -24,14 +24,37 @@ jobs:
         run: npm ci
       - name: Install sandbox runtime (bubblewrap)
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Hygiene — trailing whitespace / conflict markers
+        run: git diff --check HEAD~1 || git diff --check $(git rev-list --max-parents=0 HEAD)
+      - name: Repo config validates and lock is current
+        run: |
+          node packages/cli/index.js check
+          node packages/cli/index.js lock --check
       - name: All package tests
         run: npm test
-      - name: Demo smoke (mock mode, no API key)
-        run: node examples/code-review/demo.js | tail -5
-      - name: CLI smoke
+      - name: Canonical demo — full stack on mock upstream (asserts delegation + task lifecycle)
+        run: node examples/code-review/demo.js 2>&1 | grep -E "^(OK|FAIL)"
+      - name: Fresh-workspace smoke — init → cred → new → check → lock → serve → dispatch → reply → clean shutdown
         run: |
-          node packages/cli/index.js init /tmp/ci-ws
-          node packages/cli/index.js new bot --model zhipu/glm-4-flash --house /tmp/ci-ws
-          node packages/cli/index.js new me --human --house /tmp/ci-ws
-          node packages/cli/index.js check --house /tmp/ci-ws
-          ls /tmp/ci-ws/rooms
+          set -e
+          export HOME=/tmp/ci-home SAMEROOF_ENABLE_MOCK=1
+          mkdir -p /tmp/ci-home
+          CLI="node $PWD/packages/cli/index.js"
+          $CLI init /tmp/ci-ws >/dev/null
+          $CLI new bot --model mock/mock-chat --credential mock-cheap --house /tmp/ci-ws >/dev/null
+          $CLI new me --human --house /tmp/ci-ws >/dev/null
+          $CLI check --house /tmp/ci-ws
+          $CLI lock --house /tmp/ci-ws
+          SAMEROOF_ROOT=/tmp/ci-ws $CLI serve --port 18799 --house /tmp/ci-ws > /tmp/serve.log 2>&1 &
+          SERVE=$!
+          for i in $(seq 1 30); do grep -q "adapter started" /tmp/serve.log && break; sleep 1; done
+          grep "adapter started" /tmp/serve.log
+          TOK=$(node -e "console.log(require('$PWD/packages/living-room/tokens.js').issue('resident_me_01').token)")
+          sleep 3
+          curl -sf -X POST http://127.0.0.1:18799/dispatch -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" -d '{"to":"bot","task":"say hi"}' > /dev/null
+          for i in $(seq 1 40); do curl -sf "http://127.0.0.1:18799/history?limit=20" -H "Authorization: Bearer $TOK" | grep -q '"from_id":"resident_bot_01"' && break; sleep 1; done
+          curl -sf "http://127.0.0.1:18799/history?limit=20" -H "Authorization: Bearer $TOK" | grep -q '"from_id":"resident_bot_01"'
+          kill -INT $SERVE
+          for i in $(seq 1 10); do pgrep -f "adapter.js bot" >/dev/null || break; sleep 1; done
+          ! pgrep -f "adapter.js bot" >/dev/null
+          echo "fresh-workspace smoke OK"

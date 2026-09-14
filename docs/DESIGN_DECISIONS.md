@@ -12,7 +12,7 @@ Key decisions made in Same Roof, with rationale. Use this to prepare for intervi
 
 **Alternative considered**: Wrapping all providers into a unified API (like LangChain). Rejected because it strips native capabilities — Claude's tool use works differently from GPT's, and abstracting that away loses fidelity.
 
-**Interview answer**: "We don't abstract away provider differences. Each agent talks to its provider natively. The broker handles auth and accounting transparently."
+**Interview answer**: "The broker is an OpenAI-compatible proxy with per-agent scope and accounting. For providers that aren't OpenAI-compatible, the runtime talks to them directly — `claude-code` and `pi` runtimes do that. I don't have a universal protocol translator and I'm not claiming one."
 
 ---
 
@@ -32,14 +32,16 @@ Key decisions made in Same Roof, with rationale. Use this to prepare for intervi
 
 **Decision**: Separate credential management, message routing, and execution into three independent processes.
 
-**Why**: Defense in depth. If any one layer is compromised, the other two still hold.
-- Broker compromised → attacker has API keys, but can't execute commands (gateway) or impersonate agents (coordinator tokens are separate)
-- Coordinator compromised → attacker can read messages, but can't call APIs (no keys) or execute (no sandbox access)
-- Gateway compromised → attacker can execute in sandbox, but sandbox is network-isolated and filesystem-restricted
+**Why**: separate responsibilities, separate auth, separate failure modes. Each layer can be reasoned about, tested, and restarted on its own.
 
-**Alternative considered**: Single monolithic process. Rejected because a single vulnerability would compromise everything.
+**What it does and doesn't buy you today** (be precise here — this is where a security-minded interviewer will push):
+- Broker and gateway run as dedicated users with `ProtectSystem=strict`. A compromised broker leaks API keys but can't run commands or read the gateway token. A compromised gateway gets its user's file permissions (rooms/ writable), not a sandbox — bwrap wraps *child commands*, not the gateway service.
+- The coordinator and adapters currently run as **root** with no systemd hardening. A compromised coordinator can read everything. This is a deployment gap, not a design property.
+- `sameroof serve` runs broker + coordinator in one process. Dev convenience; no isolation.
 
-**Interview answer**: "No single compromise gives you everything. Each layer has its own auth, its own process boundary, its own failure mode."
+**Alternative considered**: Single monolithic process. Rejected because it makes the *responsibility* boundaries invisible in code, even before you get to process isolation.
+
+**Interview answer**: "Three services, three auth domains, three failure modes. The broker and gateway are contained today; the coordinator isn't yet — it's on the list. I'd rather say that than claim a zero-trust story the unit files don't back up."
 
 ---
 
@@ -47,7 +49,7 @@ Key decisions made in Same Roof, with rationale. Use this to prepare for intervi
 
 **Decision**: If the gateway process is not running, agents cannot execute any operations. No silent fallback.
 
-**Why**: Silent fallback is how security incidents happen. "The sandbox was down so we ran it without a sandbox" is exactly the sentence you never want in a post-mortem. Borrowed from Gemini's execution boundary design.
+**Why**: Silent fallback is how security incidents happen. "The sandbox was down so we ran it without a sandbox" is exactly the sentence you never want in a post-mortem.
 
 **Alternative considered**: Graceful degradation — allow read-only operations without sandbox. Rejected because the boundary between "safe reads" and "unsafe operations" is context-dependent and too easy to get wrong.
 
@@ -61,7 +63,7 @@ Key decisions made in Same Roof, with rationale. Use this to prepare for intervi
 
 **Why**: Agents work for the user. The user should have full visibility into what agents are doing. But broadcasting every agent-to-agent message to all agents would pollute their context windows and waste tokens.
 
-**Alternative considered**: 
+**Alternative considered**:
 - Fully private DMs (like human chat). Rejected — creates a black box where agents negotiate without oversight.
 - Fully public (everything in the broadcast). Rejected — N agents sending DMs creates O(N²) noise.
 - Configurable visibility per workspace. Rejected — overengineering. The fold-out pattern handles both use cases without configuration.
@@ -78,9 +80,11 @@ Key decisions made in Same Roof, with rationale. Use this to prepare for intervi
 
 **Plugin hooks**: onWake, onMessage, beforeThink, afterThink, onSleep — five hooks cover all extension points.
 
-**Alternative considered**: Monolithic adapter (the original room.js at 492 lines). Still works, but harder to explain, harder to test, harder to extend.
+**Status**: `core.js` exists, has 7 tests (serial queue, plugin isolation, timeout, chained hooks), and **nothing in production uses it**. All three shipping runtimes still run on the monolithic `room.js`. The migration is planned, not done.
 
-**Interview answer**: "The core is so simple it's hard to get wrong. New capabilities are plugins — write beforeThink to inject context, write onMessage to filter. Zero changes to core code."
+**Alternative considered**: Keep evolving the monolithic `room.js`. It works and has months of real use; it's also where every known reliability gap lives. `core.js` is the attempt to not carry those forward.
+
+**Interview answer**: "I have two adapter implementations and I'm not proud of that. The old one ships and has the bugs I've documented; the new one has the shape I want and isn't wired in yet. If you ask me what I'd do with another week, it's finishing that migration."
 
 ---
 
@@ -88,14 +92,16 @@ Key decisions made in Same Roof, with rationale. Use this to prepare for intervi
 
 **Decision**: Memory writes are append-only. Updates are patches appended to the same file. Human-written memories are protected — agents can propose changes but humans must approve.
 
-**Why**: 
+**Why**:
 - Append-only means you never lose data — worst case is duplicates, not deletions.
 - Hand-authored protection prevents an agent from overwriting a fact the human explicitly stated.
 - Review queue gives humans control without blocking agent operation.
 
 **Alternative considered**: Mutable database (SQLite). Rejected because append-only is simpler, portable (just a file), and naturally supports audit trail.
 
-**Interview answer**: "Memory is append-only JSONL. Agent writes are pending until human approves. Retrieval uses vector similarity with 2-gram fallback. It's a lightweight RAG pipeline — same architecture, different data source."
+**Retrieval status**: 2-gram overlap is the stable path. Vector retrieval (embedding + cosine, with unindexed-candidate fallback and atomic index writes) exists and is tested against a local HTTPS mock, but there is no `/v1/embeddings` route in the broker yet, so in a real deployment the embedding call goes direct to a provider, not through the broker's credential scope. Treat it as **optional/experimental** until that route exists.
+
+**Interview answer**: "Memory is append-only JSONL with a review queue and hand-authored protection. Retrieval is 2-gram by default; vector retrieval is wired and tested but I'd call it experimental until embeddings go through the broker like chat does."
 
 ---
 
@@ -103,7 +109,7 @@ Key decisions made in Same Roof, with rationale. Use this to prepare for intervi
 
 **Decision**: Same Roof runs on your own server. Remote access via any HTTP tunnel (Cloudflare Tunnel, ngrok, etc.), not through our relay.
 
-**Why**: 
+**Why**:
 - Claude Code routes through Anthropic's servers. Codex cloud routes through OpenAI. Your data passes through a third party.
 - Same Roof is pure HTTP + SSE on your own infrastructure. You choose how to expose it.
 - For enterprises, "data doesn't leave our network" is often a hard requirement.
@@ -118,11 +124,13 @@ Key decisions made in Same Roof, with rationale. Use this to prepare for intervi
 
 When asked "walk me through your architecture", pick 2-3 of these and go deep:
 1. Start with the three-layer isolation (#3) — it's the backbone
-2. Follow with multi-provider (#1) — it's the differentiator  
+2. Follow with multi-provider (#1) — it's the differentiator
 3. End with one detail that shows depth — fail-closed (#4) or DM visibility (#5)
 
 When asked "what would you do differently", be honest:
-- The adapter layer has two implementations (core.js and room.js) — ideally there'd be one
-- CLI doesn't fully work end-to-end yet — sameroof serve starts services but adapter auto-start needs work
-- No CI/CD pipeline — tests run locally only
-- Frontend needs a full rebuild for the new direction
+- Two adapter implementations; the shipping one has the known reliability gaps listed in ARCHITECTURE.md (ack-before-deliver, no client timeouts, no inbox catch-up on reconnect)
+- Coordinator and adapters run as root in the systemd deployment; only broker and gateway are hardened
+- Vector memory retrieval doesn't go through the broker yet
+- Console is a first-pass control surface: token in localStorage, `style-src 'unsafe-inline'` still on
+- Task claim has no optimistic lock
+- CI runs, but `house.lock --check` / `git diff --check` / a real `serve` smoke aren't in it yet (see .github/workflows/ci.yml for what is)

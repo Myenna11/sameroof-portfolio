@@ -52,19 +52,32 @@ function treeFiles(dir) {
   return out;
 }
 
+// Component source resolution. A workspace is usually NOT the monorepo: framework code lives in the
+// installed @sameroof/* packages. Prefer root/packages/* when it exists (root is a source tree); else the installed package.
+// `source` in the lock stays a stable label (packages/adapters/pi etc.), the digest is what --check compares.
+function pkgDir(pkg) {
+  try { return path.dirname(require.resolve('@sameroof/' + pkg + '/package.json')); } catch { return null; }
+}
+function resolveSource(root, source) {
+  const local = path.join(root, source);
+  if (fs.existsSync(local)) return local;                       // root is a source tree (monorepo dev / tests): it wins
+  const m = /^packages\/([^/]+)(?:\/(.*))?$/.exec(source);       // otherwise: the installed @sameroof/<pkg>
+  if (m) { const d = pkgDir(m[1]); if (d) { const full = m[2] ? path.join(d, m[2]) : d; if (fs.existsSync(full)) return full; } }
+  return local;
+}
 function component(root, id, source) {
-  const dir = path.join(root, source);
-  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) throw new LockError('LOCK-COMPONENT-MISSING-001', '找不到组件“' + id + '”：' + source);
+  const dir = resolveSource(root, source);
+  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) throw new LockError('LOCK-COMPONENT-MISSING-001', '找不到组件“' + id + '”：' + source + '（@sameroof/* 未安装，且 ' + root + ' 不是源码树）');
   let version = 'workspace';
   const manifest = path.join(dir, 'package.json');
   if (fs.existsSync(manifest)) version = String(JSON.parse(fs.readFileSync(manifest, 'utf8')).version || version);
-  const digest = digestFiles(root, treeFiles(dir)).digest;
+  const digest = digestFiles(dir, treeFiles(dir)).digest;
   return { id, version, source, digest: { algorithm: 'sha256', value: digest }, interface_version: 1 };
 }
 
 function pluginSource(root, id) {
   const direct = 'packages/plugin-' + id;
-  if (fs.existsSync(path.join(root, direct))) return direct;
+  if (fs.existsSync(resolveSource(root, direct))) return direct;
   if (id === 'living-room') return 'packages/living-room';
   if (id === 'handover') return 'packages/adapters/lib';
   throw new LockError('LOCK-PLUGIN-MISSING-001', '找不到插件“' + id + '”的实现。');
@@ -109,7 +122,7 @@ function generateLock(rootInput) {
   }
   const runtimes = [...runtimeIds].sort().map(id => component(root, id, 'packages/adapters/' + id));
   const plugins = [...pluginIds].sort().map(id => component(root, id, pluginSource(root, id)));
-  const schemaDir = path.join(root, 'packages', 'schema');
+  const schemaDir = resolveSource(root, 'packages/schema');
   const schema = name => {
     const file = path.join(schemaDir, name + '.schema.json');
     const value = JSON.parse(fs.readFileSync(file, 'utf8'));

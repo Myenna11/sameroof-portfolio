@@ -70,7 +70,7 @@ const cmds = {
       const broker = createBroker({ store });
       await broker.listen();
       log('broker', 'listening on ' + path.basename(broker.socketPath));
-      const creds = store.db.prepare('SELECT alias FROM credentials WHERE active=1').all().map(r => r.alias);
+      const creds = store.listCredentials().filter(c => c.active).map(c => c.alias);   // includes built-in mock-cheap when SAMEROOF_ENABLE_MOCK=1
       if (!creds.length) log('broker', 'warning: no credentials. Add one: sameroof cred add <alias> --provider X --base-url URL --api-key KEY');
 
       // 2. Coordinator (in-process)
@@ -152,7 +152,7 @@ const cmds = {
     } else if (sub === 'list') {
       const { BrokerStore } = require('@sameroof/broker/store');
       const store = new BrokerStore();
-      const creds = store.db.prepare('SELECT alias, provider, base_url, active FROM credentials').all();
+      const creds = store.listCredentials();
       if (!creds.length) { console.log('No credentials. Add one: sameroof cred add <alias> --provider X --base-url URL --api-key KEY'); return; }
       for (const c of creds) console.log((c.active ? '●' : '○') + ' ' + c.alias.padEnd(20) + ' ' + c.provider.padEnd(16) + ' ' + c.base_url);
     } else {

@@ -4,7 +4,7 @@
 
 Same Roof lets agents from different providers — Claude, GPT, GLM, Kimi, Codex — work in the same project directory with isolated credentials, sandboxed execution, and configurable collaboration.
 
-Each agent keeps its native capabilities. The framework handles coordination.
+Single-machine, self-hosted, single-tenant. Prototype quality: see [Status](#status) for what's real and what isn't.
 
 ## Why
 
@@ -20,21 +20,40 @@ Same Roof runs all of them, in one workspace:
 
 ## Quick start
 
+Requires Node 22+, Linux, `bubblewrap` (for the gateway). No git remote yet — clone from wherever you got this tree.
+
 ```bash
-git clone https://github.com/user/sameroof.git
-cd sameroof
-npm install
+npm ci
+alias sameroof="node $PWD/packages/cli/index.js"      # or npm link packages/cli
 
-# Add a credential
-node packages/broker/brokerctl.js cred add my-key \
-  --provider zhipu --base-url https://open.bigmodel.cn/api/paas/v4
+# 1. a workspace anywhere (not inside this repo)
+sameroof init ~/my-workspace
+cd ~/my-workspace
 
-# Add an agent
-sameroof new my-agent --model glm-4-flash --credential my-key
+# 2. a credential in the broker (key goes in the command; see brokerctl for stdin/file input)
+sameroof cred add zhipu-key --provider zhipu \
+  --base-url https://open.bigmodel.cn/api/paas/v4 --api-key sk-...
 
-# Run
+# 3. an agent and yourself     (model is provider/id)
+sameroof new reviewer --model zhipu/glm-4-flash --credential zhipu-key
+sameroof new me --human
+sameroof check
+
+# 4. run: broker + coordinator + one adapter process per agent
 sameroof serve
+# → http://127.0.0.1:8790/console   token: sameroof pair me
 ```
+
+Then, from another shell, with the token from `sameroof pair me`:
+
+```bash
+curl -X POST http://127.0.0.1:8790/dispatch \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"to":"reviewer","task":"Say hello in five words."}'
+curl "http://127.0.0.1:8790/history?limit=5" -H "Authorization: Bearer <token>"
+```
+
+No API key? `node examples/code-review/demo.js` runs the whole stack against the broker's built-in mock upstream.
 
 ## Architecture
 
@@ -99,13 +118,7 @@ The framework ensures credential isolation and sandbox enforcement regardless of
 
 ## Multi-instance
 
-One agent profile can run multiple concurrent instances. Each instance has its own session context but shares the profile's credentials (with separate usage tracking).
-
-```bash
-# Run two instances of the same agent
-sameroof run my-agent --task "scan src/ for security issues"
-sameroof run my-agent --task "scan test/ for coverage gaps"
-```
+**Planned, not implemented.** The broker already issues per-token scope and accounting, so two instances of one profile would get separate ledgers — but there is no `sameroof run` command and the coordinator has no notion of instance identity beyond `resident_id`. Today: one profile, one process.
 
 ## Packages
 
@@ -123,6 +136,20 @@ sameroof run my-agent --task "scan test/ for coverage gaps"
 
 ## Status
 
-In development. Core infrastructure (broker, gateway, coordinator) is live with 118 passing tests.
+Prototype. Test count is whatever `npm test` prints — don't trust a number in a README.
+
+| | |
+|---|---|
+| broker (scoped tokens, ledger, mock upstream) | works, tested |
+| gateway (bwrap, approval digest, single-use decisions) | works, negative-tested |
+| coordinator (say/dm/dispatch, task board, SSE, durable inbox) | works, tested |
+| adapters | `lib/room.js` ships; `lib/core.js` is experimental and unused |
+| CLI `init/cred/new/check/lock/serve` | works from a clean directory |
+| console | first pass; approval details are real, styling isn't |
+| memory | append-only + review queue stable; vector retrieval experimental |
+| process isolation | broker + gateway hardened; coordinator + adapters run as root |
+| multi-instance, provider protocol translation | not implemented |
+
+Known gaps with code pointers: `docs/ARCHITECTURE.md` → Failure Modes. Design rationale and what we'd do differently: `docs/DESIGN_DECISIONS.md`. Most recent external review: `docs/reviews/`.
 
 MIT.

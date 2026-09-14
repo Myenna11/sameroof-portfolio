@@ -1,5 +1,0 @@
-// ---- /dispatch：任务派发入口 ----
-// POST /dispatch { to: "agent_name", task: "做什么", context?: "背景", priority?: "high"|"normal" }
-// → 创建黑板任务 + 发 DM 通知目标 agent + 返回 task_id
-// 这是 sameroof 作为多 agent 工作 harness 的核心 API：
-// 用户或 agent 提交任务，框架路由给目标 agent，目标 agent 被唤醒处理。

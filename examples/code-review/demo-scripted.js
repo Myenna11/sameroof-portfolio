@@ -9,7 +9,7 @@
 // What this demonstrates:
 //   1. User dispatches code to logic-reviewer (Claude, expensive)
 //   2. logic-reviewer analyzes logic/architecture, posts review
-//   3. logic-reviewer dispatches to security-scanner (GLM, cheap) 
+//   3. logic-reviewer dispatches to security-scanner (GLM, cheap)
 //   4. security-scanner checks for vulnerabilities, posts findings
 //   5. Both reviews visible to human through coordinator
 //
@@ -50,17 +50,17 @@ function runMock() {
 
    🔴 CRITICAL: SQL Injection (lines 12-13)
       String interpolation in SQL query. Use parameterized queries.
-   
+
    🔴 CRITICAL: Password returned in response (line 31)
       user[0] includes password hash. Select only needed fields.
-   
+
    🟡 WARNING: Weak token generation (lines 20-22)
       HMAC of username only — no expiry, no session binding.
       Use JWT with exp claim or a session store.
-   
+
    🟡 WARNING: resetPassword uses GET (line 35)
       State-changing operation should be POST/PUT.
-   
+
    🟢 SUGGESTION: Extract auth logic into a service layer.
       Controller should not contain business logic directly.
 `);
