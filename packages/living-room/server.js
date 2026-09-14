@@ -231,6 +231,7 @@ function createLivingRoom(options = {}) {
   const history = db.prepare("SELECT * FROM messages WHERE kind NOT IN ('dm','result') AND seq>? ORDER BY seq LIMIT ?");      // result 类只投申请住户，不进公共历史
   const historyBefore = db.prepare("SELECT * FROM messages WHERE kind NOT IN ('dm','result') AND seq<? ORDER BY seq DESC LIMIT ?");
   const dmHistory = db.prepare("SELECT * FROM messages WHERE kind='dm' AND ((from_id=? AND to_id=?) OR (from_id=? AND to_id=?)) AND seq<? ORDER BY seq DESC LIMIT ?");
+  const adminFullStream = db.prepare("SELECT * FROM messages WHERE seq>? ORDER BY seq LIMIT ?");   // admin: ALL messages including DM and result
   const insActivity = db.prepare('INSERT INTO activity(ts,kind,actor_id,text,meta) VALUES(?,?,?,?,?)');
   const activityBefore = db.prepare('SELECT * FROM activity WHERE seq<? ORDER BY seq DESC LIMIT ?');
   const ACTIVITY_KINDS = new Set(['wake', 'sleep', 'model_call', 'config_change', 'approval_request', 'approval_result', 'error', 'thread_update', 'note']);
@@ -332,7 +333,12 @@ function createLivingRoom(options = {}) {
       state.last_said = ts;
       presence.set(row.from_id, state);
     }
-    for (const listener of listeners) if (!isPrivate || listener.id === row.to_id || listener.id === row.from_id) listener.send(row);
+    // DM: push to sender + receiver + all humans (for fold-out display in UI). Other agents don't see it.
+    const isHumanListener = id => { const r = byId.get(id); return r && r.species === 'human'; };
+    for (const listener of listeners) {
+      if (!isPrivate) { listener.send(row); }
+      else if (listener.id === row.to_id || listener.id === row.from_id || isHumanListener(listener.id)) { listener.send(row); }
+    }
     notifyOfflineHumans(row, targets);
     return row;
   }
@@ -687,6 +693,14 @@ function createLivingRoom(options = {}) {
         const before = positiveInt(url.searchParams.get('before'), Number.MAX_SAFE_INTEGER, 1, Number.MAX_SAFE_INTEGER, 'HISTORY-BEFORE-INVALID');
         const limit = positiveInt(url.searchParams.get('limit'), 50, 1, 200, 'HISTORY-LIMIT-INVALID');
         return writeJson(res, 200, historyBefore.all(before, limit).reverse().map(row => ({ ...row, mentions: JSON.parse(row.mentions), meta: row.meta ? JSON.parse(row.meta) : null })));
+      }
+
+      // Admin full message stream: all messages including DMs — requires human identity
+      if (req.method === 'GET' && url.pathname === '/admin/messages') {
+        if (me.species !== 'human') throw new HttpError(403, 'ADMIN-HUMANS-ONLY', 'Admin endpoints require human identity.');
+        const since = positiveInt(url.searchParams.get('since'), 0, 0, Number.MAX_SAFE_INTEGER, 'ADMIN-SINCE-INVALID');
+        const limit = positiveInt(url.searchParams.get('limit'), 200, 1, 500, 'ADMIN-LIMIT-INVALID');
+        return writeJson(res, 200, adminFullStream.all(since, limit).map(row => ({ ...row, mentions: JSON.parse(row.mentions), meta: row.meta ? JSON.parse(row.meta) : null })));
       }
 
       if (req.method === 'GET' && url.pathname === '/history') {
