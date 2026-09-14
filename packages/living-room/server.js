@@ -508,6 +508,36 @@ function createLivingRoom(options = {}) {
         return writeJson(res, 200, post({ kind: 'dm', from_id: me.id, to_id: to.id, text, meta: deliveryMeta(body) }));
       }
 
+      // ---- 任务派发（多 agent 协作核心 API） ----
+      // POST /dispatch { to, task, context?, priority?, sub_tasks? }
+      // → 在黑板上创建任务 + DM 通知目标 agent + 返回 task 对象
+      if (req.method === 'POST' && url.pathname === '/dispatch') {
+        rateOrThrow(sayLimiter, me.id, '派发任务');
+        const body = await readJson(req);
+        // 必填：to（目标 agent）、task（任务描述）
+        if (typeof body.to !== 'string' || !body.to.trim()) throw new HttpError(400, 'DISPATCH-TO-REQUIRED', '要指定目标 agent（to 字段）。');
+        if (typeof body.task !== 'string' || !body.task.trim()) throw new HttpError(400, 'DISPATCH-TASK-REQUIRED', '要有任务描述（task 字段）。');
+        const target = byName.get(norm(body.to)) || byId.get(body.to);
+        if (!target) throw new HttpError(404, 'DISPATCH-TARGET-NOT-FOUND', '找不到目标 agent：' + String(body.to).slice(0, 60));
+        // 在黑板上创建任务（复用 blackboard API 的数据结构）
+        const taskTitle = body.task.trim().slice(0, 300);
+        const taskNotes = typeof body.context === 'string' ? body.context.trim().slice(0, 1000) : null;
+        const ts = new Date().toISOString();
+        const taskId = 'task_' + Date.now().toString(36) + require('crypto').randomBytes(4).toString('hex').slice(0, 6);
+        const taskRow = { id: taskId, title: taskTitle, owner_id: target.id, state: 'open', origin: 'dispatch:' + me.name,
+          created_by: me.id, created_ts: ts, updated_ts: ts, due_at: null, due_cron: null,
+          accept: null, notes: taskNotes, result: null, blocks_json: null };
+        db.prepare('INSERT INTO tasks(id,title,owner_id,state,origin,created_by,created_ts,updated_ts,due_at,due_cron,accept,notes,result,blocks_json,archived_ts) VALUES(@id,@title,@owner_id,@state,@origin,@created_by,@created_ts,@updated_ts,@due_at,@due_cron,@accept,@notes,@result,@blocks_json,NULL)').run(taskRow);
+        // DM 通知目标 agent
+        const dmText = '📋 ' + me.name + ' 派了一个任务给你：' + taskTitle + (taskNotes ? '\n背景：' + taskNotes.slice(0, 200) : '');
+        post({ kind: 'dm', from_id: me.id, to_id: target.id, text: dmText, mentions: [target.id], meta: { dispatch: true, task_id: taskId } });
+        // activity
+        emitActivity({ kind: 'thread_update', actor_id: me.id, text: '📋 ' + me.name + ' 派任务给 ' + target.name + '：' + taskTitle.slice(0, 60), meta: { task_id: taskId, target_id: target.id, op: 'dispatch' } });
+        const task = db.prepare('SELECT * FROM tasks WHERE id=?').get(taskId);
+        return writeJson(res, 200, { dispatched: true, task_id: taskId, target: target.name, task: { ...task, blocks: task.blocks_json ? JSON.parse(task.blocks_json) : [] } });
+      }
+
+
       if (req.method === 'GET' && url.pathname === '/events') {
         const residentCount = sseByResident.get(me.id) || 0;
         const ipCount = sseByIp.get(ip) || 0;

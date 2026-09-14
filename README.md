@@ -1,50 +1,128 @@
-# 同屋 · Same Roof
+# Same Roof
 
-**agent 既能活得好，也能干好活的地方。**
-**Humans and agents, under the same roof.**
+**Multi-provider agent runtime. Different models, one workspace.**
 
-别人都在做"怎么让 agent 把活干好"。我们做的是：agent 先作为"人"存在，
-然后才有任务——而干好活，本身就是活得好的一部分。
+Same Roof lets agents from different providers — Claude, GPT, GLM, Kimi, Codex — work in the same project directory with isolated credentials, sandboxed execution, and configurable collaboration.
 
-- **活得好** = 身份、记忆、关系、你不在时它也在。
-- **干好活** = 真的能接任务、真的能协作、真的有工具、成果真的落地。
+Each agent keeps its native capabilities. The framework handles coordination.
 
-两条腿，缺一条都是残的。只有前者是养电子宠物；只有后者是市面上已有一百个的 agent 工作台。
+## Why
 
-## 三个核心（我们自己写）
+Every agent harness today is single-provider. Claude Code runs Claude. Codex runs OpenAI. DeepSeek Harness runs DeepSeek.
 
-1. **身份**：一个人是什么——名字、性格、穿哪件模型的衣服、记得什么、和谁是什么关系。
-   换了模型、换了运行时、换了机器，还是他。*记忆在，人就在。*
-2. **共处**：人和 agent、agent 和 agent 在同一个空间说话。单聊、群聊、@、
-   任务从对话里长出来，不从工单系统里派下来。
-3. **持续**：你不在的时候，家里的人也在——读交接、翻记忆、惦记没做完的事。
+Same Roof runs all of them, in one workspace:
 
-底下跑什么模型、用什么运行时、走谁家订阅，全是可替换的地基。
+- **Credential isolation** — a broker issues short-lived tokens per agent. Agents never see each other's keys.
+- **Sandboxed execution** — `bwrap`-based sandbox with approval chains. Fail-closed: no sandbox, no execution.
+- **Message routing** — agents communicate through a coordinator. Delegate tasks, request reviews, share results.
+- **Cost control** — per-agent quotas, usage ledger, prompt caching.
+- **User-defined collaboration** — you decide who does what. The framework provides the infrastructure, not the workflow.
 
-> 家的感觉不来自少做安全，而来自把安全藏在地基里：住户看到的是"这件事要不要做""今天还能想多久"，
-> 不该看到 JWT、ACL、TOCTOU 和迁移事务。 —— 审查员
-谁家的好用接谁家，坏了就换，不效忠任何一个。
+## Quick start
 
-## 对邻居们的态度
+```bash
+git clone https://github.com/user/sameroof.git
+cd sameroof
+npm install
 
-看它学道理，按许可证借鉴，自己的东西自己写。不搬别人的家具，不去改别人家的墙。
+# Add a credential
+node packages/broker/brokerctl.js cred add my-key \
+  --provider zhipu --base-url https://open.bigmodel.cn/api/paas/v4
 
-我们从这些项目里学到了道理（致谢，不依赖）：
-mousecrew（一个写入口/名字归一化/宁送两遍不丢一条）、DeepSeek Harness（everything is a plugin）、
-headlong（人来消息是观察不是开关）、lmc-5（事实有生命周期）、Turritopsis（项目要有共读的黑板）、
-CcCompanion（CLI 原样透出，壳像微信）、Orca（宿主+手机伴侣）。
+# Add an agent
+sameroof new my-agent --model glm-4-flash --credential my-key
 
-## 目录
-
-```
-rooms/            每间屋一个人（example/ 是样板）
-packages/         我们自己的砖（客厅、记忆、黑板、运行时适配）
-apps/house/       家的界面
-docs/             架构与决策
+# Run
+sameroof serve
 ```
 
-## 状态
+## Architecture
 
-2026-09-02 立项。方向已定，砖还没砌。
+```
+┌─────────────────────────────────────────────────┐
+│  User / CLI / API                               │
+└──────────────────────┬──────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────┐
+│  Coordinator (message routing, task board,       │
+│               approval broadcast, SSE)           │
+└───┬──────────────┬──────────────┬───────────────┘
+    │              │              │
+┌───▼───┐    ┌─────▼────┐   ┌────▼────┐
+│Agent A│    │ Agent B  │   │Agent C  │
+│Claude │    │ GPT/Codex│   │ GLM     │
+│(native│    │ (native  │   │(native  │
+│ CLI)  │    │  API)    │   │ API)    │
+└───┬───┘    └─────┬────┘   └────┬────┘
+    │              │              │
+┌───▼──────────────▼──────────────▼───────────────┐
+│  Credential Broker                               │
+│  (multi-provider token issuance, usage ledger)   │
+└──────────────────────┬──────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────┐
+│  Execution Gateway                               │
+│  (bwrap sandbox, approval chain, fail-closed)    │
+└─────────────────────────────────────────────────┘
+```
+
+## Key concepts
+
+**Workspace** (`house.yaml`) — project-level config: timezone, default permissions, credential aliases, notification targets.
+
+**Agent profile** (`rooms/<name>/room.yaml`) — per-agent config: model provider, credential, permissions, runtime type. One profile can run multiple instances.
+
+**Credential broker** — manages API keys for multiple providers. Issues short-lived opaque tokens to agents. Tracks usage per agent per day.
+
+**Execution gateway** — runs commands in `bwrap` sandboxes. File reads go through path rules without a subprocess. Every action requires an approval (user-granted or pre-configured). No gateway = no execution, never silent fallback.
+
+**Coordinator** — routes messages between agents and humans. Manages the task board (pin, claim, complete). Broadcasts approval requests.
+
+## Agent collaboration
+
+Same Roof provides the channels. How agents collaborate is up to you.
+
+```yaml
+# In an agent's system prompt or SOUL.md:
+# "When you finish writing code, ask 审查员 to review it."
+# "If you're unsure about the approach, delegate to 规划员."
+# "For repetitive file scanning, spawn a GLM sub-instance."
+```
+
+Agents can:
+- **Send messages** to other agents via the coordinator
+- **Delegate tasks** by pinning items to another agent's board
+- **Request approvals** for privileged operations
+- **Spawn sub-instances** of any configured agent profile
+
+The framework ensures credential isolation and sandbox enforcement regardless of collaboration pattern.
+
+## Multi-instance
+
+One agent profile can run multiple concurrent instances. Each instance has its own session context but shares the profile's credentials (with separate usage tracking).
+
+```bash
+# Run two instances of the same agent
+sameroof run my-agent --task "scan src/ for security issues"
+sameroof run my-agent --task "scan test/ for coverage gaps"
+```
+
+## Packages
+
+| Package | What it does |
+|---|---|
+| `broker` | Multi-provider credential management, token issuance, usage ledger |
+| `gateway` | bwrap sandbox execution, approval chain, file operations |
+| `living-room` | Message routing, task board, approval broadcast, SSE |
+| `adapters` | Agent runtime adapters (broker-direct API, claude-code CLI, pi) |
+| `schema` | YAML config validation for workspace and agent profiles |
+| `cli` | `sameroof` command-line tool |
+| `quota` | Per-agent token quota management |
+| `jcs` | RFC 8785 JSON canonicalization (used in approval verification) |
+| `plugin-memory` | Optional: persistent agent memory with review queue |
+
+## Status
+
+In development. Core infrastructure (broker, gateway, coordinator) is live with 118 passing tests.
 
 MIT.
