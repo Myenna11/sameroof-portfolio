@@ -100,7 +100,7 @@ test('memory api：权限矩阵与 happy path', async () => {
     assert.equal((await request(port, P + s3.body.id + '/approve', { method: 'POST', token: self })).body.error.code, 'MEM-HUMAN-ONLY');
     assert.equal((await request(port, P + s3.body.id + '/approve', { method: 'POST', token: human })).status, 200);
     assert.deepEqual([M.get(authored.id).version_status, M.get(authored.id).superseded_by, M.get(authored.id).content], ['superseded', s3.body.id, '维护者说我叫乙']);
-    assert.deepEqual(M.recall('维护者说我叫').map(x => x.id), [s3.body.id]);
+    assert.deepEqual((await M.recall('维护者说我叫')).map(x => x.id), [s3.body.id]);
 
     // 只读清单也走折叠：旧字段 reviewed 兼容，新字段带出来
     const list = await request(port, '/rooms/resident_beta_01/memory', { token: human });
