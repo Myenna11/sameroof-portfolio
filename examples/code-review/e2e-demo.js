@@ -48,6 +48,8 @@ delete process.env.SAMEROOF_LR;
 
 const { createLivingRoom } = require('../../packages/living-room/server');
 const { run } = require('../../packages/adapters/lib/room');
+const { BrokerStore } = require('../../packages/broker/store');
+const { createBroker } = require('../../packages/broker/server');
 
 // -- HTTP helpers --
 function request(port, pathname, options = {}) {
@@ -63,15 +65,17 @@ function request(port, pathname, options = {}) {
   });
 }
 
-function callSophnet(model, system, user) {
+// Call the model THROUGH THE BROKER — agent never sees the real API key.
+// The broker socket accepts the agent's short-lived token, looks up which credential it's bound to,
+// and forwards to upstream with the real key. This is credential isolation in practice.
+function callViaBroker(socketPath, agentToken, model, system, user) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({ model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], max_tokens: 800, temperature: 0.3 });
-    const url = new URL(API_URL);
-    const req = https.request({ hostname: url.hostname, port: 443, path: url.pathname, method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${API_KEY}`, 'Content-Length': Buffer.byteLength(body) }
+    const req = require('http').request({ socketPath, path: '/v1/chat/completions', method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${agentToken}`, 'Content-Length': Buffer.byteLength(body) }
     }, res => {
       let data = ''; res.on('data', c => data += c);
-      res.on('end', () => { try { const j = JSON.parse(data); resolve(j.choices?.[0]?.message?.content || '(no output)'); } catch { resolve('(parse error)'); } });
+      res.on('end', () => { try { const j = JSON.parse(data); if (j.error) return reject(new Error(j.error.code + ': ' + j.error.message)); resolve(j.choices?.[0]?.message?.content || '(no output)'); } catch { resolve('(parse error: ' + data.slice(0, 100) + ')'); } });
     });
     req.on('error', reject); req.setTimeout(60000, () => { req.destroy(); reject(new Error('timeout')); });
     req.write(body); req.end();
@@ -90,6 +94,20 @@ async function main() {
   console.log('║  coordinator → adapter → real API → result back  ║');
   console.log('╚══════════════════════════════════════════════════╝\n');
 
+  // 0. Start broker with two credentials (same upstream, different aliases = credential isolation)
+  const brokerStore = new BrokerStore({ home: path.join(ROOT, '.sameroof') });
+  brokerStore.addCredential({ alias: 'capable-model', provider: 'sophnet', baseUrl: 'https://www.sophnet.com/api/open-apis/v1', apiKey: API_KEY });
+  brokerStore.addCredential({ alias: 'cheap-model', provider: 'sophnet', baseUrl: 'https://www.sophnet.com/api/open-apis/v1', apiKey: API_KEY });
+  const logicTok = brokerStore.issueToken({ residentId: 'resident_logic_01', credentials: ['capable-model'], models: ['GLM-5'], writeFile: false });
+  const secTok = brokerStore.issueToken({ residentId: 'resident_security_01', credentials: ['cheap-model'], models: ['qwen3.6-flash'], writeFile: false });
+  const broker = createBroker({ store: brokerStore });
+  await broker.listen();
+  const brokerSock = broker.socketPath;
+  console.log(`✅ Broker running on ${path.basename(brokerSock)}`);
+  console.log(`   logic-reviewer   token → capable-model (GLM-5 only)`);
+  console.log(`   security-scanner token → cheap-model (qwen3.6-flash only)`);
+  console.log(`   Neither agent has the real API key.\n`);
+
   // 1. Start coordinator
   const room = createLivingRoom({ houseDir: ROOT, runDir: RUN_DIR, dataDir: path.join(ROOT, 'state'), port: 0 });
   const port = (await room.listen()).port;
@@ -103,9 +121,9 @@ async function main() {
   const logicThink = async (system, user) => {
     const inbox = String(user);
     if (!inbox.includes('auth.js') && !inbox.includes('Review')) return '(静默)';
-    console.log('\n🤖 logic-reviewer calling GLM-5...');
+    console.log('\n🤖 logic-reviewer → broker → GLM-5...');
     const t = Date.now();
-    const result = await callSophnet('GLM-5', system + '\n' + fs.readFileSync(path.join(ROOT, 'rooms', 'logic-reviewer', 'SOUL.md'), 'utf8'),
+    const result = await callViaBroker(brokerSock, logicTok.secret, 'GLM-5', system + '\n' + fs.readFileSync(path.join(ROOT, 'rooms', 'logic-reviewer', 'SOUL.md'), 'utf8'),
       'Review this code:\n```javascript\n' + SAMPLE + '\n```');
     console.log(`   ⏱ ${((Date.now() - t) / 1000).toFixed(1)}s`);
     return result;
@@ -116,9 +134,9 @@ async function main() {
   const securityThink = async (system, user) => {
     const inbox = String(user);
     if (!inbox.includes('auth.js') && !inbox.includes('security') && !inbox.includes('scan') && !inbox.includes('Security') && !inbox.includes('vulnerabilit')) return '(静默)';
-    console.log('\n🤖 security-scanner calling qwen3.6-flash...');
+    console.log('\n🤖 security-scanner → broker → qwen3.6-flash...');
     const t = Date.now();
-    const result = await callSophnet('qwen3.6-flash', system + '\n' + fs.readFileSync(path.join(ROOT, 'rooms', 'security-scanner', 'SOUL.md'), 'utf8'),
+    const result = await callViaBroker(brokerSock, secTok.secret, 'qwen3.6-flash', system + '\n' + fs.readFileSync(path.join(ROOT, 'rooms', 'security-scanner', 'SOUL.md'), 'utf8'),
       'Scan this code for security vulnerabilities:\n```javascript\n' + SAMPLE + '\n```');
     console.log(`   ⏱ ${((Date.now() - t) / 1000).toFixed(1)}s`);
     return result;
@@ -167,6 +185,20 @@ async function main() {
   console.log('\n📝 security-scanner posted findings:');
   console.log(secDone.text?.slice(0, 500) + (secDone.text?.length > 500 ? '\n   ...(truncated)' : ''));
 
+  // 5b. Prove credential isolation: logic-reviewer's token CANNOT use security-scanner's model
+  console.log('\n🔒 Isolation check: logic-reviewer token trying to call qwen3.6-flash...');
+  try {
+    await callViaBroker(brokerSock, logicTok.secret, 'qwen3.6-flash', 'x', 'x');
+    console.log('   ❌ SHOULD HAVE FAILED');
+  } catch (e) {
+    console.log(`   ✅ Rejected by broker: ${e.message.slice(0, 80)}`);
+  }
+
+  // 5c. Show the broker's ledger
+  const ledger = brokerStore.db.prepare('SELECT resident_id, credential_alias, model, actual_tokens, latency_ms, status FROM ledger ORDER BY ts').all();
+  console.log('\n📒 Broker ledger (who used what):');
+  for (const row of ledger) console.log(`   ${row.resident_id.padEnd(24)} ${row.credential_alias.padEnd(14)} ${(row.model || '?').padEnd(16)} ${String(row.actual_tokens || 0).padStart(5)} tok  ${String(row.latency_ms || 0).padStart(6)}ms  ${row.status}`);
+
   // 6. Check task board
   const tasks = (await request(port, '/tasks', { token: humanToken })).body;
   console.log(`\n📋 Task board: ${tasks?.length || 0} tasks`);
@@ -175,12 +207,13 @@ async function main() {
   // Cleanup
   console.log('\n' + '─'.repeat(50));
   console.log('\n✅ End-to-end flow complete:');
-  console.log('   dispatch → coordinator → adapter wake → real API call → result posted');
-  console.log('   Two agents, two models, full coordinator routing.\n');
+  console.log('   dispatch → coordinator → adapter wake → BROKER → upstream API → result posted');
+  console.log('   Two agents, two credentials, isolated tokens, full ledger.\n');
 
   ctrl1.abort(); ctrl2.abort();
   await new Promise(r => setTimeout(r, 500));  // let adapters shut down
   await room.close().catch(() => {});
+  await broker.close().catch(() => {});
   try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch {}
   for (const k of Object.keys(savedEnv)) { if (savedEnv[k] === undefined) delete process.env[k]; else process.env[k] = savedEnv[k]; }
 }
