@@ -5,16 +5,21 @@ const path = require('node:path');
 const { LockError, writeLock, verifyLock } = require('./lock');
 
 function usage() {
-  console.log('用法：sameroof <命令>');
-  console.log('  new <名字> [--model provider/id] [--runtime ..] [--human]   建一间屋');
-  console.log('  check                                                     全屋校验');
-  console.log('  explain <名字>                                            每个生效值来自哪');
-  console.log('  pair <名字> [--api 地址] [--rotate]                        手机配对链接');
-  console.log('  status                                                    服务与锁');
-  console.log('  doctor [--queued-minutes N] [--json]                       检查疑似丢消息');
-  console.log('  backup [--out 目录] [--plain]                              行李打包（默认 gpg 加密，口令从 stdin）');
-  console.log('  restore <文件> [--into 目录]                               解到空目录');
-  console.log('  lock [--check]                                            生成/校验 house.lock');
+  console.log('Usage: sameroof <command>\n');
+  console.log('Getting started:');
+  console.log('  init [dir]                                     Initialize a new workspace');
+  console.log('  cred add <alias> --provider X --base-url URL --api-key KEY');
+  console.log('  cred list                                      List credentials');
+  console.log('  new <name> [--model provider/id] [--human]     Create an agent or human');
+  console.log('  serve [--port N]                               Start all services\n');
+  console.log('Management:');
+  console.log('  check                                          Validate workspace config');
+  console.log('  explain <name>                                 Show resolved config');
+  console.log('  status                                         Service status');
+  console.log('  pair <name> [--api URL]                        Mobile pairing link');
+  console.log('  doctor                                         Check for dropped messages');
+  console.log('  backup / restore                               Backup and restore workspace');
+  console.log('  lock [--check]                                 Generate/verify house.lock');
 }
 function parseOpts(argv) { const args = [], opts = {}; for (let i = 0; i < argv.length; i++) { const a = argv[i]; if (a.startsWith('--')) { const k = a.slice(2); if (argv[i + 1] && !argv[i + 1].startsWith('--')) opts[k] = argv[++i]; else opts[k] = true; } else args.push(a); } return { args, opts }; }
 

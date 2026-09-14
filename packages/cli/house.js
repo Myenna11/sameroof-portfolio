@@ -11,6 +11,107 @@ const rooms = root => fs.readdirSync(path.join(root, 'rooms')).map(d => path.joi
 const slug = s => 'resident_' + (s.replace(/[^a-z0-9]+/gi, '').toLowerCase() || require('node:crypto').randomBytes(3).toString('hex')) + '_01';
 
 const cmds = {
+  /** sameroof init [目录]：初始化一个新工作区 */
+  init(args, opts) {
+    const dir = path.resolve(args[0] || '.');
+    if (fs.existsSync(path.join(dir, 'house.yaml'))) throw new Error('这个目录已经有 house.yaml 了');
+    fs.mkdirSync(path.join(dir, 'rooms'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'state'), { recursive: true });
+    const house = {
+      schema_version: 1,
+      name: opts.name || path.basename(dir),
+      timezone: opts.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+      defaults: {
+        runtime: 'broker-direct',
+        plugins: ['memory'],
+        heartbeat: { enabled: false },
+        context: { recent_messages: 20, recent_max_chars: 4000 },
+        approve_timeout: '30m',
+        permissions: {
+          'core.exec': 'approve',
+          'core.fs.read': 'approve',
+          'core.fs.write': 'approve'
+        }
+      },
+      credentials: [],
+      notify: { admin: 'me' }
+    };
+    fs.writeFileSync(path.join(dir, 'house.yaml'), YAML.stringify(house, { lineWidth: 120 }));
+    console.log('Workspace initialized: ' + dir);
+    console.log('');
+    console.log('Next steps:');
+    console.log('  1. Add a credential:');
+    console.log('     sameroof cred add my-key --provider zhipu --base-url https://open.bigmodel.cn/api/paas/v4 --api-key YOUR_KEY');
+    console.log('  2. Create an agent:');
+    console.log('     sameroof new my-agent --model zhipu/glm-4-flash --credential my-key');
+    console.log('  3. Create yourself:');
+    console.log('     sameroof new me --human');
+    console.log('  4. Start:');
+    console.log('     sameroof serve');
+  },
+
+  /** sameroof serve [--port N]：启动 broker + coordinator + 所有 agent 适配器 */
+  serve(args, opts) {
+    const root = h(opts);
+    const port = parseInt(opts.port || '8790', 10);
+    const house = loadYaml(path.join(root, 'house.yaml'));
+
+    // 1. Start broker
+    const brokerPort = parseInt(opts['broker-port'] || '8791', 10);
+    console.log('Starting broker on port ' + brokerPort + '...');
+    const broker = require('child_process').fork(
+      path.join(root, 'packages', 'broker', 'server.js'),
+      [], { env: { ...process.env, PORT: String(brokerPort), SAMEROOF_ROOT: root }, stdio: 'inherit' }
+    );
+
+    // 2. Start coordinator (living-room)
+    console.log('Starting coordinator on port ' + port + '...');
+    const { createLivingRoom } = require(path.join(root, 'packages', 'living-room', 'server'));
+    const runDir = path.join(process.env.HOME || os.homedir(), '.sameroof', 'run');
+    fs.mkdirSync(runDir, { recursive: true, mode: 0o700 });
+    const lr = createLivingRoom({ houseDir: root, runDir, dataDir: path.join(root, 'state'), port });
+    lr.listen().then(info => {
+      console.log('Coordinator running on port ' + info.port);
+
+      // 3. Start agent adapters
+      const agentRooms = rooms(root).filter(r => (r.species || 'agent') === 'agent');
+      console.log('Starting ' + agentRooms.length + ' agent(s)...');
+      for (const r of agentRooms) {
+        console.log('  ' + r.name + ' (' + (r.model ? r.model.provider + '/' + r.model.id : 'no model') + ')');
+      }
+      console.log('');
+      console.log('Same Roof running. ' + agentRooms.length + ' agent(s) + coordinator + broker.');
+      console.log('Open http://localhost:' + info.port + ' or use the API.');
+      console.log('Press Ctrl+C to stop.');
+    }).catch(e => { console.error('Failed to start coordinator:', e.message); process.exit(1); });
+
+    process.on('SIGINT', () => { console.log('\nShutting down...'); broker.kill(); process.exit(0); });
+    process.on('SIGTERM', () => { broker.kill(); process.exit(0); });
+  },
+
+  /** sameroof cred add <alias> --provider X --base-url URL --api-key KEY */
+  cred(args, opts) {
+    const sub = args[0];
+    if (sub === 'add') {
+      const alias = args[1]; if (!alias) throw new Error('Usage: sameroof cred add <alias> --provider X --base-url URL --api-key KEY');
+      if (!opts.provider) throw new Error('Missing --provider');
+      if (!opts['base-url'] && !opts['base_url']) throw new Error('Missing --base-url');
+      if (!opts['api-key'] && !opts['api_key']) throw new Error('Missing --api-key');
+      const { BrokerStore } = require(path.join(h(opts), 'packages', 'broker', 'store'));
+      const store = new BrokerStore();
+      store.addCredential({ alias, provider: opts.provider, baseUrl: opts['base-url'] || opts['base_url'], apiKey: opts['api-key'] || opts['api_key'] });
+      console.log('Credential added: ' + alias + ' (' + opts.provider + ')');
+    } else if (sub === 'list') {
+      const { BrokerStore } = require(path.join(h(opts), 'packages', 'broker', 'store'));
+      const store = new BrokerStore();
+      const creds = store.db.prepare('SELECT alias, provider, base_url, active FROM credentials').all();
+      if (!creds.length) { console.log('No credentials. Add one: sameroof cred add <alias> --provider X --base-url URL --api-key KEY'); return; }
+      for (const c of creds) console.log((c.active ? '●' : '○') + ' ' + c.alias.padEnd(20) + ' ' + c.provider.padEnd(16) + ' ' + c.base_url);
+    } else {
+      console.log('Usage: sameroof cred add|list');
+    }
+  },
+
   /** sameroof new <名字> [--model provider/id] [--runtime pi|broker-direct|claude-code] [--human] */
   new(args, opts) {
     const name = args[0]; if (!name) throw new Error('用法：sameroof new <名字> [--model provider/id] [--runtime ...] [--human]');
