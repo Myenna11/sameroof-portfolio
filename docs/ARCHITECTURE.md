@@ -6,59 +6,42 @@ Same Roof is a multi-provider agent runtime. This document explains how the piec
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     User / CLI / API                        │
+│                  User / CLI / Console                       │
 └──────────────────────────┬──────────────────────────────────┘
                            │  HTTP + SSE
 ┌──────────────────────────▼──────────────────────────────────┐
 │                     Coordinator                             │
-│                                                             │
-│  Message routing    Task board      Approval broadcast      │
-│  /say /dm /dispatch /tasks          /approval               │
-│  SSE push           PIN/claim/done  approve/deny            │
-│  History            Due dates       Gateway results         │
-│                                                             │
+│  /say /dm /dispatch · task board (PIN/claim/done) ·         │
+│  approval broadcast · durable inbox · history · SSE push    │
 └──┬──────────────┬──────────────┬──────────────┬─────────────┘
-   │              │              │              │
-   │   SSE        │   SSE        │   SSE        │
-   │              │              │              │
-┌──▼───┐    ┌─────▼────┐   ┌────▼────┐   ┌────▼────┐
-│Agent │    │  Agent   │   │  Agent  │   │  Human  │
-│  A   │    │    B     │   │    C    │   │         │
-│      │    │          │   │         │   │  (Web/  │
-│Claude│    │   GPT    │   │   GLM   │   │  Mobile)│
-└──┬───┘    └─────┬────┘   └────┬────┘   └─────────┘
-   │              │              │
-   │  API call    │  API call    │  API call
-   │              │              │
-┌──▼──────────────▼──────────────▼────────────────────────────┐
-│                   Credential Broker                         │
-│                                                             │
-│  Token issuance     Multi-provider     Usage ledger         │
-│  per-agent tokens   routing            per-agent-per-day    │
-│  short-lived        any OpenAI-compat  cost tracking        │
-│  rotate/revoke      endpoint           quota enforcement    │
-│                                                             │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-         Anthropic     OpenAI       Zhipu/Qwen
-         (Claude)      (GPT/Codex)  (GLM/Qwen)
-                    ... any provider
-
-┌─────────────────────────────────────────────────────────────┐
-│                   Execution Gateway                         │
-│                                                             │
-│  bwrap sandbox      Approval chain     Fail-closed          │
-│  per-request        user must approve  no gateway = no exec │
-│  isolation          before execution   never silent fallback│
-│                                                             │
-│  File read: path rules, no subprocess                       │
-│  File write: sandboxed, approved                            │
-│  Shell exec: bwrap --unshare-user --unshare-net             │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+   │ SSE          │ SSE          │ SSE          │ SSE
+┌──▼───────┐ ┌────▼──────┐ ┌─────▼──────┐ ┌─────▼─────┐
+│ agent A  │ │ agent B   │ │ agent C    │ │  human    │
+│ broker-  │ │ broker-   │ │ claude-code│ │ (console) │
+│ direct   │ │ direct    │ │ or pi      │ │           │
+└─┬─────┬──┘ └─┬──────┬──┘ └─────┬──────┘ └───────────┘
+  │     │      │      │          │
+  │     │      │      │          └─ native CLI: its own credential store,
+  │     │      │      │             its own tools. Not through broker,
+  │     └──────┼──────┼──┐          not through gateway.
+  │            │      │  │
+┌─▼────────────▼──┐ ┌─▼──▼──────────────────────────────────┐
+│ Credential      │ │ Execution Gateway                     │
+│ Broker          │ │                                       │
+│                 │ │ APPROVAL: line → intent registered    │
+│ scoped tokens   │ │ → human allow/deny (coordinator)      │
+│ (alias + model) │ │ → bwrap --unshare-user --unshare-net  │
+│ reserve/settle  │ │ → result DM'd back to the agent       │
+│ ledger, budgets │ │                                       │
+│ mock upstream   │ │ no gateway process → action fails.    │
+└────────┬────────┘ │ never an unsandboxed fallback.        │
+         │          └───────────────────────────────────────┘
+         ▼
+  OpenAI-compatible upstreams
+  (Anthropic-compat, OpenAI, Zhipu, SophNet, …)
 ```
+
+Two independent paths from an agent. The **broker** is the model path — a token decides which alias/model an agent may call. The **gateway** is the execution path — an approval decides whether a command runs, and bwrap decides where. Neither depends on the other; the coordinator carries the messages that trigger both. Native CLI runtimes bypass both paths.
 
 ## Core Components
 
@@ -76,7 +59,7 @@ The coordinator never executes anything. It only routes messages and manages sta
 
 ### Credential Broker (`packages/broker`)
 
-Manages API keys for multiple providers. Agents never touch raw keys.
+Manages API keys for multiple providers. Agents on the `broker-direct` runtime never touch raw keys — they get a scoped token. Agents on `claude-code` / `pi` runtimes use those CLIs' own credential stores; the broker is not in their path.
 
 - **Token issuance**: each agent gets a short-lived opaque token scoped to specific credentials
 - **Multi-provider routing**: Anthropic, OpenAI, Zhipu, Moonshot, or any OpenAI-compatible endpoint
@@ -231,7 +214,7 @@ Planned (not done): dedicated low-privilege user for living-room with explicit R
 
 ## Design Decisions
 
-1. **Coordinator is passive**: it routes messages but never executes actions. Execution is always in the gateway sandbox.
+1. **Coordinator is passive**: it routes messages but never executes actions. Actions that agents request through the framework (`APPROVAL:` → gateway) run only in the gateway sandbox. Actions a native CLI runtime takes on its own (`claude-code`, `pi` running their built-in tools) are outside this framework's gating entirely — see decision 4.
 
 2. **Broker is transparent**: it proxies API requests, adding auth. Agents don't know they're going through a broker.
 
@@ -241,7 +224,7 @@ Planned (not done): dedicated low-privilege user for living-room with explicit R
 
 5. **Collaboration is configurable, not coded**: how agents work together is defined in SOUL.md and room.yaml, not in framework source code. Adding a new collaboration pattern requires zero framework changes.
 
-6. **Multi-instance by design**: one agent profile can run multiple instances with separate session contexts but shared credentials (with independent usage tracking).
+6. **Multi-instance** (planned, not implemented): the broker's per-token scope and ledger would give two instances of one profile separate accounting, but there is no way to start a second instance and the coordinator identifies agents only by `resident_id`. Today one profile is one process.
 
 ## Failure Modes
 
@@ -249,7 +232,7 @@ What happens when things break. Each answer is what the code actually does today
 
 | Scenario | Behavior | Where |
 |---|---|---|
-| **Coordinator crashes** | Agents lose SSE, retry every 3s. Messages already posted are in SQLite. Unread deliveries tracked per-agent; on reconnect, `/inbox` returns what was missed. | `deliveries` table, `core.js` reconnect loop |
+| **Coordinator crashes** | Adapters lose SSE and reconnect. Posted messages are in SQLite; unread deliveries are tracked per agent in `deliveries`. **The shipping adapter does not pull `/inbox` on reconnect** — messages that arrived during the outage stay unread until the agent's next wake for some other reason (see gap table below). | `deliveries` table; `lib/room.js` resub() |
 | **Broker crashes** | Agents' API calls fail with connection error. No fallback to direct API — agents don't have keys. Adapter records `error` status in runs log. | Agent has no upstream credentials by design |
 | **Gateway crashes** | All execution requests fail closed. `APPROVAL:` lines get `gateway_unavailable`. Nothing runs unsandboxed. | `gw.registerIntent()` throws → run status `gateway_unavailable` |
 | **Coordinator process compromised** | Attacker has root on the host (living-room runs as root today). Can read broker DB, gateway token, all rooms. **Not contained.** | `deploy/sameroof-living-room.service` has no `User=` |
@@ -318,4 +301,4 @@ Adding a new capability = writing a plugin. Zero changes to core code.
 | Credential isolation | N/A | N/A | Single user | Per-agent broker tokens |
 | Sandbox | Built-in | Built-in | Plugin | bwrap + approval chain |
 | Remote | Anthropic relay | WebSocket app-server | Local | Self-hosted HTTP + SSE |
-| Data routing | Through Anthropic | Through OpenAI (cloud) or direct (CLI) | Local | Self-hosted, no third party |
+| Control-plane routing | Through Anthropic relay | Through OpenAI (cloud) or direct (CLI) | Local | Self-hosted; no relay operated by Same Roof. Model prompts still go to whichever provider you configured. |

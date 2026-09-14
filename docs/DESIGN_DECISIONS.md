@@ -110,13 +110,13 @@ Key decisions made in Same Roof, with rationale. Use this to prepare for intervi
 **Decision**: Same Roof runs on your own server. Remote access via any HTTP tunnel (Cloudflare Tunnel, ngrok, etc.), not through our relay.
 
 **Why**:
-- Claude Code routes through Anthropic's servers. Codex cloud routes through OpenAI. Your data passes through a third party.
-- Same Roof is pure HTTP + SSE on your own infrastructure. You choose how to expose it.
-- For enterprises, "data doesn't leave our network" is often a hard requirement.
+- Claude Code's remote mode routes the *control plane* (your commands, your file contents, the agent's output) through Anthropic's relay. Codex cloud routes it through OpenAI.
+- Same Roof's control plane — coordinator messages, task board, approvals, console — is HTTP + SSE on your own host. There is no relay operated by us.
+- **This is not "data doesn't leave the network."** Model prompts, including whatever context the adapter assembles, go to whichever provider each agent is configured for — Anthropic, OpenAI, Zhipu, SophNet. The boundary you get is: *only the model call* crosses to a provider, and you choose the provider per agent. Everything else stays local.
 
 **Alternative considered**: Building a relay service (like Claude Code's polling architecture). Deferred — adds operational cost and a trust dependency. Users who want relay can run their own.
 
-**Interview answer**: "Data sovereignty. Your agents, your server, your data. We don't see it, we can't see it. Expose it however you want — Cloudflare Tunnel for zero-config, or nothing at all for pure local use."
+**Interview answer**: "The control plane is yours: messages, tasks, approvals, the console — all on your host, no relay through us. Model calls still go to the provider you picked for each agent; I'm not claiming prompts stay on-prem. What you control is *which* provider, per agent, and that nothing else leaves."
 
 ---
 
@@ -133,4 +133,4 @@ When asked "what would you do differently", be honest:
 - Vector memory retrieval doesn't go through the broker yet
 - Console is a first-pass control surface: token in localStorage, `style-src 'unsafe-inline'` still on
 - Task claim has no optimistic lock
-- CI runs, but `house.lock --check` / `git diff --check` / a real `serve` smoke aren't in it yet (see .github/workflows/ci.yml for what is)
+- CI (`.github/workflows/ci.yml`) has: all package tests, `sameroof check`, `lock --check`, `git diff --check` (commit + whole tree, on a depth-2 checkout), the canonical mock demo with assertions, and a fresh-workspace `serve → dispatch → reply → shutdown` smoke. It has **never run on GitHub** — the repo has no remote yet; every step was executed locally by hand.

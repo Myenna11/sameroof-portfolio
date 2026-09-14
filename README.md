@@ -2,9 +2,9 @@
 
 **Multi-provider agent runtime. Different models, one workspace.**
 
-Same Roof lets agents from different providers — Claude, GPT, GLM, Kimi, Codex — work in the same project directory with isolated credentials, sandboxed execution, and configurable collaboration.
+Same Roof lets agents from different providers — Claude, GPT, GLM, Kimi, Codex — work in the same project directory. A broker scopes API access per agent, a gateway runs approved commands in a sandbox, a coordinator carries messages and tasks between them. How they collaborate is yours to configure.
 
-Single-machine, self-hosted, single-tenant. Prototype quality: see [Status](#status) for what's real and what isn't.
+Single-machine, self-hosted, single-tenant, prototype. What each part enforces — and what it doesn't — is stated precisely below and in [Status](#status). This is not a zero-trust runtime.
 
 ## Why
 
@@ -12,11 +12,13 @@ Every agent harness today is single-provider. Claude Code runs Claude. Codex run
 
 Same Roof runs all of them, in one workspace:
 
-- **Credential isolation** — a broker issues short-lived tokens per agent. Agents never see each other's keys.
-- **Sandboxed execution** — `bwrap`-based sandbox with approval chains. Fail-closed: no sandbox, no execution.
-- **Message routing** — agents communicate through a coordinator. Delegate tasks, request reviews, share results.
-- **Cost control** — per-agent quotas, usage ledger, prompt caching.
-- **User-defined collaboration** — you decide who does what. The framework provides the infrastructure, not the workflow.
+- **Scoped API access** — for agents on the `broker-direct` runtime, the broker holds the real keys and issues each agent a short-lived token bound to specific credential aliases and model ids. A cross-scope call is refused (`MODEL-NOT-ALLOWED`). Agents on `claude-code` / `pi` runtimes use those CLIs' own credential stores, outside broker scope.
+- **Sandboxed, approved commands** — actions that go through the gateway (`core.exec`, `core.fs.*`) require an approval and run in a fresh `bwrap` (no network, read-only root, explicit writable mounts). No gateway process → those actions fail; there is no unsandboxed fallback. Native CLI runtimes can do whatever their CLI can do; that is not gated here.
+- **Message routing** — agents communicate through a coordinator: broadcast, directed message, task dispatch. Directed messages are visible to humans in the console.
+- **Cost accounting** — per-token request/token budgets and a ledger in the broker; prompt-cache-friendly context ordering in the adapter.
+- **User-defined collaboration** — you decide who does what, in each agent's `SOUL.md`. The framework provides channels, not workflows.
+
+Not provided today: process-compromise containment for the coordinator and adapters (they run as root in the shipped systemd units), multi-instance agents, provider protocol translation. See [Status](#status).
 
 ## Quick start
 
@@ -53,37 +55,38 @@ curl -X POST http://127.0.0.1:8790/dispatch \
 curl "http://127.0.0.1:8790/history?limit=5" -H "Authorization: Bearer <token>"
 ```
 
-No API key? `node examples/code-review/demo.js` runs the whole stack against the broker's built-in mock upstream.
+No API key? `node examples/code-review/demo.js` runs coordinator + two adapters + broker against the broker's built-in mock upstream, and asserts on delegation and task state. (It does not start the gateway; nothing in that demo executes commands.)
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│  User / CLI / API                               │
-└──────────────────────┬──────────────────────────┘
-                       │
-┌──────────────────────▼──────────────────────────┐
-│  Coordinator (message routing, task board,       │
-│               approval broadcast, SSE)           │
-└───┬──────────────┬──────────────┬───────────────┘
-    │              │              │
-┌───▼───┐    ┌─────▼────┐   ┌────▼────┐
-│Agent A│    │ Agent B  │   │Agent C  │
-│Claude │    │ GPT/Codex│   │ GLM     │
-│(native│    │ (native  │   │(native  │
-│ CLI)  │    │  API)    │   │ API)    │
-└───┬───┘    └─────┬────┘   └────┬────┘
-    │              │              │
-┌───▼──────────────▼──────────────▼───────────────┐
-│  Credential Broker                               │
-│  (multi-provider token issuance, usage ledger)   │
-└──────────────────────┬──────────────────────────┘
-                       │
-┌──────────────────────▼──────────────────────────┐
-│  Execution Gateway                               │
-│  (bwrap sandbox, approval chain, fail-closed)    │
-└─────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│  User / CLI / Console                               │
+└──────────────────────┬──────────────────────────────┘
+                       │ HTTP + SSE
+┌──────────────────────▼──────────────────────────────┐
+│  Coordinator   say / dm / dispatch · task board ·   │
+│                approval broadcast · durable inbox   │
+└──────┬───────────────┬───────────────┬──────────────┘
+       │ SSE           │ SSE           │ SSE
+  ┌────▼─────┐   ┌─────▼────┐    ┌─────▼────┐
+  │ agent A  │   │ agent B  │    │ agent C  │      each agent = one adapter process
+  │ broker-  │   │ broker-  │    │ claude-  │      (lib/room.js)
+  │ direct   │   │ direct   │    │ code CLI │
+  └──┬────┬──┘   └──┬────┬──┘    └────┬─────┘
+     │    │         │    │            │
+     │    └────┐    │    └──────┐     │  (native CLI: its own creds, its own tools —
+     │         │    │           │     │   not through broker, not through gateway)
+  ┌──▼─────────▼────▼──┐   ┌────▼─────▼───────────────┐
+  │  Credential Broker │   │  Execution Gateway       │
+  │  scoped tokens     │   │  approval → bwrap → result│
+  │  ledger, budgets   │   │  fail-closed             │
+  └──────────┬─────────┘   └──────────────────────────┘
+             │
+        upstream model APIs (OpenAI-compatible)
 ```
+
+Two independent paths. **Broker** is the model path: an agent's token decides which upstream alias and model it may call. **Gateway** is the execution path: an `APPROVAL:` line from the agent becomes a request the human decides on, then bwrap runs it. Neither path knows about the other; the coordinator only carries the messages that trigger them.
 
 ## Key concepts
 
@@ -105,16 +108,14 @@ Same Roof provides the channels. How agents collaborate is up to you.
 # In an agent's system prompt or SOUL.md:
 # "When you finish writing code, ask 审查员 to review it."
 # "If you're unsure about the approach, delegate to 规划员."
-# "For repetitive file scanning, spawn a GLM sub-instance."
 ```
 
 Agents can:
-- **Send messages** to other agents via the coordinator
-- **Delegate tasks** by pinning items to another agent's board
-- **Request approvals** for privileged operations
-- **Spawn sub-instances** of any configured agent profile
+- **Send messages** to other agents via the coordinator (`/say`, `DM:`)
+- **Delegate tasks** by pinning items to another agent's board (`PIN: … | 给: name`) — the coordinator @mentions the owner, which wakes it
+- **Request approvals** for gateway actions (`APPROVAL: core.exec {…}`)
 
-The framework ensures credential isolation and sandbox enforcement regardless of collaboration pattern.
+Whatever pattern you configure, the same limits apply: a broker-direct agent's model calls stay inside its token scope, and a gateway action never runs without an approval. Those two properties don't depend on the collaboration pattern — and they are the only two the framework enforces.
 
 ## Multi-instance
 
