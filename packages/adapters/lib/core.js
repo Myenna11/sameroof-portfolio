@@ -9,7 +9,8 @@
 //
 // Guarantees this core DOES provide:
 //   - think() runs serially per agent (messages queue; no concurrent think calls)
-//   - a plugin that throws or hangs cannot take down the loop (errors logged, hook skipped)
+//   - a plugin that throws, or doesn't settle within pluginTimeoutMs, is logged and skipped; the loop continues.
+//     Timeout = we stop waiting. It does NOT cancel the plugin's work unless the plugin honours the AbortSignal it's given.
 //   - SSE reconnect with backoff
 // Guarantees it does NOT yet provide (room.js does): inbox catch-up after reconnect,
 //   ack-after-deliver ordering, watchdog on all HTTP I/O, lane priority, routines.
@@ -78,29 +79,33 @@ async function createAdapter(opts) {
   const { coordinatorUrl, token, agentId, agentName, soul, think, plugins = [], signal, pluginTimeoutMs = 10000 } = opts;
   const api = (method, path, body) => apiCall(coordinatorUrl, token, method, path, body);
 
-  // Plugin hook runner: isolates each hook — a throwing/hanging plugin is logged and skipped, never crashes the loop.
+  // withTimeout: stop WAITING after ms. This does not cancel the underlying work — a plugin that ignores
+  // the AbortSignal keeps running and may still produce side effects. The timer is always cleared
+  // (no event-loop leak) and unref'd (can't keep the process alive on its own).
+  const withTimeout = (promise, ms, label, ac) => {
+    let t;
+    const timeout = new Promise((_, rej) => { t = setTimeout(() => { ac.abort(new Error(label + ' timed out after ' + ms + 'ms')); rej(ac.signal.reason); }, ms); t.unref(); });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
+  };
+  // Run one plugin hook with isolation: errors and timeouts are logged and yield undefined, never throw.
+  // The hook receives { signal } in its last arg so cooperative plugins can stop early.
+  const runHook = async (p, name, ...args) => {
+    const label = `plugin "${p.name || '?'}".${name}`;
+    const ac = new AbortController();
+    const last = args[args.length - 1];
+    const argsWithSignal = (last && typeof last === 'object' && !Array.isArray(last)) ? [...args.slice(0, -1), { ...last, signal: ac.signal }] : [...args, { signal: ac.signal }];
+    try { return await withTimeout(Promise.resolve(p[name](...argsWithSignal)), pluginTimeoutMs, label, ac); }
+    catch (e) { console.error(`[${agentName}] ${label} failed: ${e.message}`); return undefined; }
+  };
   const hook = async (name, ...args) => {
     const results = [];
     for (const p of plugins) {
       if (typeof p[name] !== 'function') continue;
-      try {
-        const r = await Promise.race([
-          p[name](...args),
-          new Promise((_, rej) => setTimeout(() => rej(new Error(`plugin "${p.name || '?'}".${name} timed out after ${pluginTimeoutMs}ms`)), pluginTimeoutMs))
-        ]);
-        results.push({ plugin: p, result: r });
-      } catch (e) { console.error(`[${agentName}] plugin "${p.name || '?'}".${name} failed: ${e.message}`); }
+      results.push({ plugin: p, result: await runHook(p, name, ...args) });
     }
     return results;
   };
-  hook.one = async (p, name, ...args) => {
-    try {
-      return [await Promise.race([
-        p[name](...args),
-        new Promise((_, rej) => setTimeout(() => rej(new Error(`plugin "${p.name || '?'}".${name} timed out after ${pluginTimeoutMs}ms`)), pluginTimeoutMs))
-      ])];
-    } catch (e) { console.error(`[${agentName}] plugin "${p.name || '?'}".${name} failed: ${e.message}`); return [undefined]; }
-  };
+  hook.one = async (p, name, ...args) => [await runHook(p, name, ...args)];
 
   // Serial queue: one think() at a time per agent. SSE can deliver faster than the model responds.
   const queue = [];

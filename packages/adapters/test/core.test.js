@@ -251,3 +251,56 @@ test('core adapter: hanging plugin times out — loop continues', async () => {
 
   ctrl.abort(); await adapterP; await coord.close();
 });
+
+test('plugin timeout timers do not keep the loop alive: 5 hooks with a 10s timeout finish in well under 1s', async () => {
+  const coord = fakeCoordinator();
+  const port = await coord.listen();
+  const ctrl = new AbortController();
+  const t0 = Date.now();
+
+  const adapterP = createAdapter({
+    coordinatorUrl: `http://127.0.0.1:${port}`, token: 't', agentId: 'resident_test_01', agentName: 'test-agent', soul: '',
+    think: async () => 'ok', pluginTimeoutMs: 10000,
+    plugins: [{ name: 'fast', async onWake() {}, async onMessage() {}, async beforeThink() {}, async afterThink() {}, async onSleep() {} }],
+    signal: ctrl.signal
+  });
+  await sleep(300);
+  coord.broadcast({ kind: 'dm', from_id: 'resident_human_01', to_id: 'resident_test_01', text: 'go', seq: 1 });
+  await sleep(300);
+  ctrl.abort(); await adapterP; await coord.close();
+
+  // With leaked (un-cleared, ref'd) timers this test body would still finish, but the *process* would hang ~10s.
+  // Assert on active handles instead: no Timeout handles may remain from the hooks.
+  const refdTimers = process._getActiveHandles().filter(h => h && h.constructor && h.constructor.name === 'Timeout' && typeof h.hasRef === 'function' && h.hasRef());
+  assert.equal(refdTimers.length, 0, "no ref'd Timeout handles left behind");
+  assert.ok(Date.now() - t0 < 2000, 'finished quickly');
+});
+
+test('hung plugin gets an AbortSignal; a cooperative one stops, an uncooperative one is merely abandoned', async () => {
+  const coord = fakeCoordinator();
+  const port = await coord.listen();
+  const ctrl = new AbortController();
+  const origErr = console.error; const errs = []; console.error = (...a) => errs.push(a.join(' '));
+  let cooperativeSawAbort = false, uncooperativeStillRan = false;
+
+  const adapterP = createAdapter({
+    coordinatorUrl: `http://127.0.0.1:${port}`, token: 't', agentId: 'resident_test_01', agentName: 'test-agent', soul: '',
+    think: async () => 'ok', pluginTimeoutMs: 150,
+    plugins: [
+      { name: 'cooperative', beforeThink: ({ signal }) => new Promise((_, rej) => signal.addEventListener('abort', () => { cooperativeSawAbort = true; rej(signal.reason); })) },
+      { name: 'uncooperative', beforeThink: () => new Promise(res => setTimeout(() => { uncooperativeStillRan = true; res(); }, 400).unref()) },
+    ],
+    signal: ctrl.signal
+  });
+  await sleep(300);
+  coord.broadcast({ kind: 'dm', from_id: 'resident_human_01', to_id: 'resident_test_01', text: 'go', seq: 1 });
+  await sleep(700);
+  console.error = origErr;
+
+  assert.equal(coord.messages.length, 1, 'loop continued and responded');
+  assert.equal(cooperativeSawAbort, true, 'cooperative plugin received abort');
+  assert.equal(uncooperativeStillRan, true, 'uncooperative plugin kept running after timeout — timeout is not cancellation');
+  assert.equal(errs.filter(e => e.includes('timed out')).length, 2, 'both timeouts logged');
+
+  ctrl.abort(); await adapterP; await coord.close();
+});
