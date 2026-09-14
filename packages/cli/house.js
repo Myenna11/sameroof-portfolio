@@ -10,6 +10,30 @@ const loadYaml = f => YAML.parse(fs.readFileSync(f, 'utf8'), { maxAliasCount: 50
 const rooms = root => fs.readdirSync(path.join(root, 'rooms')).map(d => path.join(root, 'rooms', d, 'room.yaml')).filter(fs.existsSync).map(f => ({ file: f, dir: path.dirname(f), ...loadYaml(f) }));
 const slug = s => 'resident_' + (s.replace(/[^a-z0-9]+/gi, '').toLowerCase() || require('node:crypto').randomBytes(3).toString('hex')) + '_01';
 
+
+/**
+ * Stop child processes: SIGTERM, wait up to graceMs for real exit, SIGKILL survivors, confirm.
+ * Liveness is exitCode/signalCode (child.killed only records that kill() was called).
+ * Adapters are spawned detached:false so they share our process group; runtimes that fork their own
+ * children (claude/pi CLIs) are expected to forward signals — we do not tree-kill here.
+ */
+async function stopChildren(children, { graceMs = 5000, confirmMs = 1000 } = {}) {
+  const alive = c => c.exitCode === null && c.signalCode === null;
+  const waitExit = (c, ms) => new Promise(res => {
+    if (!alive(c)) return res(true);
+    const t = setTimeout(() => { c.off('exit', done); res(false); }, ms);
+    const done = () => { clearTimeout(t); res(true); };
+    c.once('exit', done);
+  });
+  for (const c of children) if (alive(c)) { try { c.kill('SIGTERM'); } catch {} }
+  await Promise.all(children.map(c => waitExit(c, graceMs)));
+  const killed = [];
+  for (const c of children) if (alive(c)) { killed.push(c.pid); try { c.kill('SIGKILL'); } catch {} }
+  await Promise.all(children.map(c => waitExit(c, confirmMs)));
+  const stillAlive = children.filter(alive).map(c => c.pid);
+  return { killed, stillAlive };
+}
+
 const cmds = {
   /** sameroof init [目录]：初始化一个新工作区 */
   init(args, opts) {
@@ -125,12 +149,12 @@ const cmds = {
       const shutdown = async () => {
         if (shuttingDown) return; shuttingDown = true;
         console.log('\nShutting down...');
-        for (const { name, child } of children) { child.kill('SIGTERM'); }
-        await new Promise(r => setTimeout(r, 1500));
-        for (const { child } of children) { if (!child.killed) child.kill('SIGKILL'); }
+        const r = await stopChildren(children.map(c => c.child), { graceMs: 5000 });
+        for (const { name, child } of children) if (r.killed.includes(child.pid)) log(name, 'ignored SIGTERM, sent SIGKILL');
+        if (r.stillAlive.length) log('serve', 'WARNING: pids still alive after SIGKILL: ' + r.stillAlive.join(','));
         await lr.close().catch(() => {});
         await broker.close().catch(() => {});
-        process.exit(0);
+        process.exit(r.stillAlive.length ? 1 : 0);
       };
       process.on('SIGINT', shutdown);
       process.on('SIGTERM', shutdown);
@@ -238,7 +262,7 @@ const cmds = {
     try { const lock = require('./lock').verifyLock(root); console.log(`● house.lock 一致 ${lock.source.digest.slice(0, 12)}`); } catch (e) { console.log(`○ house.lock ${e.message}`); }
   },
 };
-module.exports = { cmds };
+module.exports = { cmds, stopChildren };
 
 // ---- 备份与迁移（行李随迁）----
 Object.assign(cmds, {
