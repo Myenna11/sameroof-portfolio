@@ -422,7 +422,7 @@ const app = {
         <div class="agent-dot ${m.online ? 'online' : ''}"></div>
         <div style="flex:1; min-width:0">
           <div class="agent-name">${this.esc(m.name)}</div>
-          ${m.species === 'agent' ? '<div class="agent-model">agent</div>' : ''}
+          ${m.species === 'agent' ? `<div class="agent-model">${m.model ? this.esc(m.model.provider + '/' + m.model.id) : 'agent'}</div>` : ''}
         </div>
         <span class="agent-species">${m.species === 'human' ? 'you' : 'AI'}</span>
       </div>
