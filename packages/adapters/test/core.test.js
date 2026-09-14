@@ -176,3 +176,78 @@ test('core adapter: plugin hooks fire in order', async () => {
 
   await coord.close();
 });
+
+test('core adapter: think() is serialized — burst of 3 messages never overlaps', async () => {
+  const coord = fakeCoordinator();
+  const port = await coord.listen();
+  const ctrl = new AbortController();
+  let inFlight = 0, maxInFlight = 0, calls = 0;
+
+  const adapterP = createAdapter({
+    coordinatorUrl: `http://127.0.0.1:${port}`, token: 't', agentId: 'resident_test_01', agentName: 'test-agent', soul: '',
+    think: async (s, u) => { calls++; inFlight++; maxInFlight = Math.max(maxInFlight, inFlight); await sleep(120); inFlight--; return 'r:' + u; },
+    signal: ctrl.signal
+  });
+  await sleep(300);
+
+  // Burst: 3 DMs back-to-back, faster than think() can process
+  for (let i = 1; i <= 3; i++) coord.broadcast({ kind: 'dm', from_id: 'resident_human_01', to_id: 'resident_test_01', text: 'm' + i, seq: i });
+  await sleep(700);
+
+  assert.equal(calls, 3, 'all 3 processed');
+  assert.equal(maxInFlight, 1, 'never more than 1 think() in flight');
+  assert.deepEqual(coord.messages.map(m => m.text), ['r:m1', 'r:m2', 'r:m3'], 'responses in order');
+
+  ctrl.abort(); await adapterP; await coord.close();
+});
+
+test('core adapter: throwing plugin is isolated — loop continues, other plugins run', async () => {
+  const coord = fakeCoordinator();
+  const port = await coord.listen();
+  const ctrl = new AbortController();
+  const log = [];
+  const origErr = console.error; const errs = []; console.error = (...a) => errs.push(a.join(' '));
+
+  const adapterP = createAdapter({
+    coordinatorUrl: `http://127.0.0.1:${port}`, token: 't', agentId: 'resident_test_01', agentName: 'test-agent', soul: 'base',
+    think: async (s) => { log.push('think:' + s); return 'ok'; },
+    plugins: [
+      { name: 'bad', async beforeThink() { throw new Error('boom'); } },
+      { name: 'good', async beforeThink({ system, user }) { log.push('good-ran'); return { system: system + '+good', user }; } },
+    ],
+    signal: ctrl.signal
+  });
+  await sleep(300);
+  coord.broadcast({ kind: 'dm', from_id: 'resident_human_01', to_id: 'resident_test_01', text: 'go', seq: 1 });
+  await sleep(400);
+  console.error = origErr;
+
+  assert.deepEqual(log, ['good-ran', 'think:base+good'], 'good plugin ran, think ran with its contribution');
+  assert.equal(coord.messages.length, 1, 'response still posted');
+  assert.ok(errs.some(e => e.includes('plugin "bad".beforeThink failed: boom')), 'error was logged, not swallowed');
+
+  ctrl.abort(); await adapterP; await coord.close();
+});
+
+test('core adapter: hanging plugin times out — loop continues', async () => {
+  const coord = fakeCoordinator();
+  const port = await coord.listen();
+  const ctrl = new AbortController();
+  const origErr = console.error; const errs = []; console.error = (...a) => errs.push(a.join(' '));
+
+  const adapterP = createAdapter({
+    coordinatorUrl: `http://127.0.0.1:${port}`, token: 't', agentId: 'resident_test_01', agentName: 'test-agent', soul: '',
+    think: async () => 'ok', pluginTimeoutMs: 150,
+    plugins: [{ name: 'hang', beforeThink: () => new Promise(() => {}) }],
+    signal: ctrl.signal
+  });
+  await sleep(300);
+  coord.broadcast({ kind: 'dm', from_id: 'resident_human_01', to_id: 'resident_test_01', text: 'go', seq: 1 });
+  await sleep(500);
+  console.error = origErr;
+
+  assert.equal(coord.messages.length, 1, 'response posted despite hanging plugin');
+  assert.ok(errs.some(e => e.includes('timed out')), 'timeout logged');
+
+  ctrl.abort(); await adapterP; await coord.close();
+});
