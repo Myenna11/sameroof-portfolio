@@ -179,8 +179,9 @@ async function main() {
   console.log('   Two agents, two models, full coordinator routing.\n');
 
   ctrl1.abort(); ctrl2.abort();
+  await new Promise(r => setTimeout(r, 500));  // let adapters shut down
   await room.close().catch(() => {});
-  fs.rmSync(ROOT, { recursive: true, force: true });
+  try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch {}
   for (const k of Object.keys(savedEnv)) { if (savedEnv[k] === undefined) delete process.env[k]; else process.env[k] = savedEnv[k]; }
 }
 

@@ -1,73 +1,223 @@
-# 架构（2026-09-02 晚二稿）
+# Architecture
 
-> **当前权威结论见 DECISIONS.md #6/#7 与 README。** 本文早期段落把 dsh 写成基座、mousecrew 写成传话层，已被取代（标 [superseded]），保留是为了看得见思路怎么变的。
+Same Roof is a multi-provider agent runtime. This document explains how the pieces fit together.
 
-## 需求（维护者原话整理）
-- 装一个东西，引导装基座，选模型，点登录或填 API key。像 Claude Code 一样简单。
-- 很多 agent 同住。可单聊、可群聊；agent 之间能直接说话；各自独立配置工具。
-- 任务可以只给 A，也可以给 A 让它拉 B/C/D 合作。
-- 不懂代码也能用；可玩性要高；记忆/梦境/群聊/缓存命中等全是可替换插件，连自家的也是。
-- 要有一个能看见 CLI 在输出什么的地方。
-- 名字里必须有人，不只有 agent。
+## Overview
 
-## 分层
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     User / CLI / API                        │
+└──────────────────────────┬──────────────────────────────────┘
+                           │  HTTP + SSE
+┌──────────────────────────▼──────────────────────────────────┐
+│                     Coordinator                             │
+│                                                             │
+│  Message routing    Task board      Approval broadcast      │
+│  /say /dm /dispatch /tasks          /approval               │
+│  SSE push           PIN/claim/done  approve/deny            │
+│  History            Due dates       Gateway results         │
+│                                                             │
+└──┬──────────────┬──────────────┬──────────────┬─────────────┘
+   │              │              │              │
+   │   SSE        │   SSE        │   SSE        │
+   │              │              │              │
+┌──▼───┐    ┌─────▼────┐   ┌────▼────┐   ┌────▼────┐
+│Agent │    │  Agent   │   │  Agent  │   │  Human  │
+│  A   │    │    B     │   │    C    │   │         │
+│      │    │          │   │         │   │  (Web/  │
+│Claude│    │   GPT    │   │   GLM   │   │  Mobile)│
+└──┬───┘    └─────┬────┘   └────┬────┘   └─────────┘
+   │              │              │
+   │  API call    │  API call    │  API call
+   │              │              │
+┌──▼──────────────▼──────────────▼────────────────────────────┐
+│                   Credential Broker                         │
+│                                                             │
+│  Token issuance     Multi-provider     Usage ledger         │
+│  per-agent tokens   routing            per-agent-per-day    │
+│  short-lived        any OpenAI-compat  cost tracking        │
+│  rotate/revoke      endpoint           quota enforcement    │
+│                                                             │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+         Anthropic     OpenAI       Zhipu/Qwen
+         (Claude)      (GPT/Codex)  (GLM/Qwen)
+                    ... any provider
 
-### 1. [superseded] 基座：DeepSeek Harness (dsh) → 现为候选运行时之一
-- everything-is-a-plugin，Cordis 微内核。
-- profile = 有序 bundle 叠层 + cordis.patch.yml；web / headless / sdk / sdk-minimal / acp 五种模板。
-- 模型层走 dsh-llm-pi-ai → pi-ai 的 provider 目录（含各家 OAuth）。
-- **我们的产品 = 一个 profile（sameroof）+ 一组 bundle。** 换记忆 = patch 里换一行 id。
-- dsh 本体单 session；多 agent 由社区插件验证可行（dsh-agent-teams / agent-team / dsh-agent-team-gui）。
-  它们是"任务临时小队"，我们是"住家人"——这一层自己写。
+┌─────────────────────────────────────────────────────────────┐
+│                   Execution Gateway                         │
+│                                                             │
+│  bwrap sandbox      Approval chain     Fail-closed          │
+│  per-request        user must approve  no gateway = no exec │
+│  isolation          before execution   never silent fallback│
+│                                                             │
+│  File read: path rules, no subprocess                       │
+│  File write: sandboxed, approved                            │
+│  Shell exec: bwrap --unshare-user --unshare-net             │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
 
-### 2. [superseded] 群/传话：mousecrew → 现为道理来源，客厅自己写（见 LIVING_ROOM.md）
-- 一个群所有人都在；@name 唤醒（先归一化，防自唤醒）；私信通道带送达回执；工单状态机；催办。
-- transport：local（本机 headless）/ remote（另一台机器 worker 反向拨入）/ terminal（tmux/cmux 窗口注入）。
-- 不托管模型，不拿 key，只搬文字。
-- 要补：pi rpc runner、dsh sdk runner；工单去 repo 中心化；actor 鉴权（每人一个 token）。
-- 家里人默认 headless（terminal 忙时丢消息、10 分钟过期）。
+## Core Components
 
-### 3. 房间规范（自己写）
-一个文件夹 = 一个人。里面放：
-- `room.yaml`：名字、模型/provider、凭证来源、挂哪些插件、权限（哪些动作要审批）
-- `SOUL.md`：人设/性格
-- `memory/`：记忆插件的挂载点（默认我们的，可换 lmc-5、Turritopsis 等）
-- `handover/`：交接信
-- 适配层告诉不同运行时（dsh / Claude Code / 其他 MCP 宿主）怎么读它。
+### Coordinator (`packages/living-room`)
 
-### 4. 壳：学 CcCompanion
-- 手机端像微信：聊天气泡、备注名、表情、收藏；CLI 原样透出 + 掌上终端。
-- 家的界面就是 mousecrew 那个群。
-- 对 pi/dsh 用 rpc / JSON-RPC 读输出，不抓屏。
+The message bus. All agent-to-agent and human-to-agent communication goes through here.
 
-### 5. 凭证：CLIProxyAPI / EasyCLIProxyAPI
-- Codex / Gemini / Kimi / xAI 等 OAuth + 各家 API key 收成一个本地 OpenAI 兼容 endpoint。
-- Claude 那一格留空：见 DECISIONS.md #1。
+- **Message routing**: `/say` (broadcast), `/dm` (direct), `/dispatch` (task assignment)
+- **Task board**: PIN tasks to agents, track state (open → doing → done/dropped)
+- **Approval broadcast**: when an agent requests a privileged operation, the coordinator notifies the human
+- **SSE push**: real-time events to all connected agents and humans
+- **History**: append-only message log, queryable
 
-### 6. 部署：学 Orca
-- 桌面或 VPS 当宿主（`sameroof serve` 无头），手机是伴侣 app，配对后看进度、收通知、发追问。
+The coordinator never executes anything. It only routes messages and manages state.
 
-## 插件（第一批，全部可替换）
-| 插件 | 默认实现 | 可换成 |
-|---|---|---|
-| 记忆 | sameroof-memory（core/long_term/daily/diary + drives） | lmc-5、anchor-memory、任意 MCP |
-| 项目黑板 | Turritopsis 接口（list/search/get/update_stages） | 自建 |
-| 交接信 | handover read/write | — |
-| 传话 | mousecrew | — |
-| 审批门 | 高危动作先落到人的手机 | — |
-| 梦境 / 缓存命中 / 群聊 | 待定 | — |
+### Credential Broker (`packages/broker`)
 
-## 心跳（升级：从预留变标配）
-人来消息不是开关，是一条观察（headlong）。dylan-heartbeat 和 Claude Imprint 已证明单点可行：
-主动唤醒、自主发消息、零人格漂移、感知设备状态。我们要做的是把它变成**每个房间的标配能力**
-而非插件孤品：`room.yaml: heartbeat`（频率/免打扰时段/唤醒条件），空闲时读交接、翻记忆、惦记未完成的事。
+Manages API keys for multiple providers. Agents never touch raw keys.
 
-## 共享活动（"活得好"里补上的一块）
-任务之外的共处：一起听歌（netease-music-mcp）、共读（共读小窝系）、一起看电影（film-matinee）、
-一起玩（NagiBridge 星露谷）、桌游词游。这些是关系的日常，不是功能列表的装饰。
-架构上=客厅里的"活动"插件类，人和 agent、agent 和 agent 都能发起。
+- **Token issuance**: each agent gets a short-lived opaque token scoped to specific credentials
+- **Multi-provider routing**: Anthropic, OpenAI, Zhipu, Moonshot, or any OpenAI-compatible endpoint
+- **Usage ledger**: tracks tokens consumed per agent per day, stored in SQLite
+- **Quota enforcement**: per-agent daily limits on requests and tokens
+- **Rotation**: credentials can be rotated without restarting agents
 
-## 该学的三个具体设计
-1. 凭证隔离（AgentTeams）：真 key 只在网关，房间里的 agent 只拿消费 token。
-2. 分层记忆加载（soulclaw）：身份锚每次全量、长期记忆按需、日记按时间衰减，省 ~62% token。
-3. 三段中继（潮汐回响）：手机 ↔ VPS ↔ 桌面，家里人不在一台机器上也是一家人。
+Key design decision: the broker is a transparent proxy. It forwards API requests to the upstream provider, adding auth headers. Agents send standard OpenAI-format requests; the broker translates if needed.
+
+### Execution Gateway (`packages/gateway`)
+
+Runs commands in sandboxes. Every execution requires prior approval.
+
+- **bwrap sandbox**: `bubblewrap` with `--unshare-user --unshare-net`, read-only root, explicit writable mounts
+- **Approval chain**: agent requests action → coordinator broadcasts to human → human approves → gateway executes
+- **Fail-closed**: if the gateway process is down, agents cannot execute. No silent fallback to unsandboxed execution.
+- **File operations**: reads go through path rules without a subprocess; writes are sandboxed and approved
+- **Audit log**: every action (requested, approved/denied, executed, result) is logged with timestamps
+
+Key design decision: borrowed from Claude Code's approach, but extended for multi-agent. The sandbox boundary applies equally to all agents regardless of provider.
+
+### Agent Adapters (`packages/adapters`)
+
+The runtime for each agent. An adapter connects an agent to the coordinator and broker.
+
+- **`run()` loop**: connect to coordinator SSE → wait for messages → wake up → call `think()` → post result
+- **Lane priority**: human messages interrupt heartbeats; routines run on schedule
+- **Context assembly**: select relevant recent messages, score and rank, inject into prompt
+- **Task board integration**: read own tasks on wake, PIN new tasks via coordinator
+- **Pluggable think()**: the actual model call is injected. `broker-direct` calls the broker API; `claude-code` calls the Claude CLI; `pi` calls any OpenAI-compatible runtime.
+
+### Schema Validation (`packages/schema`)
+
+Validates `house.yaml` and `room.yaml` configurations.
+
+- JSON Schema-based validation with human-readable error messages
+- Ensures credential references exist, permissions don't exceed house limits, cron expressions are valid
+- `house.lock` for deterministic resolution
+
+### Memory Plugin (`packages/plugin-memory`)
+
+Optional per-agent persistent memory.
+
+- **Append-only storage**: JSONL file, updates are patches, compact on demand
+- **Hybrid retrieval**: vector search (embedding + cosine similarity) with 2-gram fallback
+- **Write sanitization**: auto-redacts secrets, tokens, private keys
+- **Hand-authored protection**: human-written memories can't be overwritten by agents
+- **Review queue**: agent-written memories are pending until human approves
+- **Fact deduplication**: `fact_key` ensures one current version per fact
+
+## Data Flow: Task Dispatch
+
+```
+1. Human POST /dispatch {to: "agent-b", task: "review auth.js"}
+   │
+2. Coordinator creates task on board (state: open, owner: agent-b)
+   Coordinator sends DM to agent-b with task details
+   Coordinator broadcasts activity event via SSE
+   │
+3. Agent-b's adapter receives SSE event
+   Adapter detects mention, wakes agent (human lane, highest priority)
+   │
+4. Adapter assembles context:
+   - SOUL.md (system prompt)
+   - Recent messages (scored and ranked)
+   - Own tasks from board
+   - Memory recall (if plugin enabled)
+   │
+5. Adapter calls think() → broker API → upstream provider
+   │
+6. Model returns review text
+   │
+7. Adapter POST /say → coordinator broadcasts to all
+   │
+8. Human sees review in coordinator (SSE / Web / API)
+```
+
+## Configuration
+
+### Workspace (`house.yaml`)
+
+```yaml
+schema_version: 1
+name: My Workspace
+timezone: UTC
+credentials:
+  - {alias: capable, provider: anthropic, purpose: logic review}
+  - {alias: cheap, provider: zhipu, purpose: security scan}
+defaults:
+  permissions:
+    core.exec: approve     # sandboxed, requires approval
+    core.fs.read: approve
+    core.fs.write: approve
+```
+
+### Agent Profile (`rooms/<name>/room.yaml`)
+
+```yaml
+schema_version: 1
+id: resident_reviewer_01
+name: reviewer
+species: agent
+model: {provider: zhipu, id: glm-4-flash, auth: {mode: broker, credential: cheap}}
+runtime: broker-direct
+plugins: [memory]
+permissions: {core.exec: deny, core.fs.read: allow}
+```
+
+### Agent Behavior (`rooms/<name>/SOUL.md`)
+
+Free-form system prompt. Defines what the agent does and how it collaborates:
+
+```markdown
+You are a security scanner. Check for injection, auth flaws, hardcoded secrets.
+When done, dispatch your findings to the coordinator.
+If unsure, ask logic-reviewer for a second opinion.
+```
+
+Collaboration patterns are in SOUL.md, not in framework code. Change the prompt, change the behavior.
+
+## Design Decisions
+
+1. **Coordinator is passive**: it routes messages but never executes actions. Execution is always in the gateway sandbox.
+
+2. **Broker is transparent**: it proxies API requests, adding auth. Agents don't know they're going through a broker.
+
+3. **Gateway is fail-closed**: no gateway = no execution. Never silent fallback. This is borrowed from Gemini's approach.
+
+4. **Agents keep native capabilities**: Claude Code agent uses `claude` CLI natively. GPT agent uses OpenAI API natively. The framework doesn't wrap or abstract away provider-specific features.
+
+5. **Collaboration is configurable, not coded**: how agents work together is defined in SOUL.md and room.yaml, not in framework source code. Adding a new collaboration pattern requires zero framework changes.
+
+6. **Multi-instance by design**: one agent profile can run multiple instances with separate session contexts but shared credentials (with independent usage tracking).
+
+## Comparison
+
+| | Claude Code | Codex | dsh | Same Roof |
+|---|---|---|---|---|
+| Providers | Claude only | OpenAI only | DeepSeek (pluggable) | Any, simultaneously |
+| Multi-agent | No | No | Subagent (parent-child) | Peer collaboration |
+| Credential isolation | N/A | N/A | Single user | Per-agent broker tokens |
+| Sandbox | Built-in | Built-in | Plugin | bwrap + approval chain |
+| Remote | Anthropic relay | WebSocket app-server | Local | Self-hosted HTTP + SSE |
+| Data routing | Through Anthropic | Through OpenAI (cloud) or direct (CLI) | Local | Self-hosted, no third party |
