@@ -1,20 +1,22 @@
+# Workspace config for the code-review demo.
+# demo.js builds an equivalent workspace in a temp dir at runtime; this file documents the shape.
 schema_version: 1
 name: Code Review Demo
 timezone: UTC
 defaults:
   runtime: broker-direct
-  plugins: [memory]
+  plugins: [living-room]
   heartbeat: {enabled: false}
-  context: {recent_messages: 20, recent_max_chars: 4000}
+  context: {recent_messages: 20, recent_max_chars: 4000, memory_hits: 4, memory_recent: 3}
   approve_timeout: 10m
   permissions:
-    core.exec: deny
-    core.fs.read: allow
+    core.exec: deny        # this demo has no execution — nothing to sandbox
+    core.fs.read: deny
     core.fs.write: deny
 credentials:
-  # Demo: logic reviewer uses a capable model (expensive)
-  - {alias: capable-model, provider: anthropic, purpose: logic and architecture review}
-  # Demo: security scanner uses a cheap model (high volume)
-  - {alias: cheap-model, provider: zhipu, purpose: security scanning}
+  # Both aliases point at the same OpenAI-compatible upstream in --live mode (sophnet).
+  # Isolation is by alias + model scope on each agent's broker token, not by provider.
+  - {alias: capable-model, provider: sophnet, purpose: logic review (GLM-5)}
+  - {alias: cheap-model,   provider: sophnet, purpose: security scan (qwen3.6-flash)}
 notify:
   admin: human

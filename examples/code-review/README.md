@@ -1,45 +1,62 @@
 # Code Review Demo
 
-Two agents from different providers review the same code.
+Two agents review one file. The human dispatches once; the first agent delegates to the second through the coordinator.
 
-## What happens
-
-1. **You** dispatch `auth.js` to `logic-reviewer`
-2. **logic-reviewer** (Claude Sonnet, expensive) analyzes logic, architecture, and performance
-3. **logic-reviewer** dispatches to `security-scanner` for security checks
-4. **security-scanner** (GLM-4-Flash, cheap) scans for vulnerabilities
-5. Both reviews are visible through the coordinator
-
-## Why two agents?
-
-- **Cost optimization**: Expensive model for judgment calls, cheap model for pattern-matching security checks
-- **Credential isolation**: Each agent uses a different provider's API key, managed by the broker. Neither agent can see the other's credentials.
-- **Sandboxed**: Both agents are read-only — they can read the code but can't modify files or run commands
-- **Configurable**: The collaboration pattern (logic → security) is defined in the agent's SOUL.md, not hardcoded in framework code
+```
+human ──/say (code)──▶ coordinator
+human ──/dispatch────▶ coordinator ──SSE @mention──▶ logic-reviewer
+                                                        │ scoped token
+                                                        ▼
+                                                      broker ──▶ model
+                                                        │
+                            logic-reviewer replies ◀────┘
+                            "...review... PIN: Security scan | 给: security-scanner"
+                                     │
+coordinator creates task ◀───────────┘  (created_by = logic-reviewer)
+coordinator ──SSE @mention──▶ security-scanner ──scoped token──▶ broker ──▶ model
+                                     │
+                            "...findings... PIN task_xxx: done"
+                                     │
+coordinator marks task done ◀────────┘
+```
 
 ## Run
 
 ```bash
-node demo.js          # mock mode, no API keys needed
-node demo.js --live   # real APIs (requires credentials in broker)
+node demo.js                        # mock — no API key needed
+SOPHNET_KEY=… node demo.js --live   # real models via sophnet
+node demo-scripted.js               # old scripted walkthrough: prints a story, exercises nothing
 ```
+
+## What each mode proves
+
+| | mock | --live |
+|---|---|---|
+| coordinator routing, SSE, @mention wake | real | real |
+| adapter loop (`lib/room.js`) | real | real |
+| broker token issuance, alias/model scope, ledger | real | real |
+| cross-scope call rejected (`MODEL-NOT-ALLOWED`) | real | real |
+| agent-to-agent delegation via `PIN:` | real | real |
+| task lifecycle open → done, `created_by` check | real | real |
+| model text | scripted | GLM-5 / qwen3.6-flash |
+| upstream | broker built-in mock | sophnet (one provider, two aliases) |
+| execution gateway / bwrap sandbox | **not exercised** | **not exercised** |
+
+The demo asserts on `created_by` and task `state`; it fails if delegation or completion didn't actually happen.
+
+## What it does not show
+
+- **No sandbox.** Neither agent has `core.exec` / `core.fs.*`. The gateway isn't started. For bwrap isolation see `packages/gateway/test/`.
+- **One upstream provider.** `--live` uses two aliases on the same sophnet key. Multi-provider is a broker config matter (`sameroof cred add` with different `--base-url`s), not something this demo demonstrates.
+- **Old adapter.** Agents run on `packages/adapters/lib/room.js`, not the experimental `lib/core.js`.
 
 ## Files
 
 ```
-house.yaml                        # workspace config (2 credentials, 2 providers)
-rooms/logic-reviewer/room.yaml    # Claude Sonnet agent (expensive, judgment)
-rooms/logic-reviewer/SOUL.md      # what it does and how it collaborates
-rooms/security-scanner/room.yaml  # GLM-4-Flash agent (cheap, pattern matching)
-rooms/security-scanner/SOUL.md    # what it checks for
-rooms/human/room.yaml             # you
-sample-code/auth.js               # intentionally buggy code for demo
-demo.js                           # runs the demo flow
+demo.js                          canonical demo (mock + --live)
+demo-scripted.js                 legacy: prints a pre-written transcript
+house.yaml                       documents the workspace shape demo.js builds
+rooms/logic-reviewer/SOUL.md     tells the model the PIN: hand-off shape
+rooms/security-scanner/SOUL.md   tells the model how to mark its task done
+sample-code/auth.js              intentionally vulnerable
 ```
-
-## Interview talking points
-
-- "Expensive model does the thinking, cheap model does the scanning — same task, 10x cost difference per token"
-- "Agents collaborate through the coordinator, not direct calls — I can swap providers without changing collaboration logic"
-- "Sandbox is read-only for this use case, but the framework supports approve-gated exec for other scenarios"
-- "Adding a third agent (e.g., a test-writer) is just a new room.yaml + SOUL.md — zero framework code changes"
