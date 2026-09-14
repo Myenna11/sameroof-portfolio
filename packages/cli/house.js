@@ -100,9 +100,14 @@ const cmds = {
           }
         }
         const runtime = r.runtime || 'broker-direct';
-        const adapterDir = path.join(root, 'packages', 'adapters', runtime);
-        const adapterFile = path.join(adapterDir, 'adapter.js');
-        if (!fs.existsSync(adapterFile)) { log(r.name, `skip: no adapter for runtime "${runtime}"`); continue; }
+        // Resolve adapter from the installed @sameroof/adapters package (works from any workspace, not just the source tree)
+        let adapterDir, adapterFile;
+        try {
+          const pkgRoot = path.dirname(require.resolve('@sameroof/adapters/package.json'));
+          adapterDir = path.join(pkgRoot, runtime);
+          adapterFile = path.join(adapterDir, 'adapter.js');
+        } catch { log(r.name, 'skip: @sameroof/adapters not installed'); continue; }
+        if (!fs.existsSync(adapterFile)) { log(r.name, `skip: no adapter for runtime "${runtime}" (available: ${fs.readdirSync(path.dirname(adapterDir)).filter(d => fs.existsSync(path.join(path.dirname(adapterDir), d, 'adapter.js'))).join(', ')})`); continue; }
         const child = spawn(process.execPath, [adapterFile, r.name], {
           cwd: adapterDir, stdio: ['ignore', 'inherit', 'inherit'],
           env: { ...process.env, HOME: home, SAMEROOF_ROOT: root, SAMEROOF_LR: 'http://127.0.0.1:' + info.port }
@@ -140,12 +145,12 @@ const cmds = {
       if (!opts.provider) throw new Error('Missing --provider');
       if (!opts['base-url'] && !opts['base_url']) throw new Error('Missing --base-url');
       if (!opts['api-key'] && !opts['api_key']) throw new Error('Missing --api-key');
-      const { BrokerStore } = require(path.join(h(opts), 'packages', 'broker', 'store'));
+      const { BrokerStore } = require('@sameroof/broker/store');
       const store = new BrokerStore();
       store.addCredential({ alias, provider: opts.provider, baseUrl: opts['base-url'] || opts['base_url'], apiKey: opts['api-key'] || opts['api_key'] });
       console.log('Credential added: ' + alias + ' (' + opts.provider + ')');
     } else if (sub === 'list') {
-      const { BrokerStore } = require(path.join(h(opts), 'packages', 'broker', 'store'));
+      const { BrokerStore } = require('@sameroof/broker/store');
       const store = new BrokerStore();
       const creds = store.db.prepare('SELECT alias, provider, base_url, active FROM credentials').all();
       if (!creds.length) { console.log('No credentials. Add one: sameroof cred add <alias> --provider X --base-url URL --api-key KEY'); return; }

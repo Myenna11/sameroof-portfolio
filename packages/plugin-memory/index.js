@@ -21,7 +21,8 @@ function cosine(a, b) {
 function httpPost(url, body, headers = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
-    const req = http.request({
+    const mod = u.protocol === 'https:' ? require('https') : http;
+    const req = mod.request({
       hostname: u.hostname, port: u.port, path: u.pathname + u.search, method: 'POST',
       headers: { 'content-type': 'application/json', ...headers }
     }, res => {
@@ -47,7 +48,7 @@ class VectorStore {
     try { if (fs.existsSync(this.file)) this.vectors = JSON.parse(fs.readFileSync(this.file, 'utf8')); } catch { this.vectors = {}; }
   }
   _save() {
-    try { fs.writeFileSync(this.file, JSON.stringify(this.vectors)); } catch {}
+    try { const tmp = this.file + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(this.vectors)); fs.renameSync(tmp, this.file); } catch {}
   }
   has(id) { return !!this.vectors[id]; }
   get(id) { return this.vectors[id] || null; }
@@ -72,12 +73,16 @@ class VectorStore {
 
   async search(query, candidates, n = 5) {
     const qVec = await this.embed(query);
-    if (!qVec) return null;  // fallback signal
-    return candidates
-      .map(m => ({ m, score: cosine(qVec, this.vectors[m.id] || []) }))
+    if (!qVec) return null;  // no embedding backend reachable → caller falls back to 2-gram
+    const withVec = candidates.filter(m => this.vectors[m.id]);
+    const withoutVec = candidates.filter(m => !this.vectors[m.id]);
+    // Candidates that have vectors: cosine. Candidates without: return null so caller merges 2-gram for them.
+    const scored = withVec
+      .map(m => ({ m, score: cosine(qVec, this.vectors[m.id]) }))
       .filter(x => x.score > 0.3)
       .sort((a, b) => b.score - a.score)
       .slice(0, n);
+    return { scored, unindexed: withoutVec };
   }
 }
 
@@ -195,18 +200,22 @@ function open(roomDir, opts = {}) {
       const candidates = visible(all);
       let scored = null;
 
-      // 向量检索优先（如果 embedding 后端可用）
+      const gramScore = (list) => { const q = grams(query); return list.map(m => { const { hit, size } = overlap(q, m.content); return { m, s: hit / Math.sqrt(size + 1) * (0.5 + m.confidence) }; }).filter(x => x.s > 0.15); };
+
+      // Vector search when backend reachable; unindexed candidates still get 2-gram scoring (no silent gaps)
       if (vectorStore.enabled) {
-        const vecResults = await vectorStore.search(query, candidates, n);
-        if (vecResults) scored = vecResults.map(x => ({ m: x.m, s: x.score * (0.5 + x.m.confidence) }));
+        const r = await vectorStore.search(query, candidates, n);
+        if (r) {
+          const vec = r.scored.map(x => ({ m: x.m, s: x.score * (0.5 + x.m.confidence) }));
+          const gram = gramScore(r.unindexed);
+          scored = [...vec, ...gram].sort((a, b) => b.s - a.s).slice(0, n);
+          // Opportunistically index the unindexed ones so next recall is fully vector
+          for (const m of r.unindexed.slice(0, 3)) vectorStore.index(m.id, m.content).catch(() => {});
+        }
       }
 
-      // 2-gram fallback
-      if (!scored) {
-        const q = grams(query);
-        scored = candidates.map(m => { const { hit, size } = overlap(q, m.content); return { m, s: hit / Math.sqrt(size + 1) * (0.5 + m.confidence) }; })
-          .filter(x => x.s > 0.15).sort((a, b) => b.s - a.s).slice(0, n);
-      }
+      // 2-gram only (no embedding backend, or backend unreachable)
+      if (!scored) scored = gramScore(candidates).sort((a, b) => b.s - a.s).slice(0, n);
 
       const ts = now();
       for (const x of scored) { x.m.hits = (x.m.hits || 0) + 1; x.m.last_hit = ts; appendUpdate(x.m.id, { hits: x.m.hits, last_hit: ts }, null); }
