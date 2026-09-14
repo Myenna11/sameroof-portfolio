@@ -79,7 +79,7 @@ Runs commands in sandboxes. Every execution requires prior approval.
 - **File operations**: reads go through path rules without a subprocess; writes are sandboxed and approved
 - **Audit log**: every action (requested, approved/denied, executed, result) is logged with timestamps
 
-Key design decision: borrowed from Claude Code's approach, but extended for multi-agent. The sandbox boundary applies equally to all agents regardless of provider.
+Key design decision: for actions submitted through the gateway, the agent's provider does not change the sandbox policy — a GLM agent and a Claude agent get the same bwrap, the same approval requirement. Actions a native CLI runtime takes on its own never reach the gateway and are not covered.
 
 ### Agent Adapters (`packages/adapters`)
 
@@ -216,7 +216,7 @@ Planned (not done): dedicated low-privilege user for living-room with explicit R
 
 1. **Coordinator is passive**: it routes messages but never executes actions. Actions that agents request through the framework (`APPROVAL:` → gateway) run only in the gateway sandbox. Actions a native CLI runtime takes on its own (`claude-code`, `pi` running their built-in tools) are outside this framework's gating entirely — see decision 4.
 
-2. **Broker is transparent**: it proxies API requests, adding auth. Agents don't know they're going through a broker.
+2. **Broker is transparent** (for `broker-direct` agents): it proxies OpenAI-compatible requests, adding auth. A broker-direct agent's `think()` targets the broker socket and never sees the upstream. `claude-code` / `pi` agents don't go through it at all.
 
 3. **Gateway is fail-closed**: no gateway = no execution. Never silent fallback.
 
@@ -233,7 +233,7 @@ What happens when things break. Each answer is what the code actually does today
 | Scenario | Behavior | Where |
 |---|---|---|
 | **Coordinator crashes** | Adapters lose SSE and reconnect. Posted messages are in SQLite; unread deliveries are tracked per agent in `deliveries`. **The shipping adapter does not pull `/inbox` on reconnect** — messages that arrived during the outage stay unread until the agent's next wake for some other reason (see gap table below). | `deliveries` table; `lib/room.js` resub() |
-| **Broker crashes** | Agents' API calls fail with connection error. No fallback to direct API — agents don't have keys. Adapter records `error` status in runs log. | Agent has no upstream credentials by design |
+| **Broker crashes** | `broker-direct` agents: model calls fail with a connection error; no fallback — they hold no upstream key. Adapter records `error` in the runs log. `claude-code` / `pi` agents are unaffected: their CLIs keep their own credentials. | broker-direct token ≠ upstream key; runtime-managed creds are outside the broker |
 | **Gateway crashes** | All execution requests fail closed. `APPROVAL:` lines get `gateway_unavailable`. Nothing runs unsandboxed. | `gw.registerIntent()` throws → run status `gateway_unavailable` |
 | **Coordinator process compromised** | Attacker has root on the host (living-room runs as root today). Can read broker DB, gateway token, all rooms. **Not contained.** | `deploy/sameroof-living-room.service` has no `User=` |
 | **Gateway process compromised** | Attacker has `sameroof-gateway` user: rooms/ writable, cannot read broker keys. bwrap does not apply — it wraps child commands, not the service. | `deploy/sameroof-gateway.service` |
@@ -292,13 +292,17 @@ Five plugin hooks: `onWake`, `onMessage`, `beforeThink`, `afterThink`, `onSleep`
 
 Adding a new capability = writing a plugin. Zero changes to core code.
 
-## Comparison
+## How it differs
 
-| | Claude Code | Codex | dsh | Same Roof |
-|---|---|---|---|---|
-| Providers | Claude only | OpenAI only | DeepSeek (pluggable) | Any, simultaneously |
-| Multi-agent | No | No | Subagent (parent-child) | Peer collaboration |
-| Credential isolation | N/A | N/A | Single user | Per-agent broker tokens |
-| Sandbox | Built-in | Built-in | Plugin | bwrap + approval chain |
-| Remote | Anthropic relay | WebSocket app-server | Local | Self-hosted HTTP + SSE |
-| Control-plane routing | Through Anthropic relay | Through OpenAI (cloud) or direct (CLI) | Local | Self-hosted; no relay operated by Same Roof. Model prompts still go to whichever provider you configured. |
+The comparison below is deliberately about *shape*, not feature checklists — feature lists go stale and the other tools move fast (Claude Code has subagents and agent teams; Codex sessions expose subagents; Aider and OpenCode both support many providers). Verified against vendor docs on 2026-09-15 by an external reviewer; re-check before quoting.
+
+| | Vendor-native harness (Claude Code, Codex, dsh) | Multi-provider single-agent harness (Aider, OpenCode) | Same Roof |
+|---|---|---|---|
+| Who runs at once | one agent, possibly with subagents of the *same* vendor | one agent, provider chosen per session | several agents, each on its own provider, concurrently |
+| Agent-to-agent | parent → subagent, results return to parent | n/a | peer: any agent can `PIN:` a task to any other, `DM:` it, see its messages |
+| Where credentials live | the vendor CLI's own store | the tool's config | broker (for `broker-direct` agents: scoped tokens, one ledger); native CLI store (for `claude-code`/`pi` agents) |
+| Who approves an action | the vendor's built-in permission UI | the tool's confirm prompt | coordinator broadcasts to the human; gateway runs it in bwrap; same policy regardless of which model asked |
+| Where the collaboration rule lives | prompt / vendor config | n/a | each agent's `SOUL.md` + `room.yaml`; the framework carries messages, it doesn't script the pipeline |
+| Control plane | vendor relay (remote mode) or local | local | self-hosted HTTP + SSE; no relay operated by Same Roof |
+
+What Same Roof does **not** do that those tools do: polished single-agent coding UX, IDE integration, vendor-specific features (prompt caching APIs, computer use, native tool schemas beyond OpenAI-compatible chat). It is a control plane for heterogeneous agents, not a better single agent.

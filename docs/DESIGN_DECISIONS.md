@@ -8,7 +8,7 @@ Key decisions made in Same Roof, with rationale. Use this to prepare for intervi
 
 **Decision**: Support multiple LLM providers simultaneously, not just one.
 
-**Why**: Every existing harness (Claude Code, Codex, dsh) locks you into one provider. Real teams want to use expensive models for judgment and cheap models for bulk work. Our broker makes this transparent — agents don't know they're going through a proxy.
+**Why**: Vendor-native harnesses centre on one model ecosystem; multi-provider harnesses like Aider or OpenCode switch provider per session but still run one agent. The gap Same Roof targets is *concurrent* heterogeneous agents in one workspace — an expensive model for judgment and a cheap one for bulk work, running side by side, under one ledger and one approval flow. The broker makes the model path transparent for `broker-direct` agents; native CLI agents keep their own path.
 
 **Alternative considered**: Wrapping all providers into a unified API (like LangChain). Rejected because it strips native capabilities — Claude's tool use works differently from GPT's, and abstracting that away loses fidelity.
 
@@ -112,11 +112,11 @@ Key decisions made in Same Roof, with rationale. Use this to prepare for intervi
 **Why**:
 - Claude Code's remote mode routes the *control plane* (your commands, your file contents, the agent's output) through Anthropic's relay. Codex cloud routes it through OpenAI.
 - Same Roof's control plane — coordinator messages, task board, approvals, console — is HTTP + SSE on your own host. There is no relay operated by us.
-- **This is not "data doesn't leave the network."** Model prompts, including whatever context the adapter assembles, go to whichever provider each agent is configured for — Anthropic, OpenAI, Zhipu, SophNet. The boundary you get is: *only the model call* crosses to a provider, and you choose the provider per agent. Everything else stays local.
+- **This is not "data doesn't leave the network."** For `broker-direct` agents, model prompts (with whatever context the adapter assembled) go to the configured upstream — Anthropic, OpenAI, Zhipu, SophNet. For `claude-code` / `pi` agents, the CLI's own auth, updates, telemetry and tool network access happen outside Same Roof's control; the gateway does not mediate them. The boundary you get: the *coordinator's* traffic stays on your host, and for broker-direct agents you choose the upstream per agent. Nothing more than that is enforced.
 
 **Alternative considered**: Building a relay service (like Claude Code's polling architecture). Deferred — adds operational cost and a trust dependency. Users who want relay can run their own.
 
-**Interview answer**: "The control plane is yours: messages, tasks, approvals, the console — all on your host, no relay through us. Model calls still go to the provider you picked for each agent; I'm not claiming prompts stay on-prem. What you control is *which* provider, per agent, and that nothing else leaves."
+**Interview answer**: "The control plane is yours: messages, tasks, approvals, the console — on your host, no relay through us. Broker-direct agents send prompts to the upstream you configured for them. Native CLI agents have their own network behaviour that I don't constrain. I'm not claiming an egress boundary; I'm claiming you can see and choose what the framework itself sends where."
 
 ---
 

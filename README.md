@@ -8,9 +8,9 @@ Single-machine, self-hosted, single-tenant, prototype. What each part enforces �
 
 ## Why
 
-Every agent harness today is single-provider. Claude Code runs Claude. Codex runs OpenAI. DeepSeek Harness runs DeepSeek.
+Vendor-native harnesses (Claude Code, Codex, DeepSeek Harness) are built around one model ecosystem. General harnesses (Aider, OpenCode) let you switch provider per session. Same Roof is about something narrower: several agents on *different* providers, running *at the same time*, in *one* workspace, under one control plane — with the credential scope, the approvals, and the message history in one place.
 
-Same Roof runs all of them, in one workspace:
+What that buys you:
 
 - **Scoped API access** — for agents on the `broker-direct` runtime, the broker holds the real keys and issues each agent a short-lived token bound to specific credential aliases and model ids. A cross-scope call is refused (`MODEL-NOT-ALLOWED`). Agents on `claude-code` / `pi` runtimes use those CLIs' own credential stores, outside broker scope.
 - **Sandboxed, approved commands** — actions that go through the gateway (`core.exec`, `core.fs.*`) require an approval and run in a fresh `bwrap` (no network, read-only root, explicit writable mounts). No gateway process → those actions fail; there is no unsandboxed fallback. Native CLI runtimes can do whatever their CLI can do; that is not gated here.
@@ -92,7 +92,7 @@ Two independent paths. **Broker** is the model path: an agent's token decides wh
 
 **Workspace** (`house.yaml`) — project-level config: timezone, default permissions, credential aliases, notification targets.
 
-**Agent profile** (`rooms/<name>/room.yaml`) — per-agent config: model provider, credential, permissions, runtime type. One profile can run multiple instances.
+**Agent profile** (`rooms/<name>/room.yaml`) — per-agent config: model provider, credential, permissions, runtime type. One profile = one running process today (multi-instance is planned, see below).
 
 **Credential broker** — manages API keys for multiple providers. Issues short-lived opaque tokens to agents. Tracks usage per agent per day.
 
