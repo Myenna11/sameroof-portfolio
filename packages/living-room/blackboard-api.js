@@ -33,7 +33,7 @@ function optionalText(body, key, max, HttpError) {
   const v = body[key];
   if (v === undefined || v === null) return undefined;
   if (typeof v !== 'string') throw new HttpError(400, 'TASK-TEXT-INVALID', key + ' 得是字符串。');
-  if (v.length > max) throw new HttpError(413, 'TASK-TEXT-TOO-LONG', key + ' 最长 ' + max + ' 个字符。');
+  if (v.length > max) throw new HttpError(413, 'TASK-TEXT-TOO-LONG', key + ' max length ' + max + ' chars.');
   return v.trim();
 }
 
@@ -65,7 +65,7 @@ function mount({ residents, byId, byName, norm, db, writeJson: rawWriteJson, rea
   function list(url, me) {
     const ownerParam = url.searchParams.get('owner');
     let ownerId = null;
-    if (ownerParam) { const r = ownerParam === 'me' ? me : findMember(ownerParam); if (!r) throw new HttpError(404, 'TASK-OWNER-UNKNOWN', '家里没有这个人：' + ownerParam); ownerId = r.id; }
+    if (ownerParam) { const r = ownerParam === 'me' ? me : findMember(ownerParam); if (!r) throw new HttpError(404, 'TASK-OWNER-UNKNOWN', 'Agent not found: ' + ownerParam); ownerId = r.id; }
     const stateParam = url.searchParams.get('state');
     const states = stateParam ? stateParam.split(',').map(s => s.trim()).filter(Boolean) : null;
     if (states) for (const s of states) if (!STATES.includes(s)) throw new HttpError(400, 'TASK-STATE-INVALID', 'state 只能是 ' + STATES.join('/') + '。');
@@ -80,10 +80,10 @@ function mount({ residents, byId, byName, norm, db, writeJson: rawWriteJson, rea
 
   async function create(req, me) {
     const body = await readJson(req);
-    if (!body || typeof body.title !== 'string' || !body.title.trim()) throw new HttpError(400, 'TASK-TITLE-REQUIRED', '要有 title（一句人话）。');
-    if (body.title.length > TITLE_MAX) throw new HttpError(413, 'TASK-TEXT-TOO-LONG', 'title 最长 ' + TITLE_MAX + ' 个字符。');
+    if (!body || typeof body.title !== 'string' || !body.title.trim()) throw new HttpError(400, 'TASK-TITLE-REQUIRED', 'Task title required.');
+    if (body.title.length > TITLE_MAX) throw new HttpError(413, 'TASK-TEXT-TOO-LONG', 'title 最长 ' + TITLE_MAX + ' chars.');
     const owner = body.owner === undefined || body.owner === null || body.owner === '' || body.owner === 'me' ? me : findMember(body.owner);
-    if (!owner) throw new HttpError(404, 'TASK-OWNER-UNKNOWN', '家里没有这个人：' + String(body.owner).slice(0, 60));
+    if (!owner) throw new HttpError(404, 'TASK-OWNER-UNKNOWN', 'Agent not found: ' + String(body.owner).slice(0, 60));
     const due_at = normalizeDueAt(body.due_at, HttpError), due_cron = normalizeDueCron(body.due_cron, HttpError);
     if (due_at && due_cron) throw new HttpError(400, 'TASK-DUE-INVALID', 'due_at 与 due_cron 二选一。');
     let origin = optionalText(body, 'origin', ORIGIN_MAX, HttpError);
@@ -94,18 +94,18 @@ function mount({ residents, byId, byName, norm, db, writeJson: rawWriteJson, rea
       due_at, due_cron, accept: optionalText(body, 'accept', TEXT_MAX, HttpError) || null, notes: optionalText(body, 'notes', TEXT_MAX, HttpError) || null, result: null, blocks_json: blocks.length ? JSON.stringify(blocks) : null };
     insTask.run(row);
     const task = view(getTask.get(row.id));
-    emitActivity({ kind: 'thread_update', actor_id: me.id, text: '📌 ' + me.name + ' 钉了「' + task.title + '」给 ' + owner.name, meta: { task_id: task.id, owner_id: owner.id, state: 'open', origin, op: 'pin' } });
+    emitActivity({ kind: 'thread_update', actor_id: me.id, text: '[pin] ' + me.name + ' pinned "' + task.title + '" → ' + owner.name, meta: { task_id: task.id, owner_id: owner.id, state: 'open', origin, op: 'pin' } });
     // 客厅一条 system 小字，@ 主人——让他醒来看到。自己钉给自己的不 @（他已经知道了，别再把自己叫醒一遍）
-    post({ kind: 'system', from_id: me.id, text: '已钉上黑板：' + task.title + '（给 ' + owner.name + '）', mentions: owner.id === me.id ? [] : [owner.id], meta: { task_id: task.id, owner_id: owner.id, origin } });
+    post({ kind: 'system', from_id: me.id, text: 'Task pinned: ' + task.title + ' (assigned to ' + owner.name + ')', mentions: owner.id === me.id ? [] : [owner.id], meta: { task_id: task.id, owner_id: owner.id, origin } });
     return task;
   }
 
   async function update(req, me, id) {
     const body = await readJson(req);                                   // 先读完请求体再判权限（keep-alive 上别留没读的字节）
     const row = getTask.get(id);
-    if (!row) throw new HttpError(404, 'TASK-NOT-FOUND', '黑板上没有这件事：' + id);
-    if (!isHuman(me) && me.id !== row.owner_id) throw new HttpError(403, 'TASK-FORBIDDEN', '只有主人本人和家里的人能改这件事。');
-    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'TASK-BODY-INVALID', '请求体得是对象。');
+    if (!row) throw new HttpError(404, 'TASK-NOT-FOUND', 'Task not found: ' + id);
+    if (!isHuman(me) && me.id !== row.owner_id) throw new HttpError(403, 'TASK-FORBIDDEN', 'Only the task owner or a human can modify this task.');
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'TASK-BODY-INVALID', 'Request body must be an object.');
     const next = { ...row };
     const changes = [];
     if (body.state !== undefined) {
@@ -115,12 +115,12 @@ function mount({ residents, byId, byName, norm, db, writeJson: rawWriteJson, rea
     for (const key of ['notes', 'result', 'title', 'accept']) {
       const v = optionalText(body, key, key === 'title' ? TITLE_MAX : TEXT_MAX, HttpError);
       if (v === undefined) continue;
-      if (key === 'title' && !v) throw new HttpError(400, 'TASK-TITLE-REQUIRED', 'title 不能空。');
+      if (key === 'title' && !v) throw new HttpError(400, 'TASK-TITLE-REQUIRED', 'Title must not be empty.');
       if ((v || null) !== (row[key] || null)) { next[key] = v || null; changes.push(key); }
     }
     if (body.owner !== undefined && body.owner !== null) {                // 重派：改 owner（度量员：改派不单开指令，重钉或改 owner 都行）
       const owner = body.owner === 'me' ? me : findMember(body.owner);
-      if (!owner) throw new HttpError(404, 'TASK-OWNER-UNKNOWN', '家里没有这个人：' + String(body.owner).slice(0, 60));
+      if (!owner) throw new HttpError(404, 'TASK-OWNER-UNKNOWN', 'Agent not found: ' + String(body.owner).slice(0, 60));
       if (owner.id !== row.owner_id) { next.owner_id = owner.id; changes.push('owner'); }
     }
     if (body.due_at !== undefined || body.due_cron !== undefined) {
@@ -138,15 +138,15 @@ function mount({ residents, byId, byName, norm, db, writeJson: rawWriteJson, rea
     const ownerName = nameOf(task.owner_id);
     const tail = (label, v) => (v ? '：' + v : '');
     const text = !changes.includes('state')
-      ? (changes.includes('owner') ? '📌 ' + me.name + ' 把「' + task.title + '」改派给 ' + ownerName : '✏️ ' + me.name + ' 更新了「' + task.title + '」' + tail('notes', changes.includes('notes') ? task.notes : ''))
-      : task.state === 'done' ? '✅ ' + ownerName + ' 做完了「' + task.title + '」' + tail('result', task.result)
-      : task.state === 'blocked' ? '⛔ ' + ownerName + ' 卡住了「' + task.title + '」' + tail('notes', task.notes)
-      : task.state === 'dropped' ? '🗑 ' + ownerName + ' 放下了「' + task.title + '」' + tail('notes', task.notes)
-      : task.state === 'doing' ? '▶ ' + ownerName + ' 开工了「' + task.title + '」'
-      : '📌 ' + me.name + ' 把「' + task.title + '」重新挂回黑板';
+      ? (changes.includes('owner') ? '[pin] ' + me.name + ' reassigned "' + task.title + '" → ' + ownerName : '[update] ' + me.name + ' updated "' + task.title + '"' + tail('notes', changes.includes('notes') ? task.notes : ''))
+      : task.state === 'done' ? '✅ ' + ownerName + ' completed "' + task.title + '"' + tail('result', task.result)
+      : task.state === 'blocked' ? '⛔ ' + ownerName + ' blocked on "' + task.title + '"' + tail('notes', task.notes)
+      : task.state === 'dropped' ? '🗑 ' + ownerName + ' dropped "' + task.title + '"' + tail('notes', task.notes)
+      : task.state === 'doing' ? '▶ ' + ownerName + ' started "' + task.title + '"'
+      : '[pin] ' + me.name + ' reopened "' + task.title + '"';
     emitActivity({ kind: 'thread_update', actor_id: me.id, text, meta: { task_id: task.id, owner_id: task.owner_id, state: task.state, origin: task.origin, op: 'update', changes, ...(changes.includes('state') ? { from_state: row.state } : {}) } });
     if (changes.includes('state') && task.state === 'dropped' && row.created_by !== me.id && byId.has(row.created_by)) {   // 放下了：告诉钉的人一声
-      post({ kind: 'system', from_id: me.id, text: ownerName + ' 放下了黑板上的「' + task.title + '」' + tail('', task.notes) + '（是 ' + nameOf(row.created_by) + ' 钉的）', mentions: [row.created_by], meta: { task_id: task.id, owner_id: task.owner_id, state: 'dropped' } });
+      post({ kind: 'system', from_id: me.id, text: ownerName + ' dropped "' + task.title + '"' + tail('', task.notes) + '(pinned by ' + nameOf(row.created_by) + ')', mentions: [row.created_by], meta: { task_id: task.id, owner_id: task.owner_id, state: 'dropped' } });
     }
     return task;
   }
@@ -160,7 +160,7 @@ function mount({ residents, byId, byName, norm, db, writeJson: rawWriteJson, rea
     const m = url.pathname.match(/^\/tasks\/([^/]+)$/); if (!m) return false;
     const id = decodeURIComponent(m[1]);
     if (!TASK_ID_RE.test(id)) throw new HttpError(400, 'TASK-ID-INVALID', '任务 id 不合法。');
-    if (req.method === 'GET') { const row = getTask.get(id); if (!row) throw new HttpError(404, 'TASK-NOT-FOUND', '黑板上没有这件事：' + id); return writeJson(res, 200, view(row)); }
+    if (req.method === 'GET') { const row = getTask.get(id); if (!row) throw new HttpError(404, 'TASK-NOT-FOUND', 'Task not found: ' + id); return writeJson(res, 200, view(row)); }
     if (req.method === 'PATCH') return writeJson(res, 200, await update(req, me, id));
     throw new HttpError(405, 'TASK-METHOD', '/tasks/:id 只能 GET 或 PATCH。');
   }

@@ -56,11 +56,11 @@ test('黑板：钉 / 改状态权限矩阵 / due 校验 / activity 与 system �
       { state: 'open', owner_id: 'resident_gamma_01', owner: '丙', created_by: 'resident_beta_01', origin: 'ui:乙', due_at: '2026-09-08T13:00:00.000Z', accept: '前十分钟两条路都写清', archived: false });
     let acts = activity('thread_update');
     assert.equal(acts.length, 1);
-    assert.equal(acts[0].text, '📌 乙 钉了「把 demo 家的 README 写了」给 丙');
+    assert.equal(acts[0].text, '[pin] 乙 pinned "把 demo 家的 README 写了" → 丙');
     assert.deepEqual({ task_id: acts[0].meta.task_id, owner_id: acts[0].meta.owner_id, state: acts[0].meta.state, origin: acts[0].meta.origin }, { task_id: task.id, owner_id: 'resident_gamma_01', state: 'open', origin: 'ui:乙' });
     let sys = systemMsgs();
     assert.equal(sys.length, 1);
-    assert.equal(sys[0].text, '已钉上黑板：把 demo 家的 README 写了（给 丙）');
+    assert.equal(sys[0].text, 'Task pinned: 把 demo 家的 README 写了 (assigned to 丙)');
     assert.deepEqual(sys[0].mentions, ['resident_gamma_01']);
     const gammaInbox = await request(port, '/inbox', { token: gamma });
     assert.ok(gammaInbox.body.some(m => m.id === sys[0].id && m.mentions.includes('resident_gamma_01')), '丙的收件箱里有这条小字');
@@ -90,29 +90,29 @@ test('黑板：钉 / 改状态权限矩阵 / due 校验 / activity 与 system �
     assert.equal(forbidden.status, 403); assert.equal(forbidden.body.error.code, 'TASK-FORBIDDEN');
     const doing = await request(port, P, { method: 'PATCH', token: gamma, body: { state: 'doing' } });
     assert.equal(doing.status, 200); assert.equal(doing.body.state, 'doing');
-    acts = activity('thread_update'); assert.equal(acts.length, 4); assert.equal(acts[3].text, '▶ 丙 开工了「把 demo 家的 README 写了」'); assert.equal(acts[3].meta.from_state, 'open');
+    acts = activity('thread_update'); assert.equal(acts.length, 4); assert.equal(acts[3].text, '▶ 丙 started "把 demo 家的 README 写了"'); assert.equal(acts[3].meta.from_state, 'open');
     const same = await request(port, P, { method: 'PATCH', token: gamma, body: { state: 'doing' } });      // 没进展不更新：什么都没变就不发 activity
     assert.equal(same.status, 200); assert.equal(activity('thread_update').length, 4);
     const bad = await request(port, P, { method: 'PATCH', token: gamma, body: { state: 'flying' } });
     assert.equal(bad.status, 400); assert.equal(bad.body.error.code, 'TASK-STATE-INVALID');
     const blocked = await request(port, P, { method: 'PATCH', token: gamma, body: { state: 'blocked', notes: '等 W5' } });
     assert.equal(blocked.body.state, 'blocked'); assert.equal(blocked.body.notes, '等 W5');
-    assert.equal(activity('thread_update').pop().text, '⛔ 丙 卡住了「把 demo 家的 README 写了」：等 W5');
+    assert.equal(activity('thread_update').pop().text, '⛔ 丙 blocked on "把 demo 家的 README 写了"：等 W5');
     const done = await request(port, P, { method: 'PATCH', token: human, body: { state: 'done', result: '写好了在 README.en.md' } });
     assert.equal(done.status, 200); assert.equal(done.body.state, 'done'); assert.equal(done.body.result, '写好了在 README.en.md');
-    assert.equal(activity('thread_update').pop().text, '✅ 丙 做完了「把 demo 家的 README 写了」：写好了在 README.en.md');
+    assert.equal(activity('thread_update').pop().text, '✅ 丙 completed "把 demo 家的 README 写了"：写好了在 README.en.md');
     assert.equal((await request(port, '/tasks/task_000000', { method: 'PATCH', token: human, body: { state: 'done' } })).body.error.code, 'TASK-NOT-FOUND');
     assert.equal((await request(port, '/tasks/nope', { method: 'PATCH', token: human, body: { state: 'done' } })).body.error.code, 'TASK-ID-INVALID');
 
     // 重派：人把 cronOk 改派给丙；丙 drop → 钉的人（甲）收到一条 system 小字
     const reassign = await request(port, '/tasks/' + cronOk.body.id, { method: 'PATCH', token: human, body: { owner: '丙' } });
     assert.equal(reassign.status, 200); assert.equal(reassign.body.owner_id, 'resident_gamma_01');
-    assert.equal(activity('thread_update').pop().text, '📌 甲 把「每天九点看一眼」改派给 丙');
+    assert.equal(activity('thread_update').pop().text, '[pin] 甲 reassigned "每天九点看一眼" → 丙');
     const dropped = await request(port, '/tasks/' + cronOk.body.id, { method: 'PATCH', token: gamma, body: { state: 'dropped', notes: '不该我做' } });
     assert.equal(dropped.body.state, 'dropped');
-    assert.equal(activity('thread_update').pop().text, '🗑 丙 放下了「每天九点看一眼」：不该我做');
+    assert.equal(activity('thread_update').pop().text, '🗑 丙 dropped "每天九点看一眼"：不该我做');
     sys = systemMsgs(); const last = sys[sys.length - 1];
-    assert.deepEqual(last.mentions, ['resident_alpha_01']); assert.match(last.text, /丙 放下了黑板上的「每天九点看一眼」/);
+    assert.deepEqual(last.mentions, ['resident_alpha_01']); assert.match(last.text, /丙 dropped "每天九点看一眼"/);
 
     // 列表：任何住户可看；owner=me；state 过滤；排序有 due 的在前
     const all = await request(port, '/tasks', { token: beta });

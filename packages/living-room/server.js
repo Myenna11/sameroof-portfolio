@@ -302,7 +302,7 @@ function createLivingRoom(options = {}) {
   function post(input) {
     const isPrivate = input.kind === 'dm' || input.kind === 'result';          // result：网关结果，只给申请住户（GATEWAY.md §3.3）
     if (input.from_id !== 'house' && !byId.has(input.from_id)) throw new HttpError(400, 'ACTOR-INVALID', '发言者不在房子里。');
-    if (isPrivate && !byId.has(input.to_id)) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', '没这个人。');
+    if (isPrivate && !byId.has(input.to_id)) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', 'Recipient not found.');
     const id = 'msg_' + crypto.randomBytes(12).toString('hex');
     const ts = new Date().toISOString();
     const mentions = isPrivate ? [input.to_id] : Array.isArray(input.mentions) ? input.mentions.filter(id0 => byId.has(id0) && id0 !== input.from_id) : mentionsIn(input.text).filter(id0 => id0 !== input.from_id);   // 明给 mentions 的（黑板 system 小字 @ 主人）不再从正文里找
@@ -490,7 +490,7 @@ function createLivingRoom(options = {}) {
       }
 
       if (req.method === 'POST' && url.pathname === '/say') {
-        rateOrThrow(sayLimiter, me.id, '在客厅说话');
+        rateOrThrow(sayLimiter, me.id, 'message rate limit');
         const body = await readJson(req);
         const text = textField(body, 'text');
         const replyTo = body.reply_to == null ? null : String(body.reply_to);
@@ -499,12 +499,12 @@ function createLivingRoom(options = {}) {
       }
 
       if (req.method === 'POST' && url.pathname === '/dm') {
-        rateOrThrow(dmLimiter, me.id, '发私信');
+        rateOrThrow(dmLimiter, me.id, 'dm rate limit');
         const body = await readJson(req);
         const text = textField(body, 'text');
-        if (typeof body.to !== 'string' || body.to.length > 100) throw new HttpError(400, 'RECIPIENT-INVALID', '要有合法收件人。');
+        if (typeof body.to !== 'string' || body.to.length > 100) throw new HttpError(400, 'RECIPIENT-INVALID', 'Valid recipient required.');
         const to = byName.get(norm(body.to)) || byId.get(body.to);
-        if (!to) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', '没这个人。');
+        if (!to) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', 'Recipient not found.');
         return writeJson(res, 200, post({ kind: 'dm', from_id: me.id, to_id: to.id, text, meta: deliveryMeta(body) }));
       }
 
@@ -542,7 +542,7 @@ function createLivingRoom(options = {}) {
         const residentCount = sseByResident.get(me.id) || 0;
         const ipCount = sseByIp.get(ip) || 0;
         if (listeners.size >= SSE_TOTAL_MAX || residentCount >= SSE_RESIDENT_MAX || ipCount >= SSE_IP_MAX) {
-          throw new HttpError(429, 'SSE-LIMITED', '实时连接太多，请关闭旧页面后再试。');
+          throw new HttpError(429, 'SSE-LIMITED', 'Too many SSE connections.');
         }
         res.writeHead(200, { ...securityHeaders(true), 'content-type': 'text/event-stream; charset=utf-8', connection: 'keep-alive', 'x-accel-buffering': 'no' });
         const listener = {
@@ -586,7 +586,7 @@ function createLivingRoom(options = {}) {
 
       if (req.method === 'POST' && url.pathname === '/activity') {           // 住户（适配器）报自己的事件；actor 只认 token
         const body = await readJson(req);
-        if (!ACTIVITY_KINDS.has(body.kind)) throw new HttpError(400, 'ACTIVITY-KIND-INVALID', '不认识这种事件。');
+        if (!ACTIVITY_KINDS.has(body.kind)) throw new HttpError(400, 'ACTIVITY-KIND-INVALID', 'Unknown activity kind.');
         return writeJson(res, 200, emitActivity({ kind: body.kind, actor_id: me.id, text: String(body.text || '').slice(0, 500), meta: body.meta && typeof body.meta === 'object' ? body.meta : null }));
       }
       if (req.method === 'GET' && url.pathname === '/activity') {
@@ -678,7 +678,7 @@ function createLivingRoom(options = {}) {
       }
       if (req.method === 'GET' && url.pathname === '/dm/history') {
         const withName = url.searchParams.get('with') || ''; const other = byId.get(withName) || byName.get(withName.normalize('NFKC').toLowerCase());
-        if (!other) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', '没这个人。');
+        if (!other) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', 'Recipient not found.');
         const before = positiveInt(url.searchParams.get('before'), Number.MAX_SAFE_INTEGER, 1, Number.MAX_SAFE_INTEGER, 'HISTORY-BEFORE-INVALID');
         const limit = positiveInt(url.searchParams.get('limit'), 50, 1, 200, 'HISTORY-LIMIT-INVALID');
         return writeJson(res, 200, dmHistory.all(me.id, other.id, other.id, me.id, before, limit).reverse().map(row => ({ ...row, mentions: JSON.parse(row.mentions), meta: row.meta ? JSON.parse(row.meta) : null })));
