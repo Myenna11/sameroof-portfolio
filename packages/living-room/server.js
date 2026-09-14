@@ -395,8 +395,11 @@ function createLivingRoom(options = {}) {
     if (pathname === '/console' || pathname === '/console/') {
       const consoleFile = path.join(houseDir, 'apps', 'console', 'index.html');
       if (!fs.existsSync(consoleFile)) return false;
-      const body = fs.readFileSync(consoleFile);
-      res.writeHead(200, { ...securityHeaders(false), 'cache-control': 'no-cache', 'content-type': 'text/html; charset=utf-8', 'content-length': body.length });
+      // Per-request nonce: script-src has no 'unsafe-inline'. style-src keeps it (inline style= attrs can't take a nonce; styles can't execute code).
+      const nonce = require('crypto').randomBytes(16).toString('base64');
+      const body = Buffer.from(fs.readFileSync(consoleFile, 'utf8').replace('<script>', `<script nonce="${nonce}">`));
+      const csp = `default-src 'self'; script-src 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`;
+      res.writeHead(200, { ...securityHeaders(false), 'content-security-policy': csp, 'cache-control': 'no-store', 'content-type': 'text/html; charset=utf-8', 'content-length': body.length });
       if (req.method === 'GET') res.end(body); else res.end();
       return true;
     }

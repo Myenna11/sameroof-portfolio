@@ -326,7 +326,7 @@
     <p>Multi-provider agent runtime</p>
     <input id="login-url" placeholder="Coordinator URL" value="">
     <input id="login-token" placeholder="Bearer token" type="password">
-    <button class="btn-send" onclick="app.login()">Connect</button>
+    <button class="btn-send" id="btn-login">Connect</button>
     <div class="login-error" id="login-error"></div>
   </div>
 </div>
@@ -345,13 +345,14 @@
   <div class="stream-header">
     <div class="stream-title" id="stream-title">Workspace</div>
     <div class="stream-stats" id="stream-stats"></div>
+    <button class="btn" style="margin-left:12px" id="btn-logout">Log out</button>
   </div>
   <div class="stream" id="stream"></div>
   <div class="input-area">
     <div class="input-hint"><kbd>@agent</kbd> mention &nbsp; <kbd>/dispatch agent task</kbd> assign task &nbsp; <kbd>Enter</kbd> send &nbsp; <kbd>Shift+Enter</kbd> newline</div>
     <div class="input-row">
       <textarea class="input-field" id="input" placeholder="Message or /dispatch <agent> <task>..." rows="1"></textarea>
-      <button class="btn-send" id="btn-send" onclick="app.send()">Send</button>
+      <button class="btn-send" id="btn-send">Send</button>
     </div>
   </div>
 </div>
@@ -360,7 +361,7 @@
 <div class="detail" id="detail">
   <div class="detail-header">
     <span id="detail-title">Details</span>
-    <span class="detail-close" onclick="app.closeDetail()">×</span>
+    <span class="detail-close" id="btn-detail-close">×</span>
   </div>
   <div class="detail-body" id="detail-body"></div>
 </div>
@@ -381,6 +382,52 @@ const app = {
     document.getElementById('input').addEventListener('input', e => {
       e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px';
     });
+    document.getElementById('btn-login').addEventListener('click', () => this.login());
+    document.getElementById('login-token').addEventListener('keydown', e => { if (e.key === 'Enter') this.login(); });
+    document.getElementById('btn-send').addEventListener('click', () => this.send());
+    document.getElementById('btn-detail-close').addEventListener('click', () => this.closeDetail());
+    document.getElementById('btn-logout').addEventListener('click', () => { localStorage.removeItem('sameroof-console'); location.reload(); });
+    // Event delegation: no inline handlers, no untrusted strings in JS
+    document.body.addEventListener('click', e => {
+      const agent = e.target.closest('[data-agent]'); if (agent) return this.showAgent(agent.dataset.agent);
+      const task = e.target.closest('[data-task]'); if (task) return this.showTask(task.dataset.task);
+      const fold = e.target.closest('[data-fold]'); if (fold) return fold.parentElement.classList.toggle('open');
+      const decide = e.target.closest('[data-decide]'); if (decide) return this.decide(decide.closest('[data-approval]').dataset.approval, decide.dataset.decide, decide);
+      const prefill = e.target.closest('[data-prefill]'); if (prefill) { const i = document.getElementById('input'); i.value = prefill.dataset.prefill + ' ' + prefill.dataset.name + ' '; i.focus(); this.closeDetail(); }
+    });
+  },
+
+  async hydrateApproval(id) {
+    const card = document.querySelector(`[data-approval="${CSS.escape(id)}"]`); if (!card) return;
+    const detail = card.querySelector('.approval-detail'), actions = card.querySelector('.approval-actions');
+    try {
+      const a = await this.api('GET', '/approval/' + encodeURIComponent(id));
+      const p = a.params || {};
+      // Render the fields a human needs to decide. Never hide content — truncate visibly.
+      const rows = [];
+      if (p.root_id) rows.push(['root', p.root_id]);
+      if (p.path) rows.push(['path', p.path]);
+      if (p.mode) rows.push(['mode', p.mode]);
+      if (p.argv) rows.push(['argv', Array.isArray(p.argv) ? p.argv.join(' ') : String(p.argv)]);
+      if (p.cwd) rows.push(['cwd', p.cwd]);
+      if (p.timeout_ms) rows.push(['timeout', p.timeout_ms + 'ms']);
+      if (p.content != null) { const c = String(p.content); rows.push(['content', c.length > 600 ? c.slice(0, 600) + `\n… (${c.length - 600} more chars — expand to see all)` : c]); }
+      const known = new Set(['root_id','path','mode','argv','cwd','timeout_ms','content','encoding']);
+      for (const [k, v] of Object.entries(p)) if (!known.has(k)) rows.push([k, typeof v === 'string' ? v : JSON.stringify(v)]);
+      const table = rows.map(([k, v]) => `<div><span style="color:var(--text-muted)">${this.esc(k)}:</span> ${this.esc(v)}</div>`).join('');
+      const meta = `<div style="margin-top:6px;color:var(--text-muted);font-size:11px">digest ${this.esc((a.params_digest||'').slice(0,16))} · expires ${this.esc(new Date(a.expires_ts).toLocaleTimeString())}</div>`;
+      detail.innerHTML = (table || '<em>no params</em>') + meta;
+      if (p.content && String(p.content).length > 600) {
+        const b = document.createElement('button'); b.className = 'btn'; b.textContent = 'Show full content'; b.style.marginTop = '6px';
+        b.addEventListener('click', () => { b.replaceWith(Object.assign(document.createElement('pre'), { textContent: String(p.content), style: 'white-space:pre-wrap;font-size:12px;margin-top:6px' })); });
+        detail.appendChild(b);
+      }
+      if (a.status === 'pending') {
+        actions.innerHTML = `<button class="btn allow" data-decide="allow">Allow</button><button class="btn deny" data-decide="deny">Deny</button>`;
+      } else {
+        actions.innerHTML = `<span style="color:var(--${a.status === 'allowed' ? 'green' : 'red'})">${this.esc(a.status)}${a.decided_by ? ' by ' + this.esc(a.decided_by) : ''}</span>`;
+      }
+    } catch (e) { detail.textContent = 'Could not load approval: ' + e.message; }
   },
 
   async login() {
@@ -418,7 +465,7 @@ const app = {
     this.members = await this.api('GET', '/members').catch(() => []);
     const el = document.getElementById('agents');
     el.innerHTML = this.members.map(m => `
-      <div class="agent-item" onclick="app.showAgent('${m.id}')">
+      <div class="agent-item" data-agent="${this.esc(m.id)}">
         <div class="agent-dot ${m.online ? 'online' : ''}"></div>
         <div style="flex:1; min-width:0">
           <div class="agent-name">${this.esc(m.name)}</div>
@@ -436,7 +483,7 @@ const app = {
     const el = document.getElementById('tasks');
     const active = this.tasks.filter(t => ['open', 'doing', 'blocked'].includes(t.state));
     el.innerHTML = active.length ? active.map(t => `
-      <div class="task-item" onclick="app.showTask('${t.id}')">
+      <div class="task-item" data-task="${this.esc(t.id)}">
         <span class="task-state ${t.state}">${t.state}</span>
         <span class="task-title" title="${this.esc(t.title)}">${this.esc(t.title)}</span>
         <span class="task-owner">${this.esc(t.owner || '')}</span>
@@ -473,7 +520,7 @@ const app = {
       // DM fold-out
       const badge = m.meta?.dispatch ? 'dispatch' : 'dm';
       html = `<div class="fold" id="msg-${m.id}">
-        <div class="fold-header" onclick="this.parentElement.classList.toggle('open')">
+        <div class="fold-header" data-fold>
           <span class="fold-icon">▶</span>
           <span class="fold-label"><b>${this.esc(from.name)}</b><span class="arrow">→</span><b>${this.esc(to?.name || '?')}</b></span>
           <span class="fold-badge ${badge}">${badge}</span>
@@ -483,7 +530,7 @@ const app = {
       </div>`;
     } else if (m.kind === 'result') {
       html = `<div class="fold" id="msg-${m.id}">
-        <div class="fold-header" onclick="this.parentElement.classList.toggle('open')">
+        <div class="fold-header" data-fold>
           <span class="fold-icon">▶</span>
           <span class="fold-label">Gateway result → <b>${this.esc(to?.name || '?')}</b></span>
           <span class="fold-badge result">result</span>
@@ -492,15 +539,13 @@ const app = {
         <div class="fold-body">${this.fmt(m.text)}</div>
       </div>`;
     } else if (m.kind === 'system' && m.meta?.approval_id) {
-      // Approval card
-      html = `<div class="approval-card" id="msg-${m.id}">
-        <div class="approval-header">⚠ ${this.esc(from.name)} requests: ${this.esc(m.meta.action)}</div>
-        <div class="approval-detail">${this.esc(JSON.stringify(m.meta.params || {}, null, 2))}</div>
-        <div class="approval-actions">
-          <button class="btn allow" onclick="app.decide('${m.meta.approval_id}', 'allow', this)">Allow</button>
-          <button class="btn deny" onclick="app.decide('${m.meta.approval_id}', 'deny', this)">Deny</button>
-        </div>
+      // Approval card — params come from GET /approval/:id (authoritative), not from the message meta
+      html = `<div class="approval-card" id="msg-${this.esc(m.id)}" data-approval="${this.esc(m.meta.approval_id)}">
+        <div class="approval-header">⚠ ${this.esc(from.name)} requests: <code>${this.esc(m.meta.action)}</code></div>
+        <div class="approval-detail">loading…</div>
+        <div class="approval-actions"></div>
       </div>`;
+      queueMicrotask(() => this.hydrateApproval(m.meta.approval_id));
     } else if (m.kind === 'system') {
       html = `<div class="msg system" id="msg-${m.id}">${this.esc(m.text)}</div>`;
     } else {
@@ -544,12 +589,11 @@ const app = {
   },
 
   async decide(approvalId, decision, btn) {
-    btn.disabled = true;
+    for (const b of btn.parentElement.querySelectorAll('button')) b.disabled = true;
     try {
-      await this.api('POST', '/approval/' + approvalId, { decision });
-      const card = btn.closest('.approval-card');
-      card.querySelector('.approval-actions').innerHTML = `<span style="color:var(--${decision === 'allow' ? 'green' : 'red'})">${decision === 'allow' ? '✓ Allowed' : '✗ Denied'}</span>`;
-    } catch (e) { btn.disabled = false; this.toast('Failed: ' + e.message); }
+      await this.api('POST', '/approval/' + encodeURIComponent(approvalId), { decision });
+      await this.hydrateApproval(approvalId);   // re-fetch: UI state is whatever the server says
+    } catch (e) { for (const b of btn.parentElement.querySelectorAll('button')) b.disabled = false; this.toast('Failed: ' + e.message); }
   },
 
   showAgent(id) {
@@ -560,8 +604,8 @@ const app = {
       <div class="detail-row"><div class="detail-label">Type</div><div class="detail-value">${m.species}</div></div>
       <div class="detail-row"><div class="detail-label">Status</div><div class="detail-value">${m.online ? '● online' : '○ offline'}</div></div>
       <div class="detail-row"><div class="detail-label">Actions</div>
-        <button class="btn" onclick="document.getElementById('input').value='/dispatch ${this.esc(m.name)} '; document.getElementById('input').focus(); app.closeDetail()">Dispatch task</button>
-        <button class="btn" onclick="document.getElementById('input').value='/dm ${this.esc(m.name)} '; document.getElementById('input').focus(); app.closeDetail()">Send DM</button>
+        <button class="btn" data-prefill="/dispatch" data-name="${this.esc(m.name)}">Dispatch task</button>
+        <button class="btn" data-prefill="/dm" data-name="${this.esc(m.name)}">Send DM</button>
       </div>`;
     document.getElementById('detail').classList.add('open');
   },
