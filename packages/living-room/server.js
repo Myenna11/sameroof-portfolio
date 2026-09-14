@@ -55,7 +55,7 @@ function securityHeaders(api = true) {
     'x-frame-options': 'DENY',
     'referrer-policy': 'no-referrer',
     'permissions-policy': 'camera=(), microphone=(), geolocation=(), payment=()',
-    'content-security-policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://house.sameroof.example; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    'content-security-policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' *; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
     ...(api ? { 'cache-control': 'no-store' } : {})
   };
 }

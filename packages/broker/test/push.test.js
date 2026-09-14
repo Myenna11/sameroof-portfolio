@@ -11,14 +11,14 @@ test('VAPID private key stays in 0600 credential state and client sees only publ
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sameroof-push-'));
   try {
     const store = new PushCredentialStore({ stateDir });
-    const initialized = store.initialize('https://house.sameroof.example');
+    const initialized = store.initialize('https://house.example.com');
     const secret = fs.readFileSync(store.clientTokenFile, 'utf8').trim();
     assert.equal(store.publicKey(secret).public_key, initialized.public_key);
     assert.equal(Object.hasOwn(store.status(), 'private_key'), false);
     assert.equal(fs.statSync(store.vapidFile).mode & 0o777, 0o600);
     assert.equal(fs.statSync(store.clientTokenFile).mode & 0o777, 0o600);
     assert.throws(() => store.publicKey('wrong-secret-value'), error => error.code === 'PUSH-CLIENT-INVALID');
-    assert.throws(() => store.initialize('https://house.sameroof.example'), error => error.code === 'PUSH-CREDENTIAL-EXISTS');
+    assert.throws(() => store.initialize('https://house.example.com'), error => error.code === 'PUSH-CREDENTIAL-EXISTS');
   } finally { fs.rmSync(stateDir, { recursive: true, force: true }); }
 });
 

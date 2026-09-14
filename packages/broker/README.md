@@ -73,9 +73,9 @@ sameroof-broker ledger --limit 50
 Web Push 的 VAPID 私钥也归 broker 凭证状态，不交给客厅：
 
 ```bash
-sameroof-broker push init --subject https://house.sameroof.example
+sameroof-broker push init --subject https://your-house.example.com
 sameroof-broker push status
-sameroof-broker push init --subject https://house.sameroof.example --rotate
+sameroof-broker push init --subject https://your-house.example.com --rotate
 ```
 
 初始化会在 `/var/lib/sameroof-broker` 写入 0600 VAPID 凭证与客厅调用 token。`status` 和内部公钥接口都不会返回私钥；轮换必须显式使用 `--rotate`，轮换后浏览器需要重新订阅。

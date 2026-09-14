@@ -65,7 +65,7 @@ const cmds = {
     const r = rooms(root).find(x => x.name === name || x.id === name); if (!r) throw new Error('没这间屋：' + name);
     const tokens = require('@sameroof/living-room/tokens.js');
     const rec = opts.rotate ? tokens.rotate(r.id) : tokens.issue(r.id);
-    const secret = rec.secret || rec.token || rec; const api = opts.api || 'https://house.sameroof.example';
+    const secret = rec.secret || rec.token || rec; const api = opts.api || process.env.SAMEROOF_API || 'http://127.0.0.1:8790';
     console.log(`sameroof://pair?api=${api}&token=${secret}`);
     console.error(`（${r.name} 的客厅 token${opts.rotate ? '已轮换，旧的作废' : ''}。别贴聊天里，走剪贴板。）`);
   },

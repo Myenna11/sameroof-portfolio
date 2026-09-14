@@ -80,9 +80,9 @@ node packages/living-room/tokens.js list                     # 只显示状态�
 第一版只允许标准生产端点 `fcm.googleapis.com`、`updates.push.services.mozilla.com`、`web.push.apple.com`，避免任意订阅 URL 把 broker 变成 SSRF 出口。初始化或明确轮换：
 
 ```bash
-sameroof-broker push init --subject https://house.sameroof.example
+sameroof-broker push init --subject https://your-house.example.com
 sameroof-broker push status
-sameroof-broker push init --subject https://house.sameroof.example --rotate
+sameroof-broker push init --subject https://your-house.example.com --rotate
 ```
 
 限速是单进程内存状态，服务重启会清零；它是暴力尝试和误循环的第一道缓冲，不替代 Cloudflare 侧的 DDoS/WAF 能力。
