@@ -386,7 +386,7 @@ function createLivingRoom(options = {}) {
       return null;
     }
     if (authFailureKey) authFailures.success(authFailureKey);
-    return { resident, secret: match[1] };
+    return { resident, secret: match ? match[1] : qsToken };
   }
 
   function staticResponse(req, res, pathname) {
