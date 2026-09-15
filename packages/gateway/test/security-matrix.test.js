@@ -169,7 +169,9 @@ if printf bad > '${alpha}/prod.env' 2>/dev/null; then exit 34; fi
 if printf bad > '${alpha}/room.yaml' 2>/dev/null; then exit 35; fi
 if printf bad > '${beta}/new-secret' 2>/dev/null; then exit 32; fi
 test -z "$(/usr/bin/env | /usr/bin/grep GW_HOST_SECRET || true)"
-/usr/bin/node -e "const s=require('net').connect({host:'127.0.0.1',port:${port}}); s.on('connect',()=>process.exit(41)); s.on('error',()=>process.exit(0)); setTimeout(()=>process.exit(42),1000)"
+# network probe without node: bash's /dev/tcp builtin. Inside --unshare-net the connect must fail.
+# (node lives outside /usr on GitHub runners — setup-node uses /opt/hostedtoolcache — so /usr/bin/node isn't in the sandbox there.)
+if /usr/bin/bash -c "exec 3<>/dev/tcp/127.0.0.1/${port}" 2>/dev/null; then exit 41; fi
 printf isolated`;
     const value = { request_id: 'req_bwrap001', resident_id: 'resident_alpha_01', action: 'core.exec', params: { argv: ['/bin/sh', '-lc', script], cwd: { root_id: 'project', path: '' }, writable_root_ids: ['project'], timeout_ms: 5000 } };
     f.gateway.options.mounts = [{ id: 'project', path: f.root, residents: { resident_alpha_01: 'read-write' } }]; process.env.GW_HOST_SECRET = 'inherited-host-secret';
