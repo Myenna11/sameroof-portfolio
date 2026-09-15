@@ -18,7 +18,7 @@ const MAX_OUTPUT = 256 * 1024;
 const HARD_TIMEOUT = 10 * 60 * 1000;
 const REQUEST_ID = /^req_[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/;
 const RESIDENT_ID = /^resident_[a-z0-9][a-z0-9_-]{2,95}$/;
-const ACTIONS = new Set(['core.fs.read', 'core.fs.write', 'core.exec']);
+const ACTIONS = new Set(['core.fs.read', 'core.fs.write', 'core.exec', 'core.exec.ro']);   // core.exec.ro: RFC 2026-09-15 §2.2 — read-only sandbox by construction
 const PROTECTED_NAMES = new Set(['house.yaml', 'house.lock', 'room.yaml', '.sameroof']);
 
 class GatewayError extends Error {
@@ -93,6 +93,11 @@ class State {
     const intentColumns = this.db.prepare('PRAGMA table_info(intents)').all().map(x => x.name);
     if (!intentColumns.includes('policy_digest')) this.db.exec('ALTER TABLE intents ADD COLUMN policy_digest TEXT');
     if (!intentColumns.includes('policy_json')) this.db.exec('ALTER TABLE intents ADD COLUMN policy_json TEXT');
+    // RFC 2026-09-15-gateway-allow: contract A + /output channel
+    if (!intentColumns.includes('decision_source')) this.db.exec("ALTER TABLE intents ADD COLUMN decision_source TEXT NOT NULL DEFAULT 'human'");
+    if (!intentColumns.includes('executed_at')) this.db.exec('ALTER TABLE intents ADD COLUMN executed_at TEXT');
+    if (!intentColumns.includes('output_json')) this.db.exec('ALTER TABLE intents ADD COLUMN output_json TEXT');
+    if (!intentColumns.includes('output_reads')) this.db.exec('ALTER TABLE intents ADD COLUMN output_reads INTEGER NOT NULL DEFAULT 0');
   }
   audit(event, item = {}) {
     this.db.prepare('INSERT INTO audit(ts,event,request_id,approval_id,resident_id,action,params_digest,target_digest,status,details_json) VALUES(?,?,?,?,?,?,?,?,?,?)')
@@ -225,6 +230,7 @@ class Gateway {
     this.state = new State(this.dbPath);
     const interrupted = this.state.db.prepare("SELECT request_id,resident_id,action,params_digest FROM intents WHERE status='executing'").all();
     this.state.db.prepare("UPDATE intents SET status='failed_unknown',updated_at=? WHERE status='executing'").run(now());
+    try { this.sweepOutput(); } catch {}
     for (const item of interrupted) {
       const result = resultShell('failed_unknown', 'none', { kind: 'human_action', reason: '网关上次执行中断，副作用未知；不会自动重放。' });
       result.error = { code: 'GW-FAILED-UNKNOWN', message: '执行结果未知，已禁止自动重放。' };
@@ -418,6 +424,7 @@ class Gateway {
       if (!p.cwd || typeof p.cwd !== 'object' || typeof p.cwd.root_id !== 'string' || typeof p.cwd.path !== 'string') throw new GatewayError(400, 'GW-PARAMS-INVALID', 'exec 需要 cwd。');
       const cwdRoot = this.rootFor(residentId, p.cwd.root_id, policy); const cwd = p.cwd.path ? this.safeTarget(cwdRoot, p.cwd.path, false, residentId, policy).target : cwdRoot.path; if (!fs.statSync(cwd).isDirectory()) throw new GatewayError(400, 'GW-PARAMS-INVALID', 'cwd 必须是目录。');
       if (!Array.isArray(p.writable_root_ids) || p.writable_root_ids.some(x => typeof x !== 'string')) throw new GatewayError(400, 'GW-PARAMS-INVALID', 'writable_root_ids 必须是数组。');
+      if (body.action === 'core.exec.ro' && p.writable_root_ids.length) throw new GatewayError(400, 'GW-PARAMS-INVALID', 'core.exec.ro 不接受 writable_root_ids（只读沙箱）。');
       for (const id of p.writable_root_ids) { const root = this.rootFor(residentId, id, policy); if (!root.writable) throw new GatewayError(403, 'GW-POLICY-DENIED', '可写根不是 read-write。'); }
       const timeout = p.timeout_ms === undefined ? 30000 : Number(p.timeout_ms); if (!Number.isInteger(timeout) || timeout < 1 || timeout > HARD_TIMEOUT) throw new GatewayError(400, 'GW-PARAMS-INVALID', 'timeout_ms 超出范围。');
       if (p.env !== undefined && (!p.env || typeof p.env !== 'object' || Array.isArray(p.env) || Object.keys(p.env).some(k => !['LANG', 'LC_ALL', 'TZ', 'NODE_ENV'].includes(k) || typeof p.env[k] !== 'string'))) throw new GatewayError(400, 'GW-PARAMS-INVALID', 'env 只允许有限白名单。');
@@ -431,23 +438,118 @@ class Gateway {
     if (this.options.lockRequired !== false && this.verifyLockSource() !== policy.digest) throw new GatewayError(503, 'GW-POLICY-DENIED', '配置在 intent 登记期间变化，拒绝登记。');
     const paramsDigest = jcs.digest(body.params);
     const targetDigest = this.targetDigest(body.action, body.params);
+    const effective = this.effectivePermission(body.action, residentId, policy);   // validateIntent already threw for deny
+    const decisionSource = effective === 'allow' ? 'policy_allow' : 'human';
+    const runId = body.run_id || null;
     const old = this.state.db.prepare('SELECT * FROM intents WHERE request_id=?').get(body.request_id);
     if (old) {
-      if (old.resident_id !== residentId || old.action !== body.action || old.params_digest !== paramsDigest) throw new GatewayError(409, 'GW-IDEMPOTENCY-CONFLICT', 'request_id 已绑定另一份 intent。');
+      // Contract A: identity = resident + action + params + run_id + decision_source. /output binds on run_id.
+      if (old.resident_id !== residentId || old.action !== body.action || old.params_digest !== paramsDigest || (old.run_id || null) !== runId || old.decision_source !== decisionSource) throw new GatewayError(409, 'GW-IDEMPOTENCY-CONFLICT', 'request_id 已绑定另一份 intent。');
       return this.intentResponse(old);
     }
     const created = now(); const expires = new Date(Date.now() + ttl * 1000).toISOString();
-    this.state.db.prepare('INSERT INTO intents(request_id,resident_id,run_id,action,params_json,params_digest,target_digest,expires_at,status,policy_digest,policy_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(body.request_id, residentId, body.run_id || null, body.action, JSON.stringify(body.params), paramsDigest, targetDigest, expires, 'awaiting_approval', policy.digest || 'unlocked', serializePolicy(policy), created, created);
+    if (decisionSource === 'policy_allow') {
+      // Contract A: claimPolicyAllowed — rate limit before insert; one transaction inserts as executing; execution is queued, not awaited.
+      this.checkAllowRate(residentId, body.action, runId);
+      const row = this.claimPolicyAllowed({ requestId: body.request_id, residentId, runId, action: body.action, params: body.params, paramsDigest, targetDigest, expires, policy, created });
+      this._pendingPolicy = this._pendingPolicy || new Set();
+      const p = new Promise(resolve => setImmediate(resolve))
+        .then(() => this.executeClaimed(row))
+        .catch(error => { try { this.state.audit('executed', { request_id: row.request_id, resident_id: residentId, action: row.action, params_digest: paramsDigest, status: 'failed', details: { code: error.code || 'GW-INTERNAL', message: safeText(error.message) } }); } catch {} })
+        .finally(() => this._pendingPolicy.delete(p));
+      this._pendingPolicy.add(p);
+      return this.intentResponse(row);
+    }
+    this.state.db.prepare('INSERT INTO intents(request_id,resident_id,run_id,action,params_json,params_digest,target_digest,expires_at,status,policy_digest,policy_json,decision_source,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(body.request_id, residentId, runId, body.action, JSON.stringify(body.params), paramsDigest, targetDigest, expires, 'awaiting_approval', policy.digest || 'unlocked', serializePolicy(policy), 'human', created, created);
     this.state.audit('asked', { request_id: body.request_id, resident_id: residentId, action: body.action, params_digest: paramsDigest, target_digest: targetDigest, status: 'awaiting_approval' });
     return this.intentResponse(this.state.db.prepare('SELECT * FROM intents WHERE request_id=?').get(body.request_id));
   }
+  // Contract A: policy-allowed claim. One transaction: insert directly as `executing` with decision_source=policy_allow. No approval row.
+  claimPolicyAllowed({ requestId, residentId, runId, action, params, paramsDigest, targetDigest, expires, policy, created }) {
+    const insert = this.state.db.transaction(() => {
+      this.state.db.prepare('INSERT INTO intents(request_id,resident_id,run_id,action,params_json,params_digest,target_digest,expires_at,status,policy_digest,policy_json,decision_source,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(requestId, residentId, runId, action, JSON.stringify(params), paramsDigest, targetDigest, expires, 'executing', policy.digest || 'unlocked', serializePolicy(policy), 'policy_allow', created, created);
+      this.state.audit('asked', { request_id: requestId, resident_id: residentId, action, params_digest: paramsDigest, target_digest: targetDigest, status: 'executing', details: { decision_source: 'policy_allow' } });
+      this.state.audit('decided', { request_id: requestId, approval_id: null, resident_id: residentId, action, params_digest: paramsDigest, status: 'allowed', details: { decision_source: 'policy_allow', decided_by: 'policy', policy_digest: policy.digest || 'unlocked' } });
+    });
+    insert();
+    return this.state.db.prepare('SELECT * FROM intents WHERE request_id=?').get(requestId);
+  }
+  // RFC §2.6: per-resident, per-action token bucket, checked BEFORE insert. Exceed → 429, one audit row, no intent.
+  checkAllowRate(residentId, action, runId) {
+    const cfg = (this.policy.house.gateway && this.policy.house.gateway.allow_rate) || {};
+    const perMin = Number(cfg[action] ?? (action === 'core.exec.ro' ? 20 : action === 'core.fs.read' ? 60 : 10));
+    if (!Number.isFinite(perMin) || perMin <= 0) return;
+    this._rate = this._rate || new Map();
+    const key = residentId + '\0' + action; const nowMs = Date.now();
+    const b = this._rate.get(key) || { tokens: perMin, at: nowMs };
+    b.tokens = Math.min(perMin, b.tokens + (nowMs - b.at) * perMin / 60000); b.at = nowMs;
+    if (b.tokens < 1) {
+      this._rate.set(key, b);
+      this.state.audit('rate_limited', { request_id: null, resident_id: residentId, action, params_digest: null, status: 'rejected', details: { run_id: runId, per_min: perMin } });
+      const e = new GatewayError(429, 'GW-RATE-LIMITED', '政策放行动作超过速率上限。'); e.retryAfterMs = Math.ceil((1 - b.tokens) * 60000 / perMin); throw e;
+    }
+    b.tokens -= 1; this._rate.set(key, b);
+  }
   targetDigest(action, p) {
     if (action === 'core.exec') return jcs.digest({ cwd: p.cwd, argv: p.argv, writable_root_ids: p.writable_root_ids });
+    if (action === 'core.exec.ro') return jcs.digest({ action, cwd: p.cwd, argv: p.argv, writable_root_ids: [] });
     return jcs.digest({ root_id: p.root_id, path: normalizeRelative(p.path) });
   }
   intentResponse(row) {
     const p = JSON.parse(row.params_json);
     return { request_id: row.request_id, state: row.status, action: row.action, params_digest: row.params_digest, target_digest: row.target_digest, policy_digest: row.policy_digest, expires_at: row.expires_at, approval_body: { action: row.action, params: p, params_digest: row.params_digest, gateway_request_id: row.request_id, ttl_seconds: Math.max(1, Math.ceil((Date.parse(row.expires_at) - Date.now()) / 1000)) } };
+  }
+  // RFC §2.3b: bounded output channel for policy-allowed intents. Resident token authenticates; X-Sameroof-Run binds.
+  readOutput(requestId, token, runHeader) {
+    const residentId = this.tokenSubject(token); if (!residentId) throw new GatewayError(401, 'GW-AUTH-DENIED', '网关 token 无效。');
+    const row = this.state.db.prepare('SELECT * FROM intents WHERE request_id=?').get(requestId);
+    // 404 for: missing, other resident, human-decided (not offered), run mismatch — no existence leak
+    if (!row || row.resident_id !== residentId || row.decision_source !== 'policy_allow' || String(runHeader || '') !== String(row.run_id || '')) throw new GatewayError(404, 'GW-OUTPUT-NOT-FOUND', '没有这条可读输出。');
+    if (row.status === 'executing') throw new GatewayError(409, 'GW-OUTPUT-NOT-READY', '还在执行。');
+    const ttlMs = Number(this.policy.house.gateway?.output_ttl_ms || 10 * 60 * 1000);
+    const maxReads = Number(this.policy.house.gateway?.output_max_reads || 3);
+    const maxBytes = Number(this.policy.house.gateway?.output_max_bytes || 64 * 1024);
+    if (row.executed_at && Date.parse(row.executed_at) + ttlMs <= Date.now()) { this.clearOutput(requestId, 'expired'); throw new GatewayError(410, 'GW-OUTPUT-EXPIRED', '输出已过期。'); }
+    // atomic read-count increment: concurrent GETs cannot exceed maxReads
+    const claimed = this.state.db.prepare('UPDATE intents SET output_reads=output_reads+1 WHERE request_id=? AND output_json IS NOT NULL AND output_reads<? RETURNING output_json, output_reads').get(requestId, maxReads);
+    if (!claimed) throw new GatewayError(410, 'GW-OUTPUT-CONSUMED', '输出已读满或已清除。');
+    let full; try { full = JSON.parse(claimed.output_json); } catch { this.clearOutput(requestId, 'corrupt'); throw new GatewayError(410, 'GW-OUTPUT-CONSUMED', '输出不可解析。'); }
+    const remaining = maxReads - claimed.output_reads;
+    if (remaining <= 0) this.clearOutput(requestId, 'reads_exhausted');
+    const origBytes = {}; if (full.details) { if (typeof full.details.stdout_raw === 'string') full.details.stdout = full.details.stdout_raw; if (typeof full.details.stderr_raw === 'string') full.details.stderr = full.details.stderr_raw; if (Number.isFinite(full.details.stdout_raw_bytes)) origBytes.stdout = full.details.stdout_raw_bytes; if (Number.isFinite(full.details.stderr_raw_bytes)) origBytes.stderr = full.details.stderr_raw_bytes; delete full.details.stdout_raw; delete full.details.stderr_raw; delete full.details.stdout_raw_bytes; delete full.details.stderr_raw_bytes; }
+    // whole-response cap: cut the three content fields proportionally, then verify total
+    const out = { request_id: requestId, run_id: row.run_id, action: row.action, state: row.status, decision: { source: 'policy_allow', policy_digest: row.policy_digest }, reads_remaining: remaining, truncated: false, total_bytes: {}, result: full };
+    const fields = ['stdout', 'stderr', 'content'].filter(k => full.details && typeof full.details[k] === 'string');
+    const overhead = Buffer.byteLength(JSON.stringify({ ...out, result: { ...full, details: { ...(full.details || {}), ...Object.fromEntries(fields.map(k => [k, ''])) } } }));
+    let budget = Math.max(0, maxBytes - overhead);
+    const sizes = Object.fromEntries(fields.map(k => [k, Buffer.byteLength(full.details[k])]));
+    const total = Object.values(sizes).reduce((a, b) => a + b, 0);
+    if (total > budget) {
+      out.truncated = true;
+      for (const k of fields) { out.total_bytes[k] = origBytes[k] ?? sizes[k]; const share = Math.floor(budget * sizes[k] / Math.max(1, total)); full.details[k] = Buffer.from(full.details[k]).subarray(0, share).toString('utf8'); }
+    }
+    for (const k of fields) if (origBytes[k] !== undefined && origBytes[k] > sizes[k]) { out.truncated = true; out.total_bytes[k] = origBytes[k]; }   // already cut at execShell
+    // JSON escaping (\n → 2 bytes, etc.) isn't in the byte count above: converge on the serialised size.
+    for (let guard = 0; guard < 8 && Buffer.byteLength(JSON.stringify(out)) > maxBytes; guard++) {
+      const k = fields.reduce((a, b) => (Buffer.byteLength(full.details[a] || '') >= Buffer.byteLength(full.details[b] || '') ? a : b), fields[0]);
+      if (!k || !full.details[k]) break;
+      const over = Buffer.byteLength(JSON.stringify(out)) - maxBytes; const cur = Buffer.from(full.details[k]);
+      full.details[k] = cur.subarray(0, Math.max(0, cur.length - over - 16)).toString('utf8'); out.truncated = true; if (out.total_bytes[k] === undefined) out.total_bytes[k] = origBytes[k] ?? sizes[k];
+    }
+    this.state.audit('output_read', { request_id: requestId, resident_id: residentId, action: row.action, params_digest: row.params_digest, status: row.status, details: { run_id: row.run_id, bytes: Buffer.byteLength(JSON.stringify(out)), truncated: out.truncated, reads_remaining: remaining } });
+    return out;
+  }
+  clearOutput(requestId, reason) {
+    const r = this.state.db.prepare('UPDATE intents SET output_json=NULL WHERE request_id=? AND output_json IS NOT NULL').run(requestId);
+    if (r.changes) this.state.audit('output_cleared', { request_id: requestId, resident_id: null, action: null, params_digest: null, status: reason, details: {} });
+  }
+  // physical clearing for rows nobody read (periodic sweep + startup)
+  sweepOutput() {
+    const ttlMs = Number(this.policy.house.gateway?.output_ttl_ms || 10 * 60 * 1000);
+    const cutoff = new Date(Date.now() - ttlMs).toISOString();
+    const rows = this.state.db.prepare('SELECT request_id FROM intents WHERE output_json IS NOT NULL AND executed_at IS NOT NULL AND executed_at<=?').all(cutoff);
+    for (const r of rows) this.clearOutput(r.request_id, 'expired');
+    return rows.length;
   }
   getIntent(requestId, token) {
     const residentId = this.tokenSubject(token); if (!residentId) throw new GatewayError(401, 'GW-AUTH-DENIED', '网关 token 无效。');
@@ -456,11 +558,14 @@ class Gateway {
     let result = null; try { result = row.result_json ? JSON.parse(row.result_json) : null; } catch {}
     return { request_id: row.request_id, resident_id: row.resident_id, run_id: row.run_id, action: row.action, state: row.status, params_digest: row.params_digest, target_digest: row.target_digest, policy_digest: row.policy_digest, created_at: row.created_at, updated_at: row.updated_at, expires_at: row.expires_at, ...(result ? { result } : {}) };
   }
+  // Contract A: `execute` = claimHumanApproved + executeClaimed. Kept as the public name for the approval path (living-room poll loop calls it).
   async execute(requestId, approval) {
+    const row = this.claimHumanApproved(requestId, approval);
+    return this.executeClaimed(row, approval);
+  }
+  claimHumanApproved(requestId, approval) {
     const row = this.state.db.prepare('SELECT * FROM intents WHERE request_id=?').get(requestId);
     if (!row) throw new GatewayError(409, 'GW-APPROVAL-MISMATCH', 'intent 不存在。');
-    const params = JSON.parse(row.params_json);
-    let policy; try { policy = deserializePolicy(row.policy_json); } catch { throw new GatewayError(503, 'GW-POLICY-DENIED', 'intent 没有可验证的登记时策略快照。'); }
     if (row.status !== 'awaiting_approval') throw new GatewayError(409, row.status === 'executing' ? 'GW-APPROVAL-USED' : 'GW-APPROVAL-MISMATCH', 'intent 已不是待审批状态。');
     if (!approval || approval.decision !== 'allowed' || approval.single_use !== true || typeof approval.approval_id !== 'string' || !approval.approval_id || approval.gateway_request_id !== requestId || approval.resident_id !== row.resident_id || approval.action !== row.action || approval.params_digest !== row.params_digest) throw new GatewayError(409, 'GW-APPROVAL-MISMATCH', '审批与 intent 绑定不一致。');
     if (!approval.expires_at || !Number.isFinite(Date.parse(approval.expires_at)) || Date.parse(row.expires_at) <= Date.now() || Date.parse(approval.expires_at) <= Date.now()) { this.state.db.prepare('UPDATE intents SET status=?,updated_at=? WHERE request_id=?').run('expired', now(), requestId); this.state.audit('decided', { request_id: requestId, approval_id: approval.approval_id, resident_id: row.resident_id, action: row.action, params_digest: row.params_digest, status: 'expired' }); throw new GatewayError(409, 'GW-APPROVAL-EXPIRED', '审批已过期或没有有效期限。'); }
@@ -473,9 +578,18 @@ class Gateway {
       this.state.db.prepare('UPDATE approvals SET consumed=1 WHERE approval_id=? AND consumed=0').run(approval.approval_id);
     });
     claim();
-    this.state.audit('decided', { request_id: requestId, approval_id: approval.approval_id, resident_id: row.resident_id, action: row.action, params_digest: row.params_digest, status: 'allowed', details: { remember: approval.remember || 'once', decided_by: approval.decided_by || null } });
+    this.state.audit('decided', { request_id: requestId, approval_id: approval.approval_id, resident_id: row.resident_id, action: row.action, params_digest: row.params_digest, status: 'allowed', details: { decision_source: 'human', remember: approval.remember || 'once', decided_by: approval.decided_by || null } });
+    return this.state.db.prepare('SELECT * FROM intents WHERE request_id=?').get(requestId);
+  }
+  // Contract A: shared execution body. `row.status` must already be `executing` (claimed by either path). `approval` is null on the policy path.
+  async executeClaimed(row, approval = null) {
+    const requestId = row.request_id;
+    const params = JSON.parse(row.params_json);
+    let policy; try { policy = deserializePolicy(row.policy_json); } catch { throw new GatewayError(503, 'GW-POLICY-DENIED', 'intent 没有可验证的登记时策略快照。'); }
+    if (row.status !== 'executing') throw new GatewayError(409, 'GW-APPROVAL-MISMATCH', 'intent 未被认领。');
+    const exec = row.action === 'core.exec.ro' ? { ...params, writable_root_ids: [] } : params;   // core.exec.ro: read-only sandbox by construction (§2.2)
     let result;
-    try { result = row.action === 'core.fs.read' ? await this.execRead(row.resident_id, params, policy) : row.action === 'core.fs.write' ? await this.execWrite(row.resident_id, params, policy) : await this.execShell(row.resident_id, params, policy); }
+    try { result = row.action === 'core.fs.read' ? await this.execRead(row.resident_id, params, policy) : row.action === 'core.fs.write' ? await this.execWrite(row.resident_id, params, policy) : await this.execShell(row.resident_id, exec, policy); }
     catch (error) {
       result = error.result || resultShell(error.code === 'GW-TIMEOUT' ? 'timed_out' : 'failed', error.executor || 'none', error.next || { kind: 'human_action', reason: safeText(error.message) });
       result.error = { code: error.code || 'GW-INTERNAL', message: safeText(error.message) };
@@ -489,9 +603,13 @@ class Gateway {
       if (Object.hasOwn(persisted.details, 'content_base64')) persisted.details.content_base64 = '[content omitted]';
       if (Object.hasOwn(persisted.details, 'stdout')) persisted.details.stdout = '[output omitted]';
       if (Object.hasOwn(persisted.details, 'stderr')) persisted.details.stderr = '[output omitted]';
+      delete persisted.details.stdout_raw; delete persisted.details.stderr_raw; delete persisted.details.stdout_raw_bytes; delete persisted.details.stderr_raw_bytes;
     }
-    this.state.db.prepare('UPDATE intents SET status=?,result_json=?,updated_at=? WHERE request_id=?').run(result.status, JSON.stringify(persisted), now(), requestId);
-    this.state.audit('executed', { request_id: requestId, approval_id: approval.approval_id, resident_id: row.resident_id, action: row.action, params_digest: row.params_digest, status: result.status, details: { coverage: result.coverage, next: result.next } });
+    const executedAt = now();
+    // /output (RFC §2.3b): the redacted FULL result is kept only for policy-allowed intents, only until ttl/reads (see readOutput/sweepOutput).
+    const outputJson = row.decision_source === 'policy_allow' ? JSON.stringify(result) : null;
+    this.state.db.prepare('UPDATE intents SET status=?,result_json=?,output_json=?,executed_at=?,updated_at=? WHERE request_id=?').run(result.status, JSON.stringify(persisted), outputJson, executedAt, executedAt, requestId);
+    this.state.audit('executed', { request_id: requestId, approval_id: approval ? approval.approval_id : null, resident_id: row.resident_id, action: row.action, params_digest: row.params_digest, status: result.status, details: { coverage: result.coverage, next: result.next } });
     this.state.db.prepare('INSERT INTO results(request_id,result_json,created_at) VALUES(?,?,?) ON CONFLICT(request_id) DO UPDATE SET result_json=excluded.result_json').run(requestId, JSON.stringify(result), now());
     try { const delivery = await this.deliverResult(row, approval, result); this.markDelivered(requestId, delivery?.message_id); }
     catch (error) { result.delivery_error = 'GW-RESULT-DELIVERY-FAILED'; this.state.audit('delivery_failed', { request_id: requestId, resident_id: row.resident_id, action: row.action, status: result.status }); }
@@ -548,7 +666,7 @@ class Gateway {
     });
     if (code.spawnError) { const e = new GatewayError(503, 'GW-SANDBOX-UNAVAILABLE', 'bwrap 启动失败，拒绝执行。'); e.result = resultShell('denied', 'none', { kind: 'human_action', reason: 'sandbox_start_failed' }); e.result.coverage.sandbox = 'unavailable'; e.executor = 'none'; throw e; }
     if (code.timedOut) { const e = new GatewayError(408, 'GW-TIMEOUT', '命令超时。'); e.result = resultShell('timed_out', 'bwrap', { kind: 'human_action', reason: 'timeout' }); e.executor = 'bwrap'; throw e; }
-    const out = resultShell(code.code === 0 ? 'succeeded' : 'failed', 'bwrap'); out.coverage.host_filesystem = 'minimal'; out.coverage.hidden_paths = hidden.length; out.coverage.stdout_truncated = outTr; out.coverage.stderr_truncated = errTr; out.coverage.requested = [`exec:${safeText(argv.join(' '), 200)}`]; out.coverage.completed = code.code === 0 ? out.coverage.requested.slice() : []; out.details = { exit_code: code.code, signal: code.signal || null, stdout: safeText(this.redactString(stdout.toString('utf8'))), stderr: safeText(this.redactString(stderr.toString('utf8'))) }; if (/EPERM|permission denied/i.test(out.details.stderr)) out.next = { kind: 'request_writable_root', reason: '沙箱内权限不足，只能扩一条明确可写根后重试。' }; return out;
+    const out = resultShell(code.code === 0 ? 'succeeded' : 'failed', 'bwrap'); out.coverage.host_filesystem = 'minimal'; out.coverage.hidden_paths = hidden.length; out.coverage.stdout_truncated = outTr; out.coverage.stderr_truncated = errTr; out.coverage.requested = [`exec:${safeText(argv.join(' '), 200)}`]; out.coverage.completed = code.code === 0 ? out.coverage.requested.slice() : []; const rawOut = this.redactString(stdout.toString('utf8')), rawErr = this.redactString(stderr.toString('utf8')); const rawCap = Number(this.policy.house.gateway?.output_max_bytes || 64 * 1024); out.details = { exit_code: code.code, signal: code.signal || null, stdout: safeText(rawOut), stderr: safeText(rawErr), stdout_raw: Buffer.from(rawOut).subarray(0, rawCap).toString('utf8'), stderr_raw: Buffer.from(rawErr).subarray(0, rawCap).toString('utf8'), stdout_raw_bytes: Buffer.byteLength(rawOut), stderr_raw_bytes: Buffer.byteLength(rawErr) }; if (/EPERM|permission denied/i.test(out.details.stderr)) out.next = { kind: 'request_writable_root', reason: '沙箱内权限不足，只能扩一条明确可写根后重试。' }; return out;
   }
   hiddenHostPaths(rootPaths, residentId, policy = this.policy) {
     const candidates = [path.join(this.houseDir, 'state'), path.join(this.houseDir, '.sameroof'), this.runDir, this.stateDir, this.serviceTokenFile, this.adapterTokensDir, '/var/lib/sameroof-gateway', '/var/lib/sameroof-broker', '/var/lib/sameroof-living-room', ...(this.options.sensitivePaths || [])];
@@ -577,12 +695,14 @@ class Gateway {
     return values.filter((item, index) => !values.slice(0, index).some(parent => parent.directory && item.path.startsWith(parent.path + path.sep)));
   }
   async deliverResult(row, approval, result) {
-    if (this.options.resultClient) return this.options.resultClient({ row, approval, result });
+    if (this.options.resultClient) { const r = result && result.details ? { ...result, details: { ...result.details } } : result; if (r && r.details) { delete r.details.stdout_raw; delete r.details.stderr_raw; delete r.details.stdout_raw_bytes; delete r.details.stderr_raw_bytes; } return this.options.resultClient({ row, approval, result: r }); }
     let token; try { const st = fs.statSync(this.serviceTokenFile); if ((st.mode & 0o077) !== 0) throw new Error('unsafe token mode'); token = fs.readFileSync(this.serviceTokenFile, 'utf8').trim(); } catch { throw new GatewayError(503, 'GW-RESULT-DELIVERY-FAILED', '客厅 service token 不可用。'); }
-    let payload = { request_id: row.request_id, approval_id: approval.approval_id, resident_id: row.resident_id, action: row.action, ...result, summary: result.summary || (result.status === 'succeeded' ? '动作已完成。' : '动作未完成。') };
+    const decision = approval ? { source: 'human', approval_id: approval.approval_id } : { source: 'policy_allow', policy_digest: row.policy_digest };
+    if (result && result.details) { result = { ...result, details: { ...result.details } }; delete result.details.stdout_raw; delete result.details.stderr_raw; delete result.details.stdout_raw_bytes; delete result.details.stderr_raw_bytes; }
+    let payload = { request_id: row.request_id, approval_id: approval ? approval.approval_id : null, decision, run_id: row.run_id || null, resident_id: row.resident_id, action: row.action, ...result, summary: result.summary || (result.status === 'succeeded' ? '动作已完成。' : '动作未完成。') };
     let body = JSON.stringify(payload);
     if (Buffer.byteLength(body) > 60 * 1024) {
-      payload = { request_id: row.request_id, approval_id: approval.approval_id, resident_id: row.resident_id, action: row.action, status: 'failed', summary: '结果超过客厅传输上限，已终止重试；请缩小请求。', error: { code: 'GW-RESULT-TOO-LARGE', message: '结果无法安全传输。' }, coverage: result.coverage, next: { kind: 'human_action', reason: '缩小结果后发起新的 intent。' } };
+      payload = { request_id: row.request_id, approval_id: approval ? approval.approval_id : null, decision, run_id: row.run_id || null, resident_id: row.resident_id, action: row.action, status: 'failed', summary: '结果超过客厅传输上限，已终止重试；请缩小请求。', error: { code: 'GW-RESULT-TOO-LARGE', message: '结果无法安全传输。' }, coverage: result.coverage, next: { kind: 'human_action', reason: '缩小结果后发起新的 intent。' } };
       body = JSON.stringify(payload);
     }
     const options = this.options.livingRoomSocketPath ? { socketPath: this.options.livingRoomSocketPath, path: '/internal/gateway/results', method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } } : { hostname: '127.0.0.1', port: this.options.livingRoomPort, path: '/internal/gateway/results', method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } };
@@ -601,6 +721,7 @@ class Gateway {
     this.state.db.prepare('UPDATE results SET message_id=?,delivered_at=?,result_json=? WHERE request_id=?').run(messageId || null, now(), JSON.stringify({ delivered: true }), requestId);
   }
   expirePending() {
+    try { this.sweepOutput(); } catch {}
     const expired = this.state.db.prepare("SELECT * FROM intents WHERE status='awaiting_approval' AND expires_at<=?").all(now());
     const update = this.state.db.prepare("UPDATE intents SET status='expired',updated_at=? WHERE request_id=? AND status='awaiting_approval'");
     for (const row of expired) if (update.run(now(), row.request_id).changes) this.state.audit('decided', { request_id: row.request_id, resident_id: row.resident_id, action: row.action, params_digest: row.params_digest, status: 'expired', details: { decision_source: 'timeout' } });
@@ -647,6 +768,8 @@ class Gateway {
       if (!req.url.startsWith('/v1/intents')) throw new GatewayError(404, 'GW-ROUTE-NOT-FOUND', '网关路由不存在。');
       const get = /^\/v1\/intents\/(req_[A-Za-z0-9_-]+)$/.exec(req.url);
       if (req.method === 'GET' && get) return json(res, 200, this.getIntent(get[1], bearer(req)));
+      const getOut = /^\/v1\/intents\/(req_[A-Za-z0-9_-]+)\/output$/.exec(req.url);
+      if (req.method === 'GET' && getOut) return json(res, 200, this.readOutput(getOut[1], bearer(req), req.headers['x-sameroof-run']));
       if (req.method !== 'POST' || req.url !== '/v1/intents') throw new GatewayError(404, 'GW-ROUTE-NOT-FOUND', '只开放 POST /v1/intents 与 GET /v1/intents/:id。');
       const body = await readJson(req);
       if (String(req.headers['idempotency-key'] || '') !== body.request_id) throw new GatewayError(400, 'GW-IDEMPOTENCY-CONFLICT', 'Idempotency-Key 必须等于 request_id。');
@@ -667,7 +790,7 @@ class Gateway {
     this.pollTimer = setInterval(tick, Math.max(250, intervalMs)); this.pollTimer.unref(); tick();
   }
   stopApprovalLoop() { if (this.pollTimer) clearInterval(this.pollTimer); this.pollTimer = null; }
-  close() { this.stopApprovalLoop(); return new Promise(resolve => { if (!this.server) { this.state.close(); return resolve(); } this.server.close(() => { try { const st = fs.statSync(this.socketPath); if (`${st.dev}:${st.ino}` === this.socketIdentity) fs.unlinkSync(this.socketPath); } catch {} this.state.close(); resolve(); }); }); }
+  async close() { this.stopApprovalLoop(); if (this._pendingPolicy && this._pendingPolicy.size) await Promise.race([Promise.allSettled([...this._pendingPolicy]), new Promise(r => setTimeout(r, 5000))]); return new Promise(resolve => { if (!this.server) { this.state.close(); return resolve(); } this.server.close(() => { try { const st = fs.statSync(this.socketPath); if (`${st.dev}:${st.ino}` === this.socketIdentity) fs.unlinkSync(this.socketPath); } catch {} this.state.close(); resolve(); }); }); }
 }
 
 function createGateway(options = {}) { return new Gateway(options); }
