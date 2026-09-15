@@ -26,6 +26,10 @@ jobs:
         run: npm ci
       - name: Install sandbox runtime (bubblewrap)
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Allow unprivileged user namespaces (Ubuntu 24.04 runners restrict them by default; bwrap --unshare-user needs this)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --unshare-user --unshare-net --ro-bind / / /bin/true && echo "bwrap userns OK" || (echo "bwrap userns still failing"; exit 1)
       - name: Hygiene — trailing whitespace / conflict markers
         # fetch-depth:2 above so HEAD~1 exists. Two checks:
         #  (1) this commit's own changes  (2) the whole tree at HEAD — catches anything that slipped in earlier.
