@@ -9,7 +9,7 @@ const { spawn } = require('node:child_process');
 const Database = require('better-sqlite3');
 const yaml = require('js-yaml');
 const jcs = require('@sameroof/jcs');
-const { validateHouse } = require('@sameroof/schema');
+const { validateHouse, PERMISSION_RANK } = require('@sameroof/schema');
 
 const MAX_BODY = 256 * 1024;
 const MAX_CONTENT = 1024 * 1024;
@@ -312,11 +312,20 @@ class Gateway {
     this.rooms = candidate.rooms; this.house = candidate.house; this.roomConfigs = candidate.roomConfigs;
     return candidate;
   }
-  ensurePermission(action, residentId, policy = this.policy) {
+  // Effective permission = min(rank(house ceiling), rank(room value)); a room can tighten, never widen.
+  // Unknown/missing ceiling → deny. Unknown room value → treated as deny (fail closed), audited by caller if desired.
+  // Returns 'approve' | 'allow'; throws for deny. (RFC 2026-09-15-gateway-allow §2.1)
+  effectivePermission(action, residentId, policy = this.policy) {
     const ceiling = policy.house.defaults?.permissions?.[action];
     const roomValue = policy.roomConfigs.get(residentId)?.permissions?.[action];
-    const effective = roomValue === undefined ? ceiling : roomValue;
-    if (!ceiling || ceiling === 'deny' || !effective || effective === 'deny') throw new GatewayError(403, 'GW-POLICY-DENIED', '动作未在 house/room 权限中开放。');
+    const rank = v => (v in PERMISSION_RANK ? PERMISSION_RANK[v] : PERMISSION_RANK.deny);
+    const eff = roomValue === undefined ? rank(ceiling) : Math.min(rank(ceiling), rank(roomValue));
+    return Object.keys(PERMISSION_RANK).find(k => PERMISSION_RANK[k] === eff) || 'deny';
+  }
+  ensurePermission(action, residentId, policy = this.policy) {
+    const effective = this.effectivePermission(action, residentId, policy);
+    if (effective === 'deny') throw new GatewayError(403, 'GW-POLICY-DENIED', '动作未在 house/room 权限中开放。');
+    return effective;
   }
   rootFor(residentId, rootId, policy = this.policy) {
     if (rootId === 'own-room') {

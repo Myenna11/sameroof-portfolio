@@ -336,4 +336,4 @@ function validateHouse(dir, options = {}) {
   return deduped.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.code.localeCompare(b.code));
 }
 
-module.exports = { normalizeName, validateCronExpression, resolveExecutionConfig, validateRoom, validateHouse, schemas: { room: roomSchema, house: houseSchema } };
+module.exports = { normalizeName, validateCronExpression, resolveExecutionConfig, validateRoom, validateHouse, PERMISSION_RANK, schemas: { room: roomSchema, house: houseSchema } };
