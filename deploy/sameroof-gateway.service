@@ -36,20 +36,22 @@ PrivateDevices=yes
 ProtectSystem=strict
 ProtectHome=yes
 ProtectClock=yes
-ProtectHostname=yes
-ProtectKernelTunables=yes
 ProtectKernelModules=yes
-ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectProc=invisible
-ProcSubset=pid
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native
 CapabilityBoundingSet=
 AmbientCapabilities=
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# bwrap needs three things this hardening would otherwise block (verified 2026-09-15 with the gateway's own probe):
+#  - a fresh proc mount inside the user namespace: ProtectKernelTunables / ProtectKernelLogs / ProtectHostname each
+#    over-mount parts of /proc, and the kernel then refuses a new proc mount in the child userns → GW-SANDBOX-UNAVAILABLE.
+#    Those three are therefore NOT set. ProcSubset=pid is also NOT set (bwrap reads /proc/sys/kernel/overflowuid).
+#    ProtectKernelModules, ProtectProc=invisible, ProtectControlGroups, PrivateDevices, CapabilityBoundingSet= stay.
+#  - AF_NETLINK: bwrap --unshare-net brings up loopback via NETLINK_ROUTE.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 # 房子的工作树在 /root/sameroof，ProtectHome 之下看不见；按路径绑进 /srv/sameroof，让 unit 里的 /srv/sameroof 路径照常成立。
 # 整棵树只读，只有 rooms/ 可写（own-room 能力）。
 BindReadOnlyPaths=/root/sameroof:/srv/sameroof
