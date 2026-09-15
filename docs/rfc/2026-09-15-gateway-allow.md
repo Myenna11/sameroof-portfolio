@@ -213,6 +213,14 @@ The broker's ledger and token quotas govern model calls; they do **not** decide 
 | 9cc49e1 | living-room policy result form; `request_id`/`run_id`/`decision` on result DM; `policy_result` activity; test |
 | 733641e | schema fields; `gateway-client.getIntent/readOutput`; socket-level test; `doctor` policy-allow summary; console badges |
 
-Matrix status: 1 ✓ 2 ✓ 3 ✓ 4 ✓ 5 ✓ 6 ✓ 7 ✓ 8 (existing lock-digest test) 9 ✓ 10 ✓ 11 (gateway-vouched; covered by 24) 12 ✓ 13 ✓ 14 ✓ 15 ✓ 16 ✓ 17 ✓ 18 ✓ 19 ✓ 20 ✓ 21 (redaction precedes storage; existing redact tests) 22 ✓ (via #1 timing) 23 **not written** (kill-between-claim-and-execute needs a process-level harness; `failed_unknown` recovery path is pre-existing and tested) 24 ✓ 25 ✓ (existing suites unchanged) 26 ✓ 27 ✓.
+Matrix status: 1 ✓ 2 ✓ 3 ✓ 4 ✓ 5 ✓ 6 ✓ 7 ✓ 8 (existing lock-digest test) 9 ✓ 10 ✓ 11 (gateway-vouched; covered by 24) 12 ✓ 13 ✓ 14 ✓ 15 ✓ 16 ✓ 17 ✓ 18 ✓ 19 ✓ 20 ✓ 21 (redaction precedes storage; existing redact tests) 22 ✓ (via #1 timing) **23 ✓** (`test/crash-recovery.test.js`: real gateway process via `test/_launch-gateway.js`, SIGKILL inside a test-only fault window between claim commit and sandbox spawn — `SAMEROOF_GATEWAY_FAULT_BEFORE_SPAWN`, no effect unless set; restart → `failed_unknown`, one recovery audit, one delivery, marker never created, a further restart neither re-recovers nor re-delivers) 24 ✓ 25 ✓ (existing suites unchanged) 26 ✓ 27 ✓.
 
 Known deviations from the text above: none intended. Reviewer should diff §2.3/§2.3b/§2.4/§2.6 against `packages/gateway/server.js` and `packages/living-room/server.js`.
+
+### 2026-09-15 code gate (审查员) — fixes
+
+| finding | fix | test |
+|---|---|---|
+| P1 retention cap extendable by later config; startup sweep ran before policy load and was swallowed | `intents.output_expires_at` / `output_max_reads` snapshotted at execution; `readOutput` / `sweepOutput` use `min(row promise, current policy)` — tighten only; startup sweep moved after `loadPolicyFiles`, before listen, result exposed as `startupSweep`, no empty catch | `policy-allow.test.js` "P1 retention": ttl 200ms/reads 2 → restart with ttl 1h/reads 10 → old rows 410 + `output_json` NULL at construction (no tick); new rows get new caps |
+| small: empty `X-Sameroof-Run` matched NULL `run_id` | `/output` only for rows with non-null `run_id`; header must be a non-empty string equal to it; else 404 | `policy-allow.test.js` "小修" |
+| #23 not written | see matrix status | `crash-recovery.test.js` |

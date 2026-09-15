@@ -98,6 +98,9 @@ class State {
     if (!intentColumns.includes('executed_at')) this.db.exec('ALTER TABLE intents ADD COLUMN executed_at TEXT');
     if (!intentColumns.includes('output_json')) this.db.exec('ALTER TABLE intents ADD COLUMN output_json TEXT');
     if (!intentColumns.includes('output_reads')) this.db.exec('ALTER TABLE intents ADD COLUMN output_reads INTEGER NOT NULL DEFAULT 0');
+    // Per-row snapshot of the retention promise made at execution time. Policy changes later may tighten, never extend.
+    if (!intentColumns.includes('output_expires_at')) this.db.exec('ALTER TABLE intents ADD COLUMN output_expires_at TEXT');
+    if (!intentColumns.includes('output_max_reads')) this.db.exec('ALTER TABLE intents ADD COLUMN output_max_reads INTEGER');
   }
   audit(event, item = {}) {
     this.db.prepare('INSERT INTO audit(ts,event,request_id,approval_id,resident_id,action,params_digest,target_digest,status,details_json) VALUES(?,?,?,?,?,?,?,?,?,?)')
@@ -230,7 +233,6 @@ class Gateway {
     this.state = new State(this.dbPath);
     const interrupted = this.state.db.prepare("SELECT request_id,resident_id,action,params_digest FROM intents WHERE status='executing'").all();
     this.state.db.prepare("UPDATE intents SET status='failed_unknown',updated_at=? WHERE status='executing'").run(now());
-    try { this.sweepOutput(); } catch {}
     for (const item of interrupted) {
       const result = resultShell('failed_unknown', 'none', { kind: 'human_action', reason: '网关上次执行中断，副作用未知；不会自动重放。' });
       result.error = { code: 'GW-FAILED-UNKNOWN', message: '执行结果未知，已禁止自动重放。' };
@@ -240,6 +242,8 @@ class Gateway {
     }
     this.policy = loadPolicyFiles(this.houseDir, null);
     this.rooms = this.policy.rooms; this.house = this.policy.house; this.roomConfigs = this.policy.roomConfigs;
+    // Startup physical clearing of retained outputs — AFTER policy is loaded, BEFORE we listen. Failure is a real error, not swallowed.
+    this.startupSweep = this.sweepOutput();
     this.server = null; this.listening = false;
     this.sandboxAvailable = false; this.probeVersion = null;
     this.probeSandbox();
@@ -503,13 +507,18 @@ class Gateway {
   readOutput(requestId, token, runHeader) {
     const residentId = this.tokenSubject(token); if (!residentId) throw new GatewayError(401, 'GW-AUTH-DENIED', '网关 token 无效。');
     const row = this.state.db.prepare('SELECT * FROM intents WHERE request_id=?').get(requestId);
-    // 404 for: missing, other resident, human-decided (not offered), run mismatch — no existence leak
-    if (!row || row.resident_id !== residentId || row.decision_source !== 'policy_allow' || String(runHeader || '') !== String(row.run_id || '')) throw new GatewayError(404, 'GW-OUTPUT-NOT-FOUND', '没有这条可读输出。');
+    // 404 for: missing, other resident, human-decided (not offered), NULL run_id (foreground policy intents have no output channel),
+    // missing/mismatched X-Sameroof-Run — no existence leak. The header is a required binding, so '' never matches.
+    if (!row || row.resident_id !== residentId || row.decision_source !== 'policy_allow' || !row.run_id || typeof runHeader !== 'string' || runHeader === '' || runHeader !== row.run_id) throw new GatewayError(404, 'GW-OUTPUT-NOT-FOUND', '没有这条可读输出。');
     if (row.status === 'executing') throw new GatewayError(409, 'GW-OUTPUT-NOT-READY', '还在执行。');
-    const ttlMs = Number(this.policy.house.gateway?.output_ttl_ms || 10 * 60 * 1000);
-    const maxReads = Number(this.policy.house.gateway?.output_max_reads || 3);
+    // Retention = the promise recorded on the row at execution time, tightened (never extended) by current policy.
+    const policyTtl = Number(this.policy.house.gateway?.output_ttl_ms || 10 * 60 * 1000);
+    const policyReads = Number(this.policy.house.gateway?.output_max_reads || 3);
+    const rowExpires = row.output_expires_at ? Date.parse(row.output_expires_at) : (row.executed_at ? Date.parse(row.executed_at) + policyTtl : 0);
+    const expiresAt = Math.min(rowExpires, row.executed_at ? Date.parse(row.executed_at) + policyTtl : rowExpires);
+    const maxReads = Math.min(Number.isFinite(row.output_max_reads) && row.output_max_reads !== null ? row.output_max_reads : policyReads, policyReads);
     const maxBytes = Number(this.policy.house.gateway?.output_max_bytes || 64 * 1024);
-    if (row.executed_at && Date.parse(row.executed_at) + ttlMs <= Date.now()) { this.clearOutput(requestId, 'expired'); throw new GatewayError(410, 'GW-OUTPUT-EXPIRED', '输出已过期。'); }
+    if (expiresAt <= Date.now()) { this.clearOutput(requestId, 'expired'); throw new GatewayError(410, 'GW-OUTPUT-EXPIRED', '输出已过期。'); }
     // atomic read-count increment: concurrent GETs cannot exceed maxReads
     const claimed = this.state.db.prepare('UPDATE intents SET output_reads=output_reads+1 WHERE request_id=? AND output_json IS NOT NULL AND output_reads<? RETURNING output_json, output_reads').get(requestId, maxReads);
     if (!claimed) throw new GatewayError(410, 'GW-OUTPUT-CONSUMED', '输出已读满或已清除。');
@@ -546,8 +555,9 @@ class Gateway {
   // physical clearing for rows nobody read (periodic sweep + startup)
   sweepOutput() {
     const ttlMs = Number(this.policy.house.gateway?.output_ttl_ms || 10 * 60 * 1000);
-    const cutoff = new Date(Date.now() - ttlMs).toISOString();
-    const rows = this.state.db.prepare('SELECT request_id FROM intents WHERE output_json IS NOT NULL AND executed_at IS NOT NULL AND executed_at<=?').all(cutoff);
+    const nowIso = now(), cutoff = new Date(Date.now() - ttlMs).toISOString();
+    // expired by the row's own recorded promise OR by current (possibly tighter) policy; reads exhausted by row cap
+    const rows = this.state.db.prepare("SELECT request_id FROM intents WHERE output_json IS NOT NULL AND (output_expires_at<=? OR (executed_at IS NOT NULL AND executed_at<=?) OR (output_max_reads IS NOT NULL AND output_reads>=output_max_reads))").all(nowIso, cutoff);
     for (const r of rows) this.clearOutput(r.request_id, 'expired');
     return rows.length;
   }
@@ -608,7 +618,9 @@ class Gateway {
     const executedAt = now();
     // /output (RFC §2.3b): the redacted FULL result is kept only for policy-allowed intents, only until ttl/reads (see readOutput/sweepOutput).
     const outputJson = row.decision_source === 'policy_allow' ? JSON.stringify(result) : null;
-    this.state.db.prepare('UPDATE intents SET status=?,result_json=?,output_json=?,executed_at=?,updated_at=? WHERE request_id=?').run(result.status, JSON.stringify(persisted), outputJson, executedAt, executedAt, requestId);
+    const capTtl = Number(this.policy.house.gateway?.output_ttl_ms || 10 * 60 * 1000), capReads = Number(this.policy.house.gateway?.output_max_reads || 3);
+    const outputExpires = outputJson ? new Date(Date.parse(executedAt) + capTtl).toISOString() : null;
+    this.state.db.prepare('UPDATE intents SET status=?,result_json=?,output_json=?,output_expires_at=?,output_max_reads=?,executed_at=?,updated_at=? WHERE request_id=?').run(result.status, JSON.stringify(persisted), outputJson, outputExpires, outputJson ? capReads : null, executedAt, executedAt, requestId);
     this.state.audit('executed', { request_id: requestId, approval_id: approval ? approval.approval_id : null, resident_id: row.resident_id, action: row.action, params_digest: row.params_digest, status: result.status, details: { coverage: result.coverage, next: result.next } });
     this.state.db.prepare('INSERT INTO results(request_id,result_json,created_at) VALUES(?,?,?) ON CONFLICT(request_id) DO UPDATE SET result_json=excluded.result_json').run(requestId, JSON.stringify(result), now());
     try { const delivery = await this.deliverResult(row, approval, result); this.markDelivered(requestId, delivery?.message_id); }
@@ -642,6 +654,10 @@ class Gateway {
     finally { if (fd !== undefined) try { fs.closeSync(fd); } catch {} t.close(); }
   }
   async execShell(residentId, p, policy = this.policy) {
+    if (process.env.SAMEROOF_GATEWAY_FAULT_BEFORE_SPAWN) {   // test-only fault injection window (matrix #23); no effect unless the env var is set
+      fs.writeFileSync(process.env.SAMEROOF_GATEWAY_FAULT_BEFORE_SPAWN, 'about-to-spawn\n');
+      await new Promise(r => setTimeout(r, 30000));
+    }
     if (!this.sandboxAvailable || !this.probeSandbox()) { const e = new GatewayError(503, 'GW-SANDBOX-UNAVAILABLE', 'bwrap 探针失败，拒绝执行。'); e.result = resultShell('denied', 'none', { kind: 'human_action', reason: 'sandbox_unavailable' }); e.result.coverage.sandbox = 'unavailable'; e.executor = 'none'; throw e; }
     const cwdRoot = this.rootFor(residentId, p.cwd.root_id, policy); const cwd = p.cwd.path ? this.safeTarget(cwdRoot, p.cwd.path, false, residentId, policy).target : cwdRoot.path; const argv = p.argv.slice();
     const roots = new Map([[cwdRoot.path, { ...cwdRoot, writable: false }]]);

@@ -186,3 +186,57 @@ test('#14 target digest differs between core.exec and core.exec.ro for the same 
     assert.notEqual(f.gateway.targetDigest('core.exec', p), f.gateway.targetDigest('core.exec.ro', p));
   } finally { await f.close(); }
 });
+
+// ---------- 审查员 gate P1: retention is a per-row promise; a later, looser policy cannot extend it; startup sweep runs without a tick ----------
+test('P1 retention: create under ttl=200ms/reads=2, restart with ttl=1h/reads=10 → old row still 410 and cleared at startup (no poll tick)', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sameroof-ret-'));
+  fs.mkdirSync(path.join(root, 'rooms', '甲'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'rooms', '甲', 'room.yaml'), 'schema_version: 1\nid: resident_alpha_01\nname: 甲\nspecies: human\n');
+  fs.writeFileSync(path.join(root, 'rooms', '甲', 'hay.txt'), 'x\n');
+  const perms = { 'core.fs.read': 'allow', 'core.fs.write': 'approve', 'core.exec': 'approve', 'core.exec.ro': 'approve' };
+  fs.writeFileSync(path.join(root, 'house.yaml'), HOUSE(perms, 'gateway: {output_ttl_ms: 200, output_max_reads: 2}'));
+  const mk = () => createGateway({ houseDir: root, runDir: path.join(root, 'run'), stateDir: path.join(root, 'state'), lockRequired: false, resultClient: async () => ({ message_id: 'm' }) });
+  let gw = mk(); const token = gw.issueAdapterToken('resident_alpha_01').token;
+  try {
+    gw.registerIntent(readIntent(30), token);
+    await until(() => gw.getIntent('req_read000030', token).state !== 'executing');
+    const row = gw.state.db.prepare('SELECT output_expires_at, output_max_reads FROM intents WHERE request_id=?').get('req_read000030');
+    assert.equal(row.output_max_reads, 2, 'cap snapshotted on the row');
+    assert.ok(Date.parse(row.output_expires_at) - Date.now() <= 250, 'expiry snapshotted on the row');
+    // one read ok, second ok, third 410 under the row cap
+    gw.readOutput('req_read000030', token, 'sub_abc123'); gw.readOutput('req_read000030', token, 'sub_abc123');
+    assert.throws(() => gw.readOutput('req_read000030', token, 'sub_abc123'), e => e.code === 'GW-OUTPUT-CONSUMED');
+    // second row: unread, will expire
+    gw.registerIntent(readIntent(31), token);
+    await until(() => gw.getIntent('req_read000031', token).state !== 'executing');
+    await gw.close();
+    await new Promise(r => setTimeout(r, 250));
+    // loosen policy and restart
+    fs.writeFileSync(path.join(root, 'house.yaml'), HOUSE(perms, 'gateway: {output_ttl_ms: 3600000, output_max_reads: 10}'));
+    gw = mk();
+    assert.ok(gw.startupSweep >= 1, 'startup sweep ran (no listen, no tick) and cleared ≥1 row');
+    assert.equal(gw.state.db.prepare('SELECT output_json FROM intents WHERE request_id=?').get('req_read000031').output_json, null, 'expired row physically cleared at startup despite looser new ttl');
+    assert.throws(() => gw.readOutput('req_read000031', token, 'sub_abc123'), e => /GW-OUTPUT-(EXPIRED|CONSUMED)/.test(e.code));
+    assert.throws(() => gw.readOutput('req_read000030', token, 'sub_abc123'), e => /GW-OUTPUT-(EXPIRED|CONSUMED)/.test(e.code), 'reads cap not extended by new reads=10');
+    // a NEW row under the new policy gets the new caps
+    gw.registerIntent(readIntent(32), token);
+    await until(() => gw.getIntent('req_read000032', token).state !== 'executing');
+    assert.equal(gw.state.db.prepare('SELECT output_max_reads FROM intents WHERE request_id=?').get('req_read000032').output_max_reads, 10);
+  } finally { await gw.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('小修: policy-allow intent with NULL run_id has no /output; missing header never matches', async () => {
+  const f = fixture({ 'core.fs.read': 'allow', 'core.fs.write': 'approve', 'core.exec': 'approve', 'core.exec.ro': 'approve' });
+  try {
+    f.gateway.registerIntent(readIntent(40, { run_id: undefined }), f.token);
+    await until(() => f.gateway.getIntent('req_read000040', f.token).state !== 'executing');
+    assert.equal(f.gateway.state.db.prepare('SELECT run_id FROM intents WHERE request_id=?').get('req_read000040').run_id, null);
+    assert.throws(() => f.gateway.readOutput('req_read000040', f.token, undefined), e => e.code === 'GW-OUTPUT-NOT-FOUND', 'no header + null run → 404');
+    assert.throws(() => f.gateway.readOutput('req_read000040', f.token, ''), e => e.code === 'GW-OUTPUT-NOT-FOUND', 'empty header + null run → 404');
+    // and a real subrun row still refuses a missing header
+    f.gateway.registerIntent(readIntent(41), f.token);
+    await until(() => f.gateway.getIntent('req_read000041', f.token).state !== 'executing');
+    assert.throws(() => f.gateway.readOutput('req_read000041', f.token, undefined), e => e.code === 'GW-OUTPUT-NOT-FOUND');
+    assert.equal(f.gateway.readOutput('req_read000041', f.token, 'sub_abc123').request_id, 'req_read000041');
+  } finally { await f.close(); }
+});
