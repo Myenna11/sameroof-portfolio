@@ -2,9 +2,10 @@
 // 同屋 · 适配器 · pi：runtime_managed——凭证由 pi 自己保管（/login 走 OAuth），房子只喂话、收话。
 // 用 pi -p 无头模式：SOUL 当系统提示，关掉全部工具（客厅只搬字），不存会话（记忆归房间不归 pi）。
 'use strict';
+const ROOM = process.argv[2];
+if (!ROOM) { console.error('usage: node adapter.js <room-name>   (sameroof serve passes this for you)'); process.exit(2); }
 const { spawn } = require('child_process');
 const { open, run } = require('../lib/room');
-const ROOM = process.argv[2] || '实现员';
 const R = open(ROOM);
 const model = `${R.room.model.provider}/${R.room.model.id}`;
 function think(system, user, signal) {

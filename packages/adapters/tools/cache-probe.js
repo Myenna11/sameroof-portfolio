@@ -7,7 +7,8 @@
 'use strict';
 const fs = require('fs'), path = require('path'), http = require('http');
 const { open, RUN, HOUSE } = require('../lib/room');
-const args = process.argv.slice(2); const ROOM = args.find(a => !a.startsWith('--')) || '检索员';
+const args = process.argv.slice(2); const ROOM = args.find(a => !a.startsWith('--'));
+if (!ROOM) { console.error('usage: node cache-probe.js <room-name> [--flags]'); process.exit(2); }
 const opt = (k, d) => { const i = args.indexOf('--' + k); return i >= 0 ? args[i + 1] : d; };
 const sizes = String(opt('sizes', '2500,6000')).split(',').map(Number);
 const gaps = String(opt('gaps', '30,120,240,360,480,600,900')).split(',').map(Number);

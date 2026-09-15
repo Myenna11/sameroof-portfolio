@@ -3,11 +3,12 @@
 // V2-W8：一班内用 --resume 接同一个 session。session 生命周期在 shift 层管。
 // 队列/车道/看门狗/例行/黑板全在 room.js。
 'use strict';
+const ROOM = process.argv[2];
+if (!ROOM) { console.error('usage: node adapter.js <room-name>   (sameroof serve passes this for you)'); process.exit(2); }
 const { spawn } = require('child_process');
 const path = require('path');
 const { open, run, HOUSE } = require('../lib/room');
 const { createSessionShift } = require('../lib/shift-messages');
-const ROOM = process.argv[2] || '规划员';
 const R = open(ROOM);
 
 const shift = createSessionShift(path.join(HOUSE, 'state', `cc-session-${R.room.id}.json`));

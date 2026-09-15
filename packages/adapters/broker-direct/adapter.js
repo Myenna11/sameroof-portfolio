@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // 同屋 · 适配器 · broker-direct：不夹 CLI，直接经 Unix socket 调凭证 broker 的 OpenAI 兼容接口。住户拿不到任何真 key。
 'use strict';
+const ROOM = process.argv[2];
+if (!ROOM) { console.error('usage: node adapter.js <room-name>   (sameroof serve passes this for you)'); process.exit(2); }
 const fs = require('fs'), path = require('path'), http = require('http');
 const { open, run, RUN, HOUSE } = require('../lib/room');
 const { wrapThink, createPersistentShift, COMPACT_PROMPT } = require('../lib/shift-messages');
-const ROOM = process.argv[2] || '检索员';
 const R = open(ROOM);
 const tokenPath = path.join(RUN, 'tokens', R.room.id);
 if (!fs.existsSync(tokenPath)) { console.error(`${ROOM} 没有 broker token：${tokenPath}。让户主签一个：sameroof-broker token issue ${R.room.id} ...`); process.exit(2); }
