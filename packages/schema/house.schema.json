@@ -3,38 +3,97 @@
   "$id": "https://sameroof.local/schema/house-v1.json",
   "title": "Same Roof house.yaml v1",
   "type": "object",
-  "required": ["schema_version", "name", "timezone", "defaults", "credentials", "notify"],
+  "required": [
+    "schema_version",
+    "name",
+    "timezone",
+    "defaults",
+    "credentials",
+    "notify"
+  ],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "const": 1 },
-    "name": { "type": "string", "minLength": 1, "maxLength": 120 },
-    "timezone": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "schema_version": {
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "timezone": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+    },
     "schedule": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "quiet_hours": { "type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]-(?:[01][0-9]|2[0-3]):[0-5][0-9]$" }
+        "quiet_hours": {
+          "type": "string",
+          "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]-(?:[01][0-9]|2[0-3]):[0-5][0-9]$"
+        }
       }
     },
     "defaults": {
       "type": "object",
-      "required": ["runtime", "plugins", "heartbeat", "context", "approve_timeout", "permissions"],
+      "required": [
+        "runtime",
+        "plugins",
+        "heartbeat",
+        "context",
+        "approve_timeout",
+        "permissions"
+      ],
       "additionalProperties": false,
       "properties": {
-        "runtime": { "type": "string", "minLength": 1 },
-        "plugins": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
-        "heartbeat": { "$ref": "https://sameroof.local/schema/room-v1.json#/$defs/heartbeat" },
+        "runtime": {
+          "type": "string",
+          "minLength": 1
+        },
+        "plugins": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "heartbeat": {
+          "$ref": "https://sameroof.local/schema/room-v1.json#/$defs/heartbeat"
+        },
         "context": {
           "$ref": "https://sameroof.local/schema/room-v1.json#/$defs/context",
-          "required": ["recent_messages", "recent_max_chars", "memory_hits", "memory_recent"]
+          "required": [
+            "recent_messages",
+            "recent_max_chars",
+            "memory_hits",
+            "memory_recent"
+          ]
         },
-        "deliver": { "$ref": "https://sameroof.local/schema/room-v1.json#/$defs/deliver" },
-        "limits": { "$ref": "https://sameroof.local/schema/room-v1.json#/$defs/limits" },
-        "approve_timeout": { "type": "string", "pattern": "^[1-9][0-9]*(?:s|m|h|d)$" },
+        "deliver": {
+          "$ref": "https://sameroof.local/schema/room-v1.json#/$defs/deliver"
+        },
+        "limits": {
+          "$ref": "https://sameroof.local/schema/room-v1.json#/$defs/limits"
+        },
+        "approve_timeout": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(?:s|m|h|d)$"
+        },
         "permissions": {
           "type": "object",
-          "propertyNames": { "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)+$" },
-          "additionalProperties": { "enum": ["allow", "approve", "deny"] }
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)+$"
+          },
+          "additionalProperties": {
+            "enum": [
+              "allow",
+              "approve",
+              "deny"
+            ]
+          }
         }
       }
     },
@@ -42,23 +101,55 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["alias", "provider", "purpose"],
+        "required": [
+          "alias",
+          "provider",
+          "purpose"
+        ],
         "additionalProperties": false,
         "properties": {
-          "alias": { "type": "string", "minLength": 1, "maxLength": 120 },
-          "provider": { "type": "string", "minLength": 1, "maxLength": 120 },
-          "mode": { "enum": ["broker", "runtime_managed"], "default": "broker" },
-          "purpose": { "type": "string", "minLength": 1, "maxLength": 500 }
+          "alias": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "provider": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "mode": {
+            "enum": [
+              "broker",
+              "runtime_managed"
+            ],
+            "default": "broker"
+          },
+          "purpose": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
         }
       }
     },
     "notify": {
       "type": "object",
-      "required": ["admin"],
+      "required": [
+        "admin"
+      ],
       "additionalProperties": false,
-      "properties": { "admin": { "type": "string", "minLength": 1, "maxLength": 80 } }
+      "properties": {
+        "admin": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        }
+      }
     },
-    "routines": { "$ref": "https://sameroof.local/schema/room-v1.json#/$defs/routines" },
+    "routines": {
+      "$ref": "https://sameroof.local/schema/room-v1.json#/$defs/routines"
+    },
     "gateway": {
       "type": "object",
       "additionalProperties": false,
@@ -68,25 +159,74 @@
           "maxItems": 128,
           "items": {
             "type": "object",
-            "required": ["id", "path", "residents"],
+            "required": [
+              "id",
+              "path",
+              "residents"
+            ],
             "additionalProperties": false,
             "properties": {
-              "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
-              "path": { "type": "string", "pattern": "^/", "minLength": 2, "maxLength": 4096 },
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+              },
+              "path": {
+                "type": "string",
+                "pattern": "^/",
+                "minLength": 2,
+                "maxLength": 4096
+              },
               "residents": {
                 "type": "object",
                 "minProperties": 1,
-                "propertyNames": { "pattern": "^resident_[a-z0-9][a-z0-9_-]{2,95}$" },
-                "additionalProperties": { "enum": ["read-only", "read-write"] }
+                "propertyNames": {
+                  "pattern": "^resident_[a-z0-9][a-z0-9_-]{2,95}$"
+                },
+                "additionalProperties": {
+                  "enum": [
+                    "read-only",
+                    "read-write"
+                  ]
+                }
               }
             }
           }
+        },
+        "allow_rate": {
+          "type": "object",
+          "description": "RFC 2026-09-15-gateway-allow §2.6: per-resident per-action requests/min for policy-allowed actions",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 6000
+          },
+          "propertyNames": {
+            "pattern": "^core\\.[a-z_.]+$"
+          }
+        },
+        "output_max_bytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 1048576,
+          "description": "RFC §2.3b: whole-response cap for GET /v1/intents/:id/output"
+        },
+        "output_max_reads": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "output_ttl_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 86400000
         }
       }
     },
     "extensions": {
       "type": "object",
-      "propertyNames": { "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z][a-z0-9-]*){2,}$" },
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z][a-z0-9-]*){2,}$"
+      },
       "additionalProperties": {}
     }
   }

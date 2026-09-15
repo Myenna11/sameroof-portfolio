@@ -532,8 +532,8 @@ const app = {
       html = `<div class="fold" id="msg-${m.id}">
         <div class="fold-header" data-fold>
           <span class="fold-icon">▶</span>
-          <span class="fold-label">Gateway result → <b>${this.esc(to?.name || '?')}</b></span>
-          <span class="fold-badge result">result</span>
+          <span class="fold-label">Gateway result → <b>${this.esc(to?.name || '?')}</b>${m.meta?.action ? ' · <code>' + this.esc(m.meta.action) + '</code>' : ''}${m.meta?.run_id && /^sub_/.test(m.meta.run_id) ? ' · <span class="fold-badge dm">subrun</span>' : ''}</span>
+          <span class="fold-badge result">${m.meta?.decision?.source === 'policy_allow' ? 'policy' : 'result'}</span>
           <span class="msg-time">${time}</span>
         </div>
         <div class="fold-body">${this.fmt(m.text)}</div>

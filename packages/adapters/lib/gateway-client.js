@@ -81,4 +81,24 @@ async function registerIntent({ residentId, runId, action, params, ttl = 1800, r
 
 // 网关此刻能不能用：socket 在、这位住户的 token 文件在。只用来决定提示里让不让住户写 APPROVAL，真正的 fail closed 在 registerIntent。
 function available(residentId) { try { return fs.existsSync(socketPath()) && fs.existsSync(tokenFile(residentId)); } catch { return false; } }
-module.exports = { registerIntent, parseApprovalLine, readToken, newRequestId, GatewayUnavailable, socketPath, tokenFile, available };
+// GET /v1/intents/:id (state) and GET /v1/intents/:id/output (RFC §2.3b). Both reject on transport failure; HTTP errors resolve with {status, error}.
+function getJson(residentId, pathname, extraHeaders = {}, timeoutMs = 5000) {
+  const token = readToken(residentId);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (message, extra) => { if (settled) return; settled = true; reject(new GatewayUnavailable(message, extra)); };
+    const req = http.request({ socketPath: socketPath(), path: pathname, method: 'GET', timeout: timeoutMs, headers: { authorization: `Bearer ${token}`, ...extraHeaders } }, res => {
+      const chunks = []; let size = 0;
+      res.on('data', c => { size += c.length; if (size <= RESPONSE_MAX) chunks.push(c); });
+      res.on('end', () => { if (settled) return; settled = true; let body; try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { body = null; }
+        if (res.statusCode >= 200 && res.statusCode < 300 && body) return resolve({ status: res.statusCode, body });
+        resolve({ status: res.statusCode, error: (body && body.error) || { code: 'GW-HTTP-' + res.statusCode } }); });
+    });
+    req.on('timeout', () => { req.destroy(); fail('网关响应超时', { code: 'GATEWAY-TIMEOUT' }); });
+    req.on('error', e => fail('网关不可达：' + e.message, { code: 'GATEWAY-UNAVAILABLE' }));
+    req.end();
+  });
+}
+function getIntent(residentId, requestId, opts = {}) { return getJson(residentId, '/v1/intents/' + encodeURIComponent(requestId), {}, opts.timeoutMs); }
+function readOutput(residentId, requestId, runId, opts = {}) { return getJson(residentId, '/v1/intents/' + encodeURIComponent(requestId) + '/output', { 'x-sameroof-run': runId || '' }, opts.timeoutMs); }
+module.exports = { registerIntent, getIntent, readOutput, parseApprovalLine, readToken, newRequestId, GatewayUnavailable, socketPath, tokenFile, available };

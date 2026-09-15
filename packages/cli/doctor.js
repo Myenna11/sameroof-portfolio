@@ -52,8 +52,35 @@ function inspectLostMessages(options = {}, clock = Date.now()) {
   return { ok: suspects.length === 0, threshold_minutes: minutes, cutoff, queued_checked: queued.length, suspects, bad_run_lines: badLines };
 }
 
+// RFC 2026-09-15-gateway-allow §2.7: policy-allowed / rate-limited counts per resident for the last N days, from the gateway audit.
+// Read-only; opens the gateway DB directly (same host). Silently absent if the DB isn't reachable (different user / not deployed).
+function inspectPolicyAllow(options = {}, clock = Date.now()) {
+  const root = rootFrom(options);
+  const dbPath = options.gatewayDb || process.env.SAMEROOF_GATEWAY_DB || path.join(root, 'state', 'gateway.db');
+  const days = Number(options.days || 1);
+  const out = { db: dbPath, available: false, days, per_resident: {} };
+  let Database; try { Database = require('better-sqlite3'); } catch { return out; }
+  if (!fs.existsSync(dbPath)) return out;
+  let db; try { db = new Database(dbPath, { readonly: true, fileMustExist: true }); } catch { return out; }
+  try {
+    const since = new Date(clock - days * 86400000).toISOString();
+    const rows = db.prepare("SELECT event, resident_id, action, details_json FROM audit WHERE ts>=? AND event IN ('decided','rate_limited','output_read')").all(since);
+    for (const r of rows) {
+      let det = {}; try { det = JSON.parse(r.details_json || '{}'); } catch {}
+      const rid = r.resident_id || '(none)';
+      const p = out.per_resident[rid] = out.per_resident[rid] || { policy_allowed: 0, rate_limited: 0, output_reads: 0, actions: {} };
+      if (r.event === 'decided' && det.decision_source === 'policy_allow') { p.policy_allowed++; p.actions[r.action] = (p.actions[r.action] || 0) + 1; }
+      else if (r.event === 'rate_limited') p.rate_limited++;
+      else if (r.event === 'output_read') p.output_reads++;
+    }
+    out.available = true;
+  } finally { try { db.close(); } catch {} }
+  return out;
+}
+
 function runDoctor(options = {}, io = console) {
   const report = inspectLostMessages(options);
+  report.policy_allow = inspectPolicyAllow(options);
   if (options.json) io.log(JSON.stringify(report, null, 2));
   else {
     if (!report.suspects.length) io.log(`✓ 丢消息检查通过：没有排队超过 ${report.threshold_minutes} 分钟且从未进入目标住户 heard 的投递。`);
@@ -62,8 +89,14 @@ function runDoctor(options = {}, io = console) {
       for (const item of report.suspects) io.log(`  ${item.resident_id}  ${item.message_id}  ${item.queued_minutes} 分钟`);
     }
     if (report.bad_run_lines.length) io.log(`! ${report.bad_run_lines.length} 行 run JSON 损坏，结果可能不完整。`);
+    const pa = report.policy_allow;
+    if (pa.available) {
+      const ids = Object.keys(pa.per_resident);
+      if (!ids.length) io.log(`· 最近 ${pa.days} 天没有政策放行的网关动作。`);
+      else { io.log(`· 最近 ${pa.days} 天政策放行（不经人点击）的网关动作：`); for (const id of ids) { const p = pa.per_resident[id]; io.log(`  ${id}  放行 ${p.policy_allowed}${Object.keys(p.actions).length ? '（' + Object.entries(p.actions).map(([a, n]) => a + '×' + n).join('，') + '）' : ''}  限流拒绝 ${p.rate_limited}  输出读取 ${p.output_reads}`); } }
+    }
   }
   return report;
 }
 
-module.exports = { DoctorError, inspectLostMessages, runDoctor, heardPairs };
+module.exports = { DoctorError, inspectLostMessages, inspectPolicyAllow, runDoctor, heardPairs };

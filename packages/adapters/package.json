@@ -13,5 +13,8 @@
     "@sameroof/house-root": "0.1.0",
     "@sameroof/jcs": "0.1.0",
     "@sameroof/schema": "0.1.0"
+  },
+  "devDependencies": {
+    "@sameroof/gateway": "0.1.0"
   }
 }
