@@ -2,7 +2,7 @@
 
 - Author: 规划员
 - Date: 2026-09-15
-- Status: **proposed, rev 2** after `docs/reviews/2026-09-15-reviewer-subagents-v3-rfc-review.md` — prerequisite for `docs/design/subagents.md` v4, ships on its own
+- Status: **proposed, rev 3** (CONDITIONAL ARCHITECTURE PASS at rev 2; contracts A/B fixed here) after `docs/reviews/2026-09-15-reviewer-subagents-v3-rfc-review.md` — prerequisite for `docs/design/subagents.md` v4, ships on its own
 - Authorisation note: the 维护者 line below is 规划员's record of a conversation on 2026-09-15. It is not an implementation instruction to anyone; the release gate re-confirms the concrete policy lines, read-only roots and deployment target with 维护者 before `house.yaml` changes.
 - Reviewer: 审查员
 - Authorisation on record: 维护者, 2026-09-15 — subagents may run in a read-only sandbox (no writable mounts, no network) without approval; file writes and writable exec stay `approve`. The 2026-09-08 `core.fs.read: approve` line was a fix for a prompt/policy contradiction (read was missing → deny, prompt said "you can read"); the value `approve` was the implementer's choice, not a strictness decision.
@@ -58,20 +58,25 @@ core.exec:      approve
 core.fs.write:  approve
 ```
 
-### 2.3 Gateway: the `allow` path
+### 2.3 Gateway: the `allow` path — contract A (execution split + register timing)
 
-In `registerIntent`, after the existing validation (params, roots, digests, policy snapshot):
+`execute(requestId, approval)` (`server.js:450-467`) requires `status = awaiting_approval` and a valid single-use approval before it atomically moves the row to `executing`. A policy intent inserted as `executing` cannot enter it. So `execute` is split into three functions; the approval path keeps its behaviour byte-for-byte:
 
-1. `effective === 'allow'` → insert the intent with `status: executing` directly (skip `awaiting_approval`), write an **audit row of kind `decided`** with:
-   ```
-   decision_source: 'policy_allow'
-   approval_id:     null
-   decided_by:      'policy'
-   policy_digest:   <the snapshot digest already stored on the intent>
-   ```
-   then run the existing `execute()` body.
-2. Everything downstream (`deliverResult`, result JSON, coverage, truncation) is unchanged **except** the payload now carries `decision: { source: 'policy_allow', policy_digest }` instead of `approval_id`, and always carries `run_id` (§2.5).
-3. The `x-sameroof-*` / bearer handling is unchanged: the token still identifies the resident; the resident ceiling still applies.
+| function | does |
+|---|---|
+| `claimHumanApproved(requestId, approval)` | today's `execute` head: load row, require `awaiting_approval`, validate the approval, atomic `→ executing`, audit `decided(human)` |
+| `claimPolicyAllowed(body, token, policy)` | called from `registerIntent` when effective is `allow`: rate-limit check (§2.6, before insert), then **one transaction**: insert the row with `status = executing`, `decision_source = 'policy_allow'`, `policy_digest`, `run_id`; audit `decided(policy_allow, decided_by='policy')` |
+| `executeClaimed(row)` | today's `execute` body from the sandbox call onward: run, redact, strip for `intents.result_json`, write `output_json` (§2.3b, policy path only), enqueue `results`, audit `executed`, `deliverResult` |
+
+**`decision_source` is a column on `intents`** (`'human' | 'policy_allow'`), not an audit-only fact; `/output` and `doctor` read it from the row.
+
+**Register response timing:** `registerIntent` returns as soon as `claimPolicyAllowed` commits — response `{ request_id, state: 'executing', decision: { source: 'policy_allow' } }` — and schedules `executeClaimed(row)` on the gateway's existing executor queue. It does **not** await execution (a `core.exec.ro` may run for minutes; the adapter client has a 5 s timeout; synchronous execution was rejected in §2.3b). Consequences, stated so the implementer doesn't guess:
+
+- The caller polls `getIntent` for a terminal state, then reads `/output`.
+- **Gateway restart with a policy row still `executing`**: the existing recovery path marks it `failed_unknown` (never replayed). `getIntent` shows that; the subrun loop treats it like any failure (`output_unavailable: failed_unknown`). Test: kill the gateway between claim and execute; on restart the row is `failed_unknown`, no second execution, audit row `recovered`.
+- Idempotent re-register: the comparison at `:425-429` (resident, action, params digest) gains **`run_id` and `decision_source`**. Same `request_id` with a different `run_id` → `409 GW-IDEMPOTENCY-CONFLICT`. `/output` binds on `run_id`, so it must be part of the identity.
+
+The `x-sameroof-*` / bearer handling is unchanged: the token still identifies the resident; the resident ceiling still applies.
 
 `allow` never bypasses: sandbox probe (`GW-SANDBOX-UNAVAILABLE` still fails closed), root/mount checks, policy-digest match, per-resident rate limit (§2.6).
 
@@ -83,12 +88,12 @@ A subrun therefore needs a **separate, bounded, single-consumer output channel**
 
 | rule | value |
 |---|---|
-| auth | resident bearer token; `intents.resident_id` must equal the token's resident **and** the request must carry `X-Sameroof-Run: <run_id>` equal to `intents.run_id` |
-| availability | only for intents whose `decision_source = policy_allow` (human-approved results already flow to the resident's inbox via the living room; no second channel for those) |
+| auth | resident bearer token is the **only** authentication; `intents.resident_id` must equal the token's resident. `X-Sameroof-Run: <run_id>` is a required **binding** field (must equal `intents.run_id`) so a foreground wake cannot accidentally consume a subrun's output; it is not a secret |
+| availability | only for rows with `intents.decision_source = 'policy_allow'` (human-approved results already flow to the resident's inbox via the living room; no second channel for those) |
 | content | the **redacted** full result (`redactValue` has already run), i.e. what the living room would have delivered — nothing more |
-| size | `stdout`/`stderr`/`content` each capped at `house.gateway.output_max_bytes` (default 64 KiB); when truncated, `truncated: true` and `total_bytes` are set so the caller can never mistake a cut list for a complete one |
-| reads | at most `output_max_reads` (default 3) per intent, counted and audited; after that `410 GW-OUTPUT-CONSUMED` |
-| retention | `output_ttl` (default 10 min) after `execute()`; then `410 GW-OUTPUT-EXPIRED`; the stripped `intents.result_json` remains forever as today |
+| size | the **whole serialised response** capped at `house.gateway.output_max_bytes` (default 64 KiB), applied as: cap each of `stdout`/`stderr`/`content` proportionally, then verify the JSON length; when any field is cut, `truncated: true` and per-field `total_bytes` are set so the caller can never mistake a cut list for a complete one |
+| reads | at most `output_max_reads` (default 3) per intent — a **crash-retry margin**, not "single-consumer"; the counter increments in the same SQLite transaction that returns the row (`UPDATE … SET output_reads = output_reads + 1 WHERE request_id = ? AND output_reads < ? RETURNING …`), so concurrent GETs cannot exceed the cap; audited; after that `410 GW-OUTPUT-CONSUMED` |
+| retention | `output_ttl` (default 10 min) after `executed_at`; then `410 GW-OUTPUT-EXPIRED`. **Physical clearing**: `output_json` is set to NULL (a) on the read that reaches the cap, (b) by the existing periodic sweep (`expireStale`) for rows past ttl, (c) at startup for any row past ttl. Rows nobody ever reads are still cleared by (b)/(c). The stripped `intents.result_json` remains as today |
 | audit | each read: `output_read` row with `request_id`, `run_id`, bytes, remaining reads |
 | state before terminal | `409 GW-OUTPUT-NOT-READY` while `executing`; the caller polls `getIntent` for state, then reads output once |
 
@@ -166,6 +171,12 @@ The broker's ledger and token quotas govern model calls; they do **not** decide 
 | 19 | `/output` while `executing` | 409 |
 | 20 | `/output` on 200-line stdout with 4 KiB cap | `truncated: true`, `total_bytes` set |
 | 21 | secret-looking value in stdout | absent from `/output` (redaction precedes storage) |
+| 22 | register `allow` → response `executing` within client timeout while a 20 s `sleep` runs in bwrap | 200 immediately; `getIntent` → `executing`; later `complete` |
+| 23 | kill gateway between claim and execute; restart | row `failed_unknown`, audit `recovered`, sandbox ran **zero** times (marker file absent) |
+| 24 | re-register same `request_id` with different `run_id` | 409 GW-IDEMPOTENCY-CONFLICT |
+| 25 | approval path regression: `claimHumanApproved` + `executeClaimed` == old `execute` (existing gateway tests unchanged) | all pass |
+| 26 | three concurrent `/output` GETs on cap 3, then a fourth | exactly three 200s, one 410; `output_json` NULL after |
+| 27 | row past ttl never read; sweep runs | `output_json` NULL |
 
 ## 4. What this does not change
 
@@ -177,14 +188,14 @@ The broker's ledger and token quotas govern model calls; they do **not** decide 
 | piece | estimate |
 |---|---|
 | gateway `ensurePermission` min-rank + schema regression test + tests 2-4 | 0.25 d |
-| `/v1/intents/:id/output`: column, route, caps, reads, ttl, audit + tests 15-21 | 0.75 d |
+| `/v1/intents/:id/output`: column, route, total cap, atomic reads, ttl + physical clear (read/sweep/startup), audit + tests 15-21, 26-27 | 1 d |
 | `core.exec.ro` action + digest + tests 5-6 | 0.5 d |
-| gateway `allow` path + audit + `run_id` in payload + tests 1, 7, 8, 11, 14 | 0.5 d |
+| split `execute` → claim/claim/executeClaimed; `decision_source` column; idempotency incl. `run_id`; register returns `executing` + queue; restart → `failed_unknown`; tests 1, 7, 8, 11, 14, 22-25 | 1 d |
 | living-room result contract (policy path, self-describing record, no digest gate, stale annotation, idempotency) + tests 9-10, 13 | 0.5 d |
 | rate limit before insert + test 12 | 0.25 d |
 | console decision-source label, doctor counter | 0.25 d |
 
-**3 days.** Then gate. The subagent design (v3) starts only after this lands.
+**3.75 days.** Then gate. The subagent design (v3) starts only after this lands.
 
 ## 6. Questions for 审查员
 
