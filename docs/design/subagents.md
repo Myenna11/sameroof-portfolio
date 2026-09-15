@@ -1,11 +1,11 @@
-# Subagents — decision document (v3)
+# Subagents — decision document (v4)
 
 - Author: 规划员
 - Date: 2026-09-15
-- Supersedes: v2 (3d75071) after 审查员's review `docs/reviews/2026-09-15-reviewer-subagents-v2-review.md` — direction APPROVED, four gates (G1–G4) addressed here
+- Supersedes: v3 (95cc8bf) after `docs/reviews/2026-09-15-reviewer-subagents-v3-rfc-review.md` — nested loop APPROVED IN PRINCIPLE; P0 output channel and P1 mailbox semantics addressed here
 - Rejected earlier: v1 dynamic residents (a5c9075); coordinator-layer fixed worker pool — see §7
-- Depends on: `docs/rfc/2026-09-15-gateway-allow.md` (G1/G2) — must land first
-- Authorisation on record: 维护者 2026-09-15 — subruns may execute in a read-only sandbox without approval (`core.fs.read: allow`, `core.exec.ro: allow`); writes and writable exec stay `approve`
+- Depends on: `docs/rfc/2026-09-15-gateway-allow.md` rev 2 (G1/G2 + `/output` channel) — must land first
+- Authorisation on record: 维护者 2026-09-15 — subruns may execute in a read-only sandbox without approval (`core.fs.read: allow`, `core.exec.ro: allow`); writes and writable exec stay `approve`. This is 规划员's record of a conversation; the release gate re-confirms with 维护者 before any `house.yaml` change.
 - Status: **design for review**, nothing implemented
 - Reviewer: 审查员
 
@@ -64,9 +64,21 @@ Facts from `lib/room.js`: each wake reads unread messages from `GET /inbox` only
 
 - Written atomically (tmp + rename of the whole file is acceptable at this size; or append + fsync). Written **before** `requestWake`.
 - At the start of `wake()`, after `GET /inbox`, the adapter reads unconsumed mailbox items and renders them into the same inbox block the model sees, labelled `【子任务结果】` — distinct from coordinator messages; **not** faked as a `dm` with `from_id=self`, so hop counting, mention logic and DM visibility rules are untouched.
-- Mailbox items are marked `consumed` only after the turn's reply is posted successfully (same point where coordinator ids are acked; separate write). A crash between "rendered into prompt" and "consumed" replays the item next wake — at-most-once *consumption* is guaranteed, at-least-once *presentation* is accepted (the model may see a result twice after a crash; the item carries `ts` so it can tell).
+- **Consumption point, per exit of `wake()`** (the coordinator ack at `room.js:372` happens *before* the reply is dispatched, so "same point as ack" was wrong):
+
+  | exit | when the mailbox item becomes `consumed` |
+  |---|---|
+  | `(静默)` | immediately after the ack — the model saw it and chose silence |
+  | `DM:` | after `POST /dm` returns 200 |
+  | `APPROVAL:` | after `registerIntent` returns (the approval is the model's action on the result) |
+  | `/say` | after `POST /say` returns 200 |
+  | think error / abort / crash | **not** consumed → replayed next wake |
+
+  Each consumption write also records `{ sub_id, attempted_at, exit }` in the mailbox item. On replay, the render adds "（上一轮已尝试处理：<exit>）" so the model knows it may have already spoken.
+
+  Guarantee, stated honestly: **at-least-once presentation, best-effort idempotent publication.** A crash after `/say` 200 and before the consumed write replays the item; the model may say a second, shorter follow-up. Duplication is preferred to loss (审查员 D1). "At-most-once consumption" is **not** claimed.
 - A wake triggered by `subresult` with an empty coordinator inbox is still a wake: the model is asked to act on the results. `(静默)` is allowed.
-- On startup the manager scans `state/subruns/*.jsonl` for transcripts without a terminal line, writes an `interrupted` mailbox item for each, and requests a wake.
+- On startup the manager scans `state/subruns/*.jsonl` for transcripts without a terminal line and writes an `interrupted` mailbox item for each, **listing every gateway `request_id` the transcript shows as registered**, and requests a wake. It does **not** re-run those tool calls: they may have executed (the gateway's `request_id` is unique and its audit is authoritative). The parent decides whether to `SUB:` again; a new subrun gets new request ids. The transcript keeps the old ones for the human to cross-check against the gateway audit.
 
 Why not the coordinator: subresults are the resident's own working memory, not household communication. Routing them through `/dm` to self would make them visible to humans as chatter and subject to hop limits. The gateway results *are* routed through the coordinator (§4.5) — that is the human-visible audit.
 
@@ -88,9 +100,11 @@ runSubagent({
 }) => { status: 'ok'|'budget'|'timeout'|'error'|'interrupted', summary, transcript, usage, toolCalls }
 ```
 
-**`model` is not the parent's `think()` (G4).** In `broker-direct/adapter.js`, `think = wrapThink(call, shift)` — every call appends to the resident's persistent shift (`state/shift-<id>.jsonl`), which is exactly the context the subrun must stay out of. The adapter exports a second function, `callOnce(messages, signal, { purpose })`, that hits the broker with the same token, model and parameters but **no shift**: the subrun owns its own `messages` array. Broker side: tokens carry `purposes` (default `['interactive']`, `store.js:212`) and the proxy rejects a request whose `x-sameroof-purpose` is not in the token's list (`:293`). So the parent's broker token must be issued with `purposes: ['interactive', 'subagent']` for `SUB:` to work — `serve` and the systemd token issuance do this when `subagent.enabled` is set; an existing token without it fails closed with a clear error in the subresult.
+**`model` is not the parent's `think()` (G4).** In `broker-direct/adapter.js`, `think = wrapThink(call, shift)` — every call appends to the resident's persistent shift (`state/shift-<id>.jsonl`), which is exactly the context the subrun must stay out of. The adapter exports a second function, `callOnce(messages, signal, { purpose })`, that hits the broker with the same token, model and parameters but **no shift**: the subrun owns its own `messages` array. Broker side: tokens carry `purposes` (default `['interactive']`, `store.js:212`) and the proxy rejects a request whose `x-sameroof-purpose` is not in the token's list (`:293`). So the parent's broker token must be issued with `purposes: ['interactive', 'subagent']` for `SUB:` to work. Issuance is **explicit** (`brokerctl token issue … --purposes interactive,subagent`, or `serve` when a room has `subagent.enabled`); the broker never widens an existing token from room config (审查员 D3). An existing token without the purpose fails closed with a clear subresult; the transcript records the 403. Rotation keeps the previous token file as `.bak` as `brokerctl` already does.
 
-Loop: render prompt → `model()` → if reply has `TOOL: <action> <json>` lines, register each intent with `run_id: sub_<id>`, poll `GET /v1/intents/:id` until terminal, append results as the next user message → repeat until reply has no `TOOL:` lines (that reply is the summary) or a budget trips. Every model call and tool call is appended to `transcript` (JSONL) as it happens, so a killed subrun still leaves evidence.
+Loop: render prompt → `model()` → if reply has `TOOL: <action> <json>` lines, register each intent with `run_id: sub_<id>`, poll `GET /v1/intents/:id` until `state` is terminal, then **read the output once** from `GET /v1/intents/:id/output` (RFC §2.3b; `X-Sameroof-Run` header) and append it as the next user message → repeat until reply has no `TOOL:` lines (that reply is the summary) or a budget trips.
+
+`getIntent` deliberately returns `[output omitted]` for stdout/stderr/content (`gateway/server.js:474-484`); the loop **never** presents that string as a result. If `/output` returns 404/409/410, the tool result fed to the model is `output_unavailable: <code>` and the loop continues. If `truncated: true`, the tool result is prefixed `[truncated: N of M bytes]` so the model cannot report a partial list as complete. Tests assert all three: real `grep` lines reach the next prompt verbatim; a redacted secret does not; a truncated output is labelled. Every model call and tool call is appended to `transcript` (JSONL) as it happens, so a killed subrun still leaves evidence.
 
 The loop **refuses** `TOOL:` actions that are not in `tools` or whose effective permission is not `allow` — a background worker never blocks on a human. The adapter's allowlist is a convenience, **not the security boundary**: the gateway re-evaluates ceiling, root, action and rate limit on every intent regardless of what the adapter believed (RFC §2.3, §2.6). The refusal is reported in the summary ("needed core.fs.write — approve-only, not available to subruns") so the parent can escalate through its own `APPROVAL:` line.
 
@@ -173,13 +187,13 @@ V0 is broker-direct only. That is where our own house's long-running residents l
 | piece | where | estimate |
 |---|---|---|
 | 1. `callOnce` export (no shift), token purpose `subagent` in `serve` + deploy token issuance, broker `run_id` ledger column | `broker-direct/adapter.js`, `cli`, `broker` | 0.5 d |
-| 2. `lib/subagent.js` loop: prompt render, `TOOL:` parse, gateway register + poll, budgets, refusal, transcript append-as-you-go | `packages/adapters` | 1 d |
-| 3. subrun manager: slots, abort, SIGTERM, startup scan; local durable mailbox (write, render, consume, replay); `SUB:` parse; result-DM matching by `run_id`+poll-set | `packages/adapters/lib/room.js` + new `lib/mailbox.js`, `lib/subrun-manager.js` | 1.5 d |
+| 2. `lib/subagent.js` loop: prompt render, `TOOL:` parse, gateway register + poll + `/output` read-once, `output_unavailable` / truncation handling, budgets, refusal, transcript append-as-you-go | `packages/adapters` | 1.25 d |
+| 3. subrun manager: slots, abort, SIGTERM, startup scan (no re-execution); local durable mailbox (write, render, per-exit consume, replay with attempt marker); `SUB:` parse; result-DM matching by `run_id`+poll-set | `packages/adapters/lib/room.js` + new `lib/mailbox.js`, `lib/subrun-manager.js` | 1.75 d |
 | 4. `subagent:` schema block; `subagents/*.md` discovery + frontmatter narrowing | `packages/schema`, `packages/adapters` | 0.5 d |
 | 5. `/cost` split by `run_id`; console: nothing new in V0 | `packages/living-room` | 0.25 d |
 | 6. demo: parent asked "找出所有调 recall() 的地方" → subrun runs `grep -rn` under `core.exec.ro` → parent replies with the list; human sees policy-allowed results in fold-outs; fault injection: kill adapter mid-subrun, expect `interrupted` next wake | `examples/` + tests | 0.75 d |
 
-**4.5 days** after the RFC's 2.5 → **7 days total**, then a gate each. Existing `room.js` seam tests: unchanged; new tests are additive. Not a promise that no existing test changes — the mailbox read at wake start touches the prompt assembly path, and the seam tests assert on prompt shape; if they break, that's a finding to report, not to paper over.
+**5 days** after the RFC's 3 → **8 days total**, then a gate each. Existing `room.js` seam tests: unchanged; new tests are additive. Not a promise that no existing test changes — the mailbox read at wake start touches the prompt assembly path, and the seam tests assert on prompt shape; if they break, that's a finding to report, not to paper over.
 
 ## 6. Exit criteria for V0
 
@@ -191,6 +205,7 @@ Ship when, on this house's own deployment:
 4. Killing the adapter mid-subrun produces an `interrupted` mailbox item and a wake on restart; the transcript file is intact; a human message arriving during a subrun is answered without waiting for it.
 5. A `SUB:` line from a `claude-code` or `pi` resident is dropped with a system note and nothing else.
 7. A `result` DM whose `run_id` is not in the manager's set wakes the parent normally (no false silence).
+8. The subrun's transcript shows the grep output that reached the model came from `/output`, not from `getIntent`; a forced `/output` 410 produces `output_unavailable` in the transcript and the parent's reply says the search could not be read.
 6. All of the above in tests with a mock broker and the real gateway (bwrap), in CI.
 
 If after two weeks of daily use we want: cross-resident delegation with a reply obligation, a visible worker roster, or dynamic process scaling — that is the coordinator-layer feature 审查员 specified (subrun table, leases, reconciler), and it should be built **on top of** this, not instead of it: a coordinator-level subrun would *dispatch to* a resident, whose adapter then runs it as an in-process subrun. The two layers compose; V0 is the inner one.
@@ -205,8 +220,7 @@ If after two weeks of daily use we want: cross-resident delegation with a reply 
 
 ## 8. Questions for 审查员
 
-1. §4.1 mailbox consumption point: I mark items consumed after the reply posts (same point as coordinator ack), accepting at-least-once presentation across a crash. Alternative: consume when rendered, accepting loss on crash. I prefer replay over loss; agree?
-2. §4.1 the subrun manager lives in `room.js`'s `run()` scope so it can call `requestWake`. That grows `room.js`. Alternative: a separate process (`subrun-worker.js`) talking to the adapter over a Unix socket — cleaner isolation, one more process to supervise. For V0 I stay in-process; is that acceptable given the 5 s SIGTERM budget?
-3. §4.2 token purpose `subagent`: requires re-issuing existing broker tokens. `serve` can do it; for the systemd deployment it's a manual `brokerctl token issue`. Should the broker instead accept `subagent` for any token whose resident has `subagent.enabled` in the lock (policy-driven), avoiding re-issue?
-4. RFC §2.4(b) vs (a) — same question as in the RFC; it determines whether the subrun's tool results can be delivered at all.
-5. Anything in §4.1 that still smuggles a coordinator assumption.
+1. §4.1 consumption table: is there an exit I've missed? (`routine`-lane wakes with a `subresult` in the mailbox follow the same table.)
+2. §4.1 startup scan lists registered `request_id`s without re-running them. Should the manager also call `getIntent` on each to record their terminal state in the `interrupted` item, so the parent sees "3 of 4 tool calls had executed"? Costs a few requests at startup; seems worth it.
+3. §4.2: with `/output` read-once, a subrun that crashes between "read output" and "append to transcript" loses that output for good (the read is consumed). Acceptable for V0, or should the loop write the raw output to the transcript *before* acknowledging it as read — meaning `/output` needs a two-step read/ack? I lean "acceptable; transcript the intent id, let the parent re-`SUB:`".
+4. Anything left that assumes the coordinator knows about subruns.

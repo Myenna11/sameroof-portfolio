@@ -2,7 +2,8 @@
 
 - Author: 规划员
 - Date: 2026-09-15
-- Status: **proposed** — prerequisite for `docs/design/subagents.md` v3, but ships and is useful on its own
+- Status: **proposed, rev 2** after `docs/reviews/2026-09-15-reviewer-subagents-v3-rfc-review.md` — prerequisite for `docs/design/subagents.md` v4, ships on its own
+- Authorisation note: the 维护者 line below is 规划员's record of a conversation on 2026-09-15. It is not an implementation instruction to anyone; the release gate re-confirms the concrete policy lines, read-only roots and deployment target with 维护者 before `house.yaml` changes.
 - Reviewer: 审查员
 - Authorisation on record: 维护者, 2026-09-15 — subagents may run in a read-only sandbox (no writable mounts, no network) without approval; file writes and writable exec stay `approve`. The 2026-09-08 `core.fs.read: approve` line was a fix for a prompt/policy contradiction (read was missing → deny, prompt said "you can read"); the value `approve` was the implementer's choice, not a strictness decision.
 
@@ -40,7 +41,7 @@ approve → awaiting_approval (unchanged)
 allow   → execute now (new)
 ```
 
-Also enforced at `sameroof check` / `lock` time: a room value ranked above the house ceiling is a validation error, not a silent clamp. Both places, so a stale lock can't hide it.
+`sameroof check` **already** enforces this at validation time — `packages/schema/index.js:300-306`, `ROOM-PERM-CEILING-001`, using `PERMISSION_RANK`. That stays and gets a regression test. The only code change is the gateway's `ensurePermission` (`server.js:315-321`), which currently lets the room value override the ceiling; it must compute `min(rank)` from the same `PERMISSION_RANK`.
 
 ### 2.2 New action: `core.exec.ro`
 
@@ -74,23 +75,49 @@ In `registerIntent`, after the existing validation (params, roots, digests, poli
 
 `allow` never bypasses: sandbox probe (`GW-SANDBOX-UNAVAILABLE` still fails closed), root/mount checks, policy-digest match, per-resident rate limit (§2.6).
 
+### 2.3b Output return channel for the executing resident (P0 — was missing)
+
+`execute()` (`server.js:474-484`) writes a **redacted-then-stripped** copy to `intents.result_json`: for `core.fs.read` the `summary` and `details.content` become `[content omitted]`; for every action `stdout`/`stderr` become `[output omitted]`. `getIntent` (`:443-448`) returns that stripped row. The full result lives only in `results.result_json`, the living-room delivery queue. So a resident polling `GET /v1/intents/:id` after a policy-allowed `grep` sees `state: complete` and no lines. That boundary is deliberate (a persisted query surface must not become a content store) and stays.
+
+A subrun therefore needs a **separate, bounded, single-consumer output channel**. Proposal: `GET /v1/intents/:id/output`.
+
+| rule | value |
+|---|---|
+| auth | resident bearer token; `intents.resident_id` must equal the token's resident **and** the request must carry `X-Sameroof-Run: <run_id>` equal to `intents.run_id` |
+| availability | only for intents whose `decision_source = policy_allow` (human-approved results already flow to the resident's inbox via the living room; no second channel for those) |
+| content | the **redacted** full result (`redactValue` has already run), i.e. what the living room would have delivered — nothing more |
+| size | `stdout`/`stderr`/`content` each capped at `house.gateway.output_max_bytes` (default 64 KiB); when truncated, `truncated: true` and `total_bytes` are set so the caller can never mistake a cut list for a complete one |
+| reads | at most `output_max_reads` (default 3) per intent, counted and audited; after that `410 GW-OUTPUT-CONSUMED` |
+| retention | `output_ttl` (default 10 min) after `execute()`; then `410 GW-OUTPUT-EXPIRED`; the stripped `intents.result_json` remains forever as today |
+| audit | each read: `output_read` row with `request_id`, `run_id`, bytes, remaining reads |
+| state before terminal | `409 GW-OUTPUT-NOT-READY` while `executing`; the caller polls `getIntent` for state, then reads output once |
+
+Where it's stored: a third column `intents.output_json` (nullable, redacted full result, NULL after ttl/reads), not a reuse of `results.result_json` — that column belongs to the delivery loop and is deleted on successful delivery.
+
+The subrun loop's contract with this: if state is terminal and `/output` returns 409/410/404, the loop records `output_unavailable` for that tool call, feeds *that* to the model as the tool result, and continues. `[output omitted]` is never presented as data. Tests: matching lines from a real `grep -rn` under `core.exec.ro` appear verbatim in the subrun's next prompt; a value the gateway redacts is absent; a 200-line output with a 4 KiB cap yields `truncated: true` and the model prompt says so.
+
+Alternative considered: make `POST /v1/intents` synchronous for `allow` and return the result inline. Rejected: the register route is bounded by a 5 s client timeout and shared with the approval path; an `exec` can legitimately run for minutes; idempotent retry of a synchronous execute is a new problem. The two-step `register → poll state → read output once` keeps `execute()` unchanged.
+
 ### 2.4 Living room: result contract with a policy decision
 
 `/internal/gateway/results` today: `approval_id` required → look up approval by `request_id` → DM the resident with `meta: { approval_id, action, … }`.
 
 Change to accept **either** form, validated:
 
+Facts (审查员): the living room reads static `house.yaml`/residents at start (`server.js:177-194`) and has **no** lock-digest verification path today; and an action executes against the policy snapshot *at register time* — if the house policy changes before a delayed or retried delivery (`retryUndelivered()`), a "must equal current lock digest" rule would 409 a real, already-executed result, the human would never see it, and the gateway would retry forever. Fail-closed must not mean losing history.
+
+So, **option (b), self-describing record, no digest-equality gate**:
+
 | field | approval path (today) | policy path (new) |
 |---|---|---|
-| `request_id` | required, must match a known intent the living room saw at `/approval` time | required, but the living room has **never seen** this intent — so the gateway must have told it. See below. |
-| `approval_id` | required, must resolve | absent |
-| `decision.source` | `human` (implied) | `policy_allow` |
-| `decision.policy_digest` | — | required; the living room checks it equals the house's **current lock digest** (it has it — `house.lock` is what the coordinator validates residents against). Mismatch → 409, result not delivered, audit `GW-RESULT-POLICY-STALE`. |
+| `request_id` | required; idempotency key | required; idempotency key |
+| `resident_id`, `action`, `run_id` | present | present; the living room stores all three on the DM and checks `resident_id` is a known resident |
+| `approval_id` | required, resolved | absent |
+| `decision.source` | `human` | `policy_allow` |
+| `decision.policy_digest` | — | required, **stored for audit, not compared**. The living room may annotate `policy_snapshot_stale_at_delivery: true` if it can cheaply tell the house file changed since, but never refuses on it. |
+| sender | gateway service token | gateway service token (unchanged trust domain — the same token is already trusted for approval results) |
 
-"The living room has never seen this intent": today the gateway posts approvals to the living room *before* execution (that's how the human gets the card). For the policy path there is no card. Two options; **I propose (b)**:
-
-- (a) gateway posts a lightweight `intent_registered` notice to the living room first, then the result. Two round-trips, one more failure window.
-- (b) the result POST is self-describing and **signed by the gateway service token** (it already is — the endpoint is internal and bearer-authenticated). The living room trusts the gateway's assertion `decision.source = policy_allow` because the gateway is the policy enforcer; it verifies `policy_digest` against the lock so a gateway running stale policy can't deliver. Idempotency key = `request_id` (already unique per intent).
+The living room's only refusals: unknown `resident_id`, malformed record, missing required fields. Everything else is delivered exactly once per `request_id`. **The gateway is the sole decider of whether an action was allowed to execute; the living room never re-decides.** If a second, independent control plane is wanted later (living room verifying a gateway signature or its own policy copy), that is a separate trust-model change, not this RFC.
 
 The resident's result DM gains `meta.decision` and `meta.run_id`. The console's fold-out shows "policy" instead of "allowed by <human>". Nothing is hidden: humans still see every read and exec in the stream; they just weren't asked.
 
@@ -102,7 +129,11 @@ This is what lets the adapter distinguish its own foreground results from a subr
 
 ### 2.6 Rate limit for `allow`
 
-A human-approved action is rate-limited by the human's patience. A policy-allowed action isn't. Add per-resident, per-action-class token buckets in the gateway: `allow_rate: { 'core.fs.read': 60/min, 'core.exec.ro': 20/min }` in `house.gateway`. Exceeding → `429 GW-RATE-LIMITED`, audited, result to the resident as a failure. Defaults conservative; a subrun's own budget (design doc §4.6) sits under this.
+A human-approved action is rate-limited by the human's patience. A policy-allowed action isn't. Add per-resident, per-action-class token buckets in the gateway: `allow_rate: { 'core.fs.read': 60/min, 'core.exec.ro': 20/min }` in `house.gateway`. Defaults conservative; a subrun's own budget (design doc §4.6) sits under this.
+
+**Where the limit is applied, and what exists afterwards — one choice, not both:** the bucket is checked **before** the intent row is inserted. Exceeding → `429 GW-RATE-LIMITED` on the register call, one `rate_limited` audit row (`resident_id`, `action`, `run_id` if supplied, bucket state). **No intent row, no result, no living-room delivery.** The caller (a subrun loop or a foreground adapter) sees the 429 synchronously and feeds "rate limited, retry after N s" to the model. This keeps the intent table meaning "things the gateway accepted" and avoids inventing a `rejected_before_register` state with its own delivery semantics. The v1 wording "result to the resident as a failure" is withdrawn.
+
+The broker's ledger and token quotas govern model calls; they do **not** decide gateway admission (审查员 RFC-3). Two independent budgets.
 
 ### 2.7 Visibility
 
@@ -115,19 +146,26 @@ A human-approved action is rate-limited by the human's patience. A policy-allowe
 | # | case | expect |
 |---|---|---|
 | 1 | house `allow`, room unset, `core.fs.read` | executes, no approval card, audit `policy_allow`, result DM with `decision.source=policy_allow` |
-| 2 | house `approve`, room `allow` | `sameroof check` error; gateway (if lock somehow passed) clamps to `approve` and audits `GW-POLICY-ROOM-EXCEEDS-CEILING` |
+| 2 | house `approve`, room `allow` | `sameroof check` → `ROOM-PERM-CEILING-001` (regression); gateway `ensurePermission` → `approve` (min rank), audit note |
 | 3 | house `allow`, room `approve` | awaiting_approval (room tightened) |
 | 4 | house `allow`, room `deny` | 403 |
 | 5 | `core.exec.ro` with `writable_root_ids: ['x']` | 400 GW-PARAMS-INVALID |
 | 6 | `core.exec.ro` allow: `grep -rn recall packages/` in bwrap | stdout returned; `touch /tmp/x` inside works (tmpfs), `touch ./x` fails (ro-bind), `curl` fails (no net) — three negative asserts |
 | 7 | `allow` but bwrap probe fails | 503, nothing runs |
 | 8 | `allow` but intent policy digest ≠ current | refused, audited |
-| 9 | living room receives policy result with stale `policy_digest` | 409, not delivered, audited |
+| 9 | living room receives policy result whose `policy_digest` ≠ current house | **delivered**, DM meta carries the digest and `policy_snapshot_stale_at_delivery: true`; audited |
 | 10 | living room receives same `request_id` twice | second is idempotent no-op |
 | 11 | `run_id` in result ≠ registered | 500, audited |
-| 12 | rate limit: 21st `core.exec.ro` within a minute | 429, audited, resident gets failure result |
+| 12 | rate limit: 21st `core.exec.ro` within a minute | 429 on register, `rate_limited` audit row, **no intent row**, no delivery |
 | 13 | approval path unchanged: `core.exec` with house `approve` | card, human decides, works as today (regression) |
 | 14 | replay: approval for `core.exec.ro` digest presented to `core.exec` | GW-APPROVAL-MISMATCH |
+| 15 | `/output` after policy-allowed `grep -rn recall packages/`, same resident + correct `X-Sameroof-Run` | 200, matching lines verbatim; audited `output_read` |
+| 16 | `/output` with wrong run header, or other resident's token | 404 (no existence leak) |
+| 17 | `/output` for a human-approved intent | 404 (not offered on that path) |
+| 18 | `/output` 4th read, or after ttl | 410 |
+| 19 | `/output` while `executing` | 409 |
+| 20 | `/output` on 200-line stdout with 4 KiB cap | `truncated: true`, `total_bytes` set |
+| 21 | secret-looking value in stdout | absent from `/output` (redaction precedes storage) |
 
 ## 4. What this does not change
 
@@ -138,17 +176,18 @@ A human-approved action is rate-limited by the human's patience. A policy-allowe
 
 | piece | estimate |
 |---|---|
-| ceiling algebra in gateway + `check`/`lock` validation + tests 2-4 | 0.5 d |
+| gateway `ensurePermission` min-rank + schema regression test + tests 2-4 | 0.25 d |
+| `/v1/intents/:id/output`: column, route, caps, reads, ttl, audit + tests 15-21 | 0.75 d |
 | `core.exec.ro` action + digest + tests 5-6 | 0.5 d |
 | gateway `allow` path + audit + `run_id` in payload + tests 1, 7, 8, 11, 14 | 0.5 d |
-| living-room result contract (policy path, digest check, idempotency) + tests 9-10, 13 | 0.5 d |
-| rate limit + test 12 | 0.25 d |
+| living-room result contract (policy path, self-describing record, no digest gate, stale annotation, idempotency) + tests 9-10, 13 | 0.5 d |
+| rate limit before insert + test 12 | 0.25 d |
 | console decision-source label, doctor counter | 0.25 d |
 
-**2.5 days.** Then gate. The subagent design (v3) starts only after this lands.
+**3 days.** Then gate. The subagent design (v3) starts only after this lands.
 
 ## 6. Questions for 审查员
 
-1. §2.4 option (b) — trusting the gateway's self-asserted `policy_allow` with a lock-digest check, versus a two-phase notice. The gateway is already the single policy enforcer and the endpoint is service-token-authenticated; is the digest check enough, or do you want the living room to independently evaluate the ceiling from its own lock copy before accepting?
-2. §2.2 — `core.exec.ro` as a distinct action name vs a conditional on `core.exec`. Distinct keeps the policy map flat; conditional would let `core.exec: {ro: allow, rw: approve}` and generalise to future `core.fs.write.own-room`-style scopes. Your call.
-3. §2.6 rate limits — should the budget live in the gateway (this RFC), the broker-style ledger, or both?
+1. §2.3b `/output` as a third column with reads/ttl, versus returning the redacted full result from `getIntent` only when `decision_source = policy_allow` and `X-Sameroof-Run` matches. I kept it separate so `getIntent` keeps its no-content invariant unconditionally. Agree, or is the conditional cheaper and safe enough?
+2. §2.3b caps: 64 KiB / 3 reads / 10 min are guesses. What would you set?
+3. §2.6: 429-before-insert means a rate-limited request leaves only an audit row. Is that enough for `doctor` to surface "this resident is being throttled", or do you want a counter table?
