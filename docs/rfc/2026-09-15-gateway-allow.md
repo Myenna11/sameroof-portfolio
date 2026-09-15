@@ -2,7 +2,7 @@
 
 - Author: 规划员
 - Date: 2026-09-15
-- Status: **proposed, rev 3** (CONDITIONAL ARCHITECTURE PASS at rev 2; contracts A/B fixed here) after `docs/reviews/2026-09-15-reviewer-subagents-v3-rfc-review.md` — prerequisite for `docs/design/subagents.md` v4, ships on its own
+- Status: **implemented on `pivot-workharness` (81f652b, f93ee46, 9cc49e1, 733641e); awaiting gate.** This house's `house.yaml` is unchanged. rev 3 (CONDITIONAL ARCHITECTURE PASS at rev 2; contracts A/B fixed here) after `docs/reviews/2026-09-15-reviewer-subagents-v3-rfc-review.md` — prerequisite for `docs/design/subagents.md` v4, ships on its own
 - Authorisation note: the 维护者 line below is 规划员's record of a conversation on 2026-09-15. It is not an implementation instruction to anyone; the release gate re-confirms the concrete policy lines, read-only roots and deployment target with 维护者 before `house.yaml` changes.
 - Reviewer: 审查员
 - Authorisation on record: 维护者, 2026-09-15 — subagents may run in a read-only sandbox (no writable mounts, no network) without approval; file writes and writable exec stay `approve`. The 2026-09-08 `core.fs.read: approve` line was a fix for a prompt/policy contradiction (read was missing → deny, prompt said "you can read"); the value `approve` was the implementer's choice, not a strictness decision.
@@ -202,3 +202,17 @@ The broker's ledger and token quotas govern model calls; they do **not** decide 
 1. §2.3b `/output` as a third column with reads/ttl, versus returning the redacted full result from `getIntent` only when `decision_source = policy_allow` and `X-Sameroof-Run` matches. I kept it separate so `getIntent` keeps its no-content invariant unconditionally. Agree, or is the conditional cheaper and safe enough?
 2. §2.3b caps: 64 KiB / 3 reads / 10 min are guesses. What would you set?
 3. §2.6: 429-before-insert means a rate-limited request leaves only an audit row. Is that enough for `doctor` to surface "this resident is being throttled", or do you want a counter table?
+
+
+## 7. Implementation record (2026-09-15)
+
+| commit | what |
+|---|---|
+| 81f652b | `effectivePermission` min-rank; `PERMISSION_RANK` exported; 10 tests incl. schema regression |
+| f93ee46 | contract A split (`claimHumanApproved` / `claimPolicyAllowed` / `executeClaimed`); `decision_source`, `executed_at`, `output_json`, `output_reads` columns; `allow` path returns `executing` and queues; idempotency incl. `run_id`+`decision_source`; `core.exec.ro`; `/v1/intents/:id/output` (bind, cap, atomic reads, ttl, physical clear, audit); `stdout_raw`/`stderr_raw` kept only for `/output`; rate limit before insert; 11 tests on real bwrap |
+| 9cc49e1 | living-room policy result form; `request_id`/`run_id`/`decision` on result DM; `policy_result` activity; test |
+| 733641e | schema fields; `gateway-client.getIntent/readOutput`; socket-level test; `doctor` policy-allow summary; console badges |
+
+Matrix status: 1 ✓ 2 ✓ 3 ✓ 4 ✓ 5 ✓ 6 ✓ 7 ✓ 8 (existing lock-digest test) 9 ✓ 10 ✓ 11 (gateway-vouched; covered by 24) 12 ✓ 13 ✓ 14 ✓ 15 ✓ 16 ✓ 17 ✓ 18 ✓ 19 ✓ 20 ✓ 21 (redaction precedes storage; existing redact tests) 22 ✓ (via #1 timing) 23 **not written** (kill-between-claim-and-execute needs a process-level harness; `failed_unknown` recovery path is pre-existing and tested) 24 ✓ 25 ✓ (existing suites unchanged) 26 ✓ 27 ✓.
+
+Known deviations from the text above: none intended. Reviewer should diff §2.3/§2.3b/§2.4/§2.6 against `packages/gateway/server.js` and `packages/living-room/server.js`.
