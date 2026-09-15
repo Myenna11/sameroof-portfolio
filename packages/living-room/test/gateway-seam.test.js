@@ -231,3 +231,40 @@ test('内部接口拒非 loopback 连接（用本机非回环地址模拟；没�
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+// RFC 2026-09-15-gateway-allow §2.4 — policy_allow result contract (matrix 9, 10, 13)
+test('政策放行结果：无 approval_id 也投递；policy_digest 存不比较；request_id 幂等；无效形状拒；人批路径不变', async () => {
+  const root = fixture();
+  const tokenFile = path.join(root, 'run', 'gateway-service.token');
+  const room = createLivingRoom({ houseDir: root, runDir: path.join(root, 'run'), dataDir: path.join(root, 'state'), port: 0, approvalLimit: 50, gatewayServiceTokenFile: tokenFile });
+  try {
+    const port = (await room.listen()).port;
+    fs.mkdirSync(path.dirname(tokenFile), { recursive: true }); fs.writeFileSync(tokenFile, SERVICE_TOKEN + '\n', { mode: 0o600 });
+    const beta = room.tokenStore.issue('resident_beta_01').token;
+    const alpha = room.tokenStore.issue('resident_alpha_01').token;
+    const svc = { token: SERVICE_TOKEN };
+    const base = { request_id: 'req_policy0001', resident_id: 'resident_beta_01', action: 'core.exec.ro', run_id: 'sub_zz9999', status: 'succeeded', summary: 'grep done', coverage: { executor: 'bwrap', sandbox: 'enforced', network: 'denied', requested: ['exec:grep'], completed: ['exec:grep'] }, next: { kind: 'none' }, details: { exit_code: 0, stdout: '[output omitted]' } };
+
+    // #9: policy result whose digest ≠ anything the living room knows → still delivered, digest stored
+    const r1 = await request(port, '/internal/gateway/results', { ...svc, method: 'POST', body: { ...base, approval_id: null, decision: { source: 'policy_allow', policy_digest: 'deadbeef00000000' } } });
+    assert.equal(r1.status, 200, JSON.stringify(r1.body)); assert.equal(r1.body.delivered_to, 'resident_beta_01'); assert.equal(r1.body.duplicate, false);
+    const inbox = (await request(port, '/inbox', { token: beta })).body;
+    const dm = inbox.find(m => m.kind === 'result' && m.meta && m.meta.request_id === 'req_policy0001');
+    assert.ok(dm, 'result DM reached the resident');
+    assert.equal(dm.meta.decision.source, 'policy_allow'); assert.equal(dm.meta.decision.policy_digest, 'deadbeef00000000'); assert.equal(dm.meta.approval_id, null); assert.equal(dm.meta.run_id, 'sub_zz9999');
+    // not visible to another resident
+    assert.ok(!(await request(port, '/inbox', { token: alpha })).body.some(m => m.meta && m.meta.request_id === 'req_policy0001'));
+
+    // #10: same request_id again → duplicate, no second DM
+    const r2 = await request(port, '/internal/gateway/results', { ...svc, method: 'POST', body: { ...base, approval_id: null, decision: { source: 'policy_allow', policy_digest: 'deadbeef00000000' } } });
+    assert.equal(r2.status, 200); assert.equal(r2.body.duplicate, true);
+    assert.equal((await request(port, '/inbox', { token: beta })).body.filter(m => m.meta && m.meta.request_id === 'req_policy0001').length, 1);
+
+    // shape rejections
+    assert.equal((await request(port, '/internal/gateway/results', { ...svc, method: 'POST', body: { ...base, request_id: 'req_policy0002', approval_id: 'apr_12345678', decision: { source: 'policy_allow', policy_digest: 'x' } } })).body.error.code, 'GW-RESULT-INVALID', 'policy + approval_id is contradictory');
+    assert.equal((await request(port, '/internal/gateway/results', { ...svc, method: 'POST', body: { ...base, request_id: 'req_policy0003', approval_id: null, decision: { source: 'policy_allow' } } })).body.error.code, 'GW-RESULT-INVALID', 'missing policy_digest');
+    assert.equal((await request(port, '/internal/gateway/results', { ...svc, method: 'POST', body: { ...base, request_id: 'req_policy0004', approval_id: null, resident_id: 'resident_nobody_01', decision: { source: 'policy_allow', policy_digest: 'x' } } })).status, 404, 'unknown resident');
+    // human-path shape without approval → still the old 400 (regression)
+    assert.equal((await request(port, '/internal/gateway/results', { ...svc, method: 'POST', body: { ...base, request_id: 'req_policy0005' } })).body.error.code, 'GW-RESULT-INVALID', 'no decision + no approval_id = old validation');
+  } finally { await room.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});

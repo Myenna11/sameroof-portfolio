@@ -453,17 +453,32 @@ function createLivingRoom(options = {}) {
       if (typeof requestId !== 'string' || !REQUEST_ID_RE.test(requestId)) throw new HttpError(400, 'GW-RESULT-INVALID', 'request_id 不合法。');
       const existing = getResult.get(requestId);
       if (existing) return writeJson(res, 200, { message_id: existing.message_id, request_id: requestId, received_at: existing.received_at, duplicate: true });
-      if (typeof body.approval_id !== 'string' || !APPROVAL_ID_RE.test(body.approval_id)) throw new HttpError(400, 'GW-RESULT-INVALID', 'approval_id 不合法。');
+      // RFC 2026-09-15-gateway-allow §2.4: two result forms. (1) human: approval_id present, must match the approval we broadcast.
+      // (2) policy_allow: no approval; self-describing record from the gateway service token. The living room never re-decides;
+      // policy_digest is stored for audit, not compared (a delayed delivery after a policy change must still reach the resident).
+      const decision = body.decision && typeof body.decision === 'object' ? body.decision : null;
+      const isPolicy = !!(decision && decision.source === 'policy_allow');
+      if (isPolicy) {
+        if (body.approval_id != null) throw new HttpError(400, 'GW-RESULT-INVALID', 'policy_allow 结果不带 approval_id。');
+        if (typeof decision.policy_digest !== 'string' || !decision.policy_digest) throw new HttpError(400, 'GW-RESULT-INVALID', 'policy_allow 结果要有 decision.policy_digest。');
+        if (body.run_id != null && (typeof body.run_id !== 'string' || !/^(run|sub)_[A-Za-z0-9_-]{4,40}$/.test(body.run_id))) throw new HttpError(400, 'GW-RESULT-INVALID', 'run_id 不合法。');
+      } else if (typeof body.approval_id !== 'string' || !APPROVAL_ID_RE.test(body.approval_id)) throw new HttpError(400, 'GW-RESULT-INVALID', 'approval_id 不合法。');
       if (typeof body.resident_id !== 'string' || typeof body.action !== 'string') throw new HttpError(400, 'GW-RESULT-INVALID', '要有 resident_id 和 action。');
       if (!GATEWAY_RESULT_STATUSES.has(body.status)) throw new HttpError(400, 'GW-RESULT-INVALID', 'status 不在 succeeded/failed/denied/expired/timed_out/failed_unknown 里。');
       if (!body.coverage || typeof body.coverage !== 'object' || Array.isArray(body.coverage)) throw new HttpError(400, 'GW-RESULT-INVALID', 'coverage 得是对象。');
       if (!body.next || typeof body.next !== 'object' || !GATEWAY_NEXT_KINDS.has(body.next.kind)) throw new HttpError(400, 'GW-RESULT-INVALID', 'next.kind 不在 none/request_writable_root/retry_in_sandbox/human_action 里。');
       if (typeof body.summary !== 'string' || !body.summary.trim()) throw new HttpError(400, 'GW-RESULT-INVALID', '要有 summary。');
       if (body.details !== undefined && (!body.details || typeof body.details !== 'object')) throw new HttpError(400, 'GW-RESULT-INVALID', 'details 得是对象。');
-      const approval = approvalByRequest.get(requestId);
-      if (!approval) throw new HttpError(404, 'GW-RESULT-UNKNOWN-REQUEST', '没有这个 request_id 的审批。');
-      if (approval.id !== body.approval_id || approval.resident_id !== body.resident_id || approval.action !== body.action) throw new HttpError(409, 'GW-RESULT-MISMATCH', 'approval_id / resident_id / action 与客厅记录不一致。');
-      if (!byId.has(approval.resident_id)) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', '申请的住户已不在房子里。');
+      let approval = null;
+      if (isPolicy) {
+        if (!byId.has(body.resident_id)) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', '申请的住户已不在房子里。');
+      } else {
+        approval = approvalByRequest.get(requestId);
+        if (!approval) throw new HttpError(404, 'GW-RESULT-UNKNOWN-REQUEST', '没有这个 request_id 的审批。');
+        if (approval.id !== body.approval_id || approval.resident_id !== body.resident_id || approval.action !== body.action) throw new HttpError(409, 'GW-RESULT-MISMATCH', 'approval_id / resident_id / action 与客厅记录不一致。');
+        if (!byId.has(approval.resident_id)) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', '申请的住户已不在房子里。');
+      }
+      const targetId = isPolicy ? body.resident_id : approval.resident_id, targetAction = isPolicy ? body.action : approval.action;
       const summary = redactText(body.summary).slice(0, GATEWAY_SUMMARY_MAX);
       let details = null;
       if (body.details !== undefined) {
@@ -473,19 +488,21 @@ function createLivingRoom(options = {}) {
       const receivedAt = new Date().toISOString();
       let row;
       db.transaction(() => {
-        row = post({ kind: 'result', from_id: 'house', to_id: approval.resident_id, text: summary, meta: {
-          gateway_request_id: requestId, approval_id: approval.id, action: approval.action, status: body.status,
+        row = post({ kind: 'result', from_id: 'house', to_id: targetId, text: summary, meta: {
+          gateway_request_id: requestId, request_id: requestId, approval_id: approval ? approval.id : null, action: targetAction, status: body.status,
+          run_id: body.run_id || null,
+          decision: isPolicy ? { source: 'policy_allow', policy_digest: decision.policy_digest, decided_by: 'policy' } : { source: 'human', approval_id: approval.id },
           coverage: redactValue(body.coverage), next: redactValue(body.next), details, deliver: 'interrupt'
         } });
         insResult.run(requestId, row.id, receivedAt);
-        db.prepare('UPDATE approvals SET used=1 WHERE id=?').run(approval.id);
+        if (approval) db.prepare('UPDATE approvals SET used=1 WHERE id=?').run(approval.id);
       })();
       // 公共 activity 摘要（实现员 K5 的缝）：只有 status/coverage/next，不带内容、不带路径细节；只在首次投递发（上面 duplicate 已早返回）
       const cov = redactValue(body.coverage) || {}; const done = Array.isArray(cov.completed) ? cov.completed.length : null, want = Array.isArray(cov.requested) ? cov.requested.length : null;
       const covBrief = [cov.executor, done !== null && want !== null ? `${done}/${want}` : null, cov.sandbox === 'unavailable' ? '沙箱不可用' : null].filter(Boolean).join('·');
-      emitActivity({ kind: 'approval_result', actor_id: approval.resident_id, text: '🧾 ' + (byId.get(approval.resident_id)?.name || approval.resident_id) + ' 的 ' + approval.action + ' 已执行：' + body.status + (covBrief ? '（' + covBrief + '）' : ''),
-        meta: { approval_id: approval.id, gateway_request_id: requestId, resident_id: approval.resident_id, executed: true, status: body.status, coverage: { executor: cov.executor, sandbox: cov.sandbox, network: cov.network, requested: want, completed: done }, next: redactValue(body.next) } });
-      return writeJson(res, 200, { message_id: row.id, request_id: requestId, received_at: receivedAt, delivered_to: approval.resident_id, duplicate: false });
+      emitActivity({ kind: isPolicy ? 'policy_result' : 'approval_result', actor_id: targetId, text: (isPolicy ? '🛡 ' : '🧾 ') + (byId.get(targetId)?.name || targetId) + ' 的 ' + targetAction + (isPolicy ? '（政策放行）' : '') + ' 已执行：' + body.status + (covBrief ? '（' + covBrief + '）' : ''),
+        meta: { approval_id: approval ? approval.id : null, decision_source: isPolicy ? 'policy_allow' : 'human', run_id: body.run_id || null, gateway_request_id: requestId, resident_id: targetId, executed: true, status: body.status, coverage: { executor: cov.executor, sandbox: cov.sandbox, network: cov.network, requested: want, completed: done }, next: redactValue(body.next) } });
+      return writeJson(res, 200, { message_id: row.id, request_id: requestId, received_at: receivedAt, delivered_to: targetId, duplicate: false });
     }
     throw new HttpError(404, 'ROUTE-NOT-FOUND', '没这个门。');
   }
