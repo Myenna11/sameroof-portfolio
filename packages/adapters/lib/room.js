@@ -10,6 +10,8 @@ const cron = require('./cron');
 const BB = require('./blackboard');                                       // 黑板：PIN 解析、due 落 routine、渲染；routine 的时间/校验函数也放那儿共用
 const C = require('./context');                                          // 上下文拼装的纯函数：打分挑选、摘要帧、工具留壳
 const gw = require('./gateway-client');
+const { Mailbox } = require('./mailbox');
+const { SubrunManager } = require('./subrun-manager');   // subagent V0 (docs/design/subagents.md v5)
 const LR = process.env.SAMEROOF_LR || 'http://127.0.0.1:8790';
 const RUN = path.join(process.env.HOME || '/root', '.sameroof', 'run');
 let houseDir = null;                                                       // 懒解析：真开房间时才找 house.yaml，纯函数测试不碰盘
@@ -137,6 +139,24 @@ const abortable = (promise, signal) => new Promise((resolve, reject) => {
 // think 的返回值：字符串照旧；{ text, usage } 就拆开（V2-U）
 const unpackReply = r => (r && typeof r === 'object' && !Array.isArray(r)) ? { text: r.text == null ? '' : String(r.text), usage: (r.usage && typeof r.usage === 'object') ? r.usage : null } : { text: r == null ? '' : String(r), usage: null };
 const addUsage = (run, usage) => { if (!usage) return; if (!run.usage) { run.usage = { ...usage }; return; } for (const [k, v] of Object.entries(usage)) if (typeof v === 'number' && typeof run.usage[k] === 'number') run.usage[k] += v; else if (run.usage[k] === undefined) run.usage[k] = v; };   // 同一次 run 调了两回模型：数字相加
+// SUB: <task> | 带上: <brief> | 引用: msg_id,path | 工具: a,b | 预算: m/t/min | 继承: N   —— 带上: 必填除非 继承:>0（零上下文默认）
+function parseSubLine(line, { inbox = [], recentCtx = '', inheritMax = 12000 } = {}) {
+  const body = line.replace(/^\s*SUB[:：]\s*/i, '');
+  const segs = body.split('|').map(s => s.trim()).filter(Boolean); if (!segs.length) return null;
+  const spec = { task: segs[0], brief: '', refs: [], tools: undefined, budget: undefined, inherit: [] };
+  for (const s of segs.slice(1)) {
+    const m = /^(带上|引用|工具|预算|继承)[:：]\s*(.*)$/.exec(s); if (!m) continue;
+    const v = m[2].trim();
+    if (m[1] === '带上') spec.brief = v;
+    else if (m[1] === '引用') for (const r of v.split(/[,，]/).map(x => x.trim()).filter(Boolean)) { const msg = inbox.find(x => x.id === r); spec.refs.push(msg ? { kind: 'message', ref: r, text: msg.text } : { kind: 'path', ref: r }); }
+    else if (m[1] === '工具') spec.tools = v.split(/[,，]/).map(x => x.trim()).filter(Boolean);
+    else if (m[1] === '预算') { const [mc, tc, mi] = v.split('/').map(x => parseInt(x, 10)); spec.budget = { ...(mc ? { model_calls: mc } : {}), ...(tc ? { tool_calls: tc } : {}), ...(mi ? { minutes: mi } : {}) }; }
+    else if (m[1] === '继承') { const n = parseInt(v, 10); if (n > 0 && recentCtx) { const lines = recentCtx.split('\n').slice(-n).join('\n'); spec.inherit = [{ role: 'user', content: '【父任务最近上下文，共 ' + n + ' 行】\n' + lines.slice(-inheritMax) }]; } }
+  }
+  if (!spec.task) return null;
+  if (!spec.brief && !spec.inherit.length) return null;   // zero-context default: the parent must brief
+  return spec;
+}
 async function run(roomName, runtimeName, think, opts = {}) {
   const R = open(roomName, { lr: opts.lr }); const { room, api, state, save, soul } = R; const lrBase = R.lrBase;
   const stop = opts.signal || null; let stopped = false;                       // opts.signal：abort 后关 SSE、清 timer、不再 pump，睡下，run() resolve（没给就照旧）
@@ -147,6 +167,14 @@ async function run(roomName, runtimeName, think, opts = {}) {
   const deliverCfg = exec.deliver;
   const routines = mergeRoutines(R.house, room, R.tz); state.routines = state.routines || {};   // 可变数组：黑板任务的 due 会往里 push / splice（syncTaskRoutines），tick 遍历的就是它
   const routineById = id => routines.find(r => r.id === id);
+  // ---- subagent V0：manager 在 wake() 之外，不占 active、不受 watchdog；结果走本地 mailbox；只有 broker-direct 传 callOnce ----
+  const subCfg = { enabled: false, ...((R.house.defaults || {}).subagent || {}), ...(room.subagent || {}) };
+  const mailbox = subCfg.enabled ? new Mailbox(path.join(R.roomDir, 'state', 'mailbox.jsonl')) : null;
+  let subruns = null;
+  if (subCfg.enabled && typeof opts.callOnce === 'function') {
+    subruns = new SubrunManager({ dir: path.join(R.roomDir, 'state'), mailbox, requestWake: (lane, why) => requestWake(lane, why), model: opts.callOnce, gateway: gw, residentId: room.id, residentName: room.name, config: subCfg, log: (...a) => fs.writeSync(2, `[${room.name} subrun] ${a.join(' ')}\n`) });
+  } else if (subCfg.enabled) fs.writeSync(2, `[${room.name}] subagent.enabled 但 runtime ${runtimeName} 未提供 callOnce：SUB: 行会被丢弃并留注。\n`);
+  const subOwns = m => !!(subruns && m && m.kind === 'result' && m.meta && m.meta.request_id && subruns.ownsRequest(m.meta.request_id));   // 合同 B：按 gateway 背书的 request_id 认，不看前缀
   // ---- 黑板（W7）：每次醒来拉一次"我的事"（open/doing/blocked），拉不到就静默（stderr 一行），不影响醒来；拉到就把 due 同步进 routines
   const fetchTasks = async () => { try { const t = await api('GET', '/tasks?owner=me&state=open,doing,blocked'); if (Array.isArray(t)) return t; fs.writeSync(2, `[${room.name}] 黑板拉不到（${JSON.stringify(t).slice(0, 120)}），这轮当没有\n`); } catch (e) { fs.writeSync(2, `[${room.name}] 黑板拉不到（${e.message}），这轮当没有\n`); } return []; };
   const syncTasks = tasks => { const d = BB.syncTaskRoutines(routines, tasks, R.tz);
@@ -202,11 +230,16 @@ async function run(roomName, runtimeName, think, opts = {}) {
     const t0 = Date.now();
     try {
       if (!R.budgetLeft()) { console.log('[预算] daily request budget exhausted, passive mode'); run.status = 'passive_budget'; return; }
-      const inbox = await api('GET', '/inbox'); if (!Array.isArray(inbox)) throw new Error('客厅没开门: ' + JSON.stringify(inbox));
+      const inboxAll = await api('GET', '/inbox'); if (!Array.isArray(inboxAll)) throw new Error('客厅没开门: ' + JSON.stringify(inboxAll));
+      const subResults = inboxAll.filter(subOwns);                          // 合同 B（第二处）：子任务的网关结果不进 prompt、不算唤醒理由，静默 ack
+      if (subResults.length) { for (const m of subResults) subruns.noteDelivered(m.meta.request_id); await api('POST', '/inbox/ack', { ids: subResults.map(m => m.id) }).catch(() => {}); }
+      const inbox = inboxAll.filter(m => !subOwns(m));
+      const mailItems = mailbox ? mailbox.pending() : [];                   // 本地 mailbox：子任务结果，和客厅消息分开渲染
+      run.mail_items = mailItems.length;
       const myTasks = await fetchTasks(); syncTasks(myTasks);              // 黑板上我的事（每次醒来都看一眼，顺手把 due 落成 routine；没叫我也同步）
       // 例行醒来：inbox 空也不算 nothing，没 @ 我也不 deferred——例行本来就不是因为有人叫
-      if (!routine && inbox.length === 0 && reason !== 'heartbeat') { run.status = 'nothing'; return; }
-      if (!routine && reason !== 'heartbeat' && !inbox.some(m => m.kind === 'dm' || (m.mentions && m.mentions.includes(room.id)))) { console.log('[醒] 有新话但没叫我，留到心跳再看'); run.status = 'deferred'; return; }
+      if (!routine && inbox.length === 0 && mailItems.length === 0 && reason !== 'heartbeat') { run.status = 'nothing'; return; }   // 有子任务结果也算有事
+      if (!routine && reason !== 'heartbeat' && mailItems.length === 0 && !inbox.some(m => m.kind === 'dm' || (m.mentions && m.mentions.includes(room.id)))) { console.log('[醒] 有新话但没叫我，留到心跳再看'); run.status = 'deferred'; return; }   // 子任务结果算叫了我（设计 §4.1）
       if (inbox.length === 0 && reason === 'heartbeat') {
         if (!R.keys.concerns().length && !myTasks.length) { console.log('[心跳] idle: no pending tasks or messages, skipping model call'); run.status = 'passive_idle'; return; }
       }
@@ -325,9 +358,10 @@ async function run(roomName, runtimeName, think, opts = {}) {
         ].filter(x => x !== '').join('\n');
       }
       inc.membersLine = mLine;
-      const inboxText = '【你没读的客厅记录（按时间）】\n' + inbox.map(m => m.kind === 'result' ? renderInboxLine(m, room.id) : frame(m, 'short', `${m.kind === 'dm' ? '(私信给你)' : ''}${m.mentions && m.mentions.includes(room.id) ? '(叫了你)' : ''}`, 0)).join('\n');   // 未读不截断，只做工具留壳；网关结果单独渲染
-      const user = wakeHead + '\n\n' + (routine ? `【例行】${routine.prompt}` + (routine.at ? `（这是一次性提醒，原定 ${fmtAt(atMs(routine), R.tz)}）` : '') + (inbox.length ? '\n\n' + inboxText : '') + '\n\n例行的事做完就说一句，没什么要说就回 (静默)。'
-        : inbox.length ? inboxText + (incremental ? '\n\n看完决定：要不要说、对谁说。只回新的；这一班里你已经说过的不要再说一遍。像家里人说话，不要列清单；没什么要说就回 (静默)。' : '\n\n看完决定：要不要说、对谁说。只回新的；上面"刚才的话"里已经有人回过的、你自己说过的，不要再回一遍。像家里人说话，不要列清单；没什么要说就回 (静默)。')
+      const mailText = mailItems.length ? Mailbox.render(mailItems) : '';
+      const inboxText = (mailText ? mailText + '\n\n' : '') + '【你没读的客厅记录（按时间）】\n' + inbox.map(m => m.kind === 'result' ? renderInboxLine(m, room.id) : frame(m, 'short', `${m.kind === 'dm' ? '(私信给你)' : ''}${m.mentions && m.mentions.includes(room.id) ? '(叫了你)' : ''}`, 0)).join('\n');   // 未读不截断，只做工具留壳；网关结果单独渲染
+      const user = wakeHead + '\n\n' + (routine ? `【例行】${routine.prompt}` + (routine.at ? `（这是一次性提醒，原定 ${fmtAt(atMs(routine), R.tz)}）` : '') + ((inbox.length || mailItems.length) ? '\n\n' + inboxText : '') + '\n\n例行的事做完就说一句，没什么要说就回 (静默)。'
+        : (inbox.length || mailItems.length) ? inboxText + (incremental ? '\n\n看完决定：要不要说、对谁说。只回新的；这一班里你已经说过的不要再说一遍。像家里人说话，不要列清单；没什么要说就回 (静默)。' : '\n\n看完决定：要不要说、对谁说。只回新的；上面"刚才的话"里已经有人回过的、你自己说过的，不要再回一遍。像家里人说话，不要列清单；没什么要说就回 (静默)。')
         : '心跳醒来。客厅没人叫你，但惦记本或黑板上有你的事。要是确实该对家里人说一句就说，没有就回 (静默)。');
       const frozenSystem = (incremental && think.shift && Array.isArray(think.shift.messages) && think.shift.messages.length && think.shift.messages[0].role === 'system') ? think.shift.messages[0].content : system;   // 本班 system 冻结：惦记本/小本改了也不打断累积（他自己写的他知道；下一班再进 system）
       run.system_frozen = frozenSystem !== system;
@@ -347,6 +381,15 @@ async function run(roomName, runtimeName, think, opts = {}) {
       { const lines = reply.split('\n'); const keep = [];
         let pinned = false;
         for (const l of lines) {
+          if (/^\s*SUB[:：]/i.test(l)) {                                   // subagent V0：派子任务；解析在 adapter（与 PIN 同层）
+            run.directives.push({ k: 'SUB', t: l.trim().slice(0, 200) });
+            if (!subruns) { run.sub_error = (run.sub_error ? run.sub_error + '；' : '') + '本 runtime 不支持 SUB:'; fs.writeSync(2, `[${room.name} subrun] 丢弃 SUB:（${subCfg.enabled ? 'runtime 无 callOnce' : 'subagent 未启用'}）\n`); continue; }
+            const spec = parseSubLine(l, { inbox, recentCtx, inheritMax: subCfg.inherit_max_chars || 12000 });
+            if (!spec) { run.sub_error = (run.sub_error ? run.sub_error + '；' : '') + `看不懂或缺 带上:：${l.trim().slice(0, 80)}`; fs.writeSync(2, `[${room.name} subrun] SUB 看不懂或缺 带上:，没派\n`); continue; }
+            try { const { sub_id } = subruns.start({ ...spec, system: soul }); run.sub_started = [...(run.sub_started || []), sub_id]; fs.writeSync(2, `[${room.name} subrun] 派了 ${sub_id}「${spec.task.slice(0, 60)}」\n`); }
+            catch (e) { run.sub_error = (run.sub_error ? run.sub_error + '；' : '') + String(e.message).slice(0, 120); fs.writeSync(2, `[${room.name} subrun] 没派：${e.message}\n`); }
+            continue;
+          }
           if (/^\s*PIN(\s|[:：])/i.test(l)) {                               // 黑板（W7）：钉 → POST /tasks；改 → PATCH /tasks/:id。失败不炸整轮，记 run.pin_error
             const pin = BB.parsePin(l, { tz: R.tz }); run.directives.push({ k: 'PIN', t: l.trim().slice(0, 200) });
             if (!pin) { run.pin_error = (run.pin_error ? run.pin_error + '；' : '') + `看不懂：${l.trim().slice(0, 80)}`; fs.writeSync(2, `[${room.name} 黑板] PIN 看不懂，没登记：${l.trim().slice(0, 80)}\n`); continue; }
@@ -372,8 +415,8 @@ async function run(roomName, runtimeName, think, opts = {}) {
       if (inbox.length) { const a = await api('POST', '/inbox/ack', { ids: inbox.map(m => m.id) }); if (!a || typeof a.acked !== 'number') { run.ack_error = JSON.stringify(a).slice(0, 300); fs.writeSync(2, `[${room.name}] 标已读失败，下次会重复读到这些话：${run.ack_error}\n`); } }
       if (!reply || /^[(（]静默[)）]/.test(reply)) {                        // "(静默)" 后面再跟解释也算静默（实现员 46 次把"(静默)\n\n我还在读…"发进了客厅），解释只记进 run 不发
         const note = reply.replace(/^[(（]静默[)）]\s*/, '').trim(); if (note) run.silent_note = note.slice(0, 300);
-        console.log(`[静默] 原始长度 ${String(reply || '').length}${note ? '，附了解释，不发' : ''}`); run.status = 'silent'; return; }
-      if (reply.startsWith('DM:')) { const m = reply.match(/^DM:\s*(\S+)\s*[:：]?\s*([\s\S]*)$/); if (m) { await api('POST', '/dm', { to: m[1], text: m[2], hop: hopOut }); run.status = 'dm'; run.said = m[2].slice(0, 500); run.to = m[1]; return; } }
+        console.log(`[静默] 原始长度 ${String(reply || '').length}${note ? '，附了解释，不发' : ''}`); run.status = 'silent'; if (mailbox && mailItems.length) mailbox.markAttempt(mailItems.map(i => i.id), 'silent', true); return; }
+      if (reply.startsWith('DM:')) { const m = reply.match(/^DM:\s*(\S+)\s*[:：]?\s*([\s\S]*)$/); if (m) { await api('POST', '/dm', { to: m[1], text: m[2], hop: hopOut }); if (mailbox && mailItems.length) mailbox.markAttempt(mailItems.map(i => i.id), 'dm', true); run.status = 'dm'; run.said = m[2].slice(0, 500); run.to = m[1]; return; } }
       if (/^APPROVAL[:：]/.test(reply)) {                                   // 两阶段（GATEWAY.md §2.1）：先向网关登记不可变 intent，再把 approval_body 原样交客厅，这轮到此结束；网关不可用就不发审批
         run.said = reply.slice(0, 500);
         let intent; try { intent = gw.parseApprovalLine(reply); }
@@ -383,12 +426,14 @@ async function run(roomName, runtimeName, think, opts = {}) {
         const a = await api('POST', '/approval', reg.approval_body);
         if (!a || !a.approval_id) { run.status = 'approval_rejected'; run.error = '客厅没收审批：' + JSON.stringify(a).slice(0, 300); fs.writeSync(2, `[${room.name}] ${run.error}\n`); return; }
         run.status = 'approval'; run.gateway_request_id = reg.request_id; run.approval_id = a.approval_id; run.action = intent.action;
+        if (mailbox && mailItems.length) mailbox.markAttempt(mailItems.map(i => i.id), 'approval', true);   // 客厅收了审批才算消费（gateway 登记成功不够）
         console.log(`[${room.name} 审批] ${intent.action} → ${a.approval_id}（${reg.request_id}）`); return; }
-      await api('POST', '/say', { text: reply, hop: hopOut }); console.log(`[${room.name} 说] ${reply.slice(0, 80)}`); run.status = 'said'; run.said = reply.slice(0, 500);
+      await api('POST', '/say', { text: reply, hop: hopOut }); if (mailbox && mailItems.length) mailbox.markAttempt(mailItems.map(i => i.id), 'say', true); console.log(`[${room.name} 说] ${reply.slice(0, 80)}`); run.status = 'said'; run.said = reply.slice(0, 500);
       shift.push({ at: new Date().toISOString(), heard: inbox.map(m => `${m.from}：${m.text}`), said: reply });
     } catch (e) {
       if (signal && signal.aborted) { run.status = 'interrupted'; run.error = String((signal.reason && signal.reason.message) || signal.reason || e.message).slice(0, 300); console.log(`[打断] ${run.error}（这轮不标已读，下轮重读）`); }
       else { console.error('[醒来失败]', e.message); run.status = 'error'; run.error = String(e.message || e).slice(0, 300); }
+      try { if (mailbox && typeof mailItems !== 'undefined' && mailItems.length) mailbox.markAttempt(mailItems.map(i => i.id), run.status, false); } catch {}   // 不消费：下次重放，带尝试标记
     }
     finally {
       run.ms = Date.now() - t0; R.recordRun(run);
@@ -427,7 +472,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
     res.on('end', () => resub(3000)); }); req.on('error', () => resub(5000)); req.end(); };
   function onMessage(m) {
     if (!m || m.type === 'activity' || m.from_id === room.id) return;
-    if (m.kind === 'result') { if (m.to_id === room.id) requestWake('human', '网关结果：' + ((m.meta || {}).status || '?'), 'interrupt'); return; }   // 网关结果：合同要求 human 车道醒（GATEWAY.md §3.3）
+    if (m.kind === 'result') { if (subOwns(m)) { subruns.noteDelivered(m.meta.request_id); return; } if (m.to_id === room.id) requestWake('human', '网关结果：' + ((m.meta || {}).status || '?'), 'interrupt'); return; }   // 合同 B（第一处）：子任务的结果不打断   // 网关结果：合同要求 human 车道醒（GATEWAY.md §3.3）
     if (!((m.mentions || []).includes(room.id) || m.kind === 'dm')) return;
     if (!memberById(m.from_id)) refreshMembers();                                   // 新面孔，下轮再认
     const human = isHuman(m.from_id); const who = byName(m.from_id, members);
@@ -481,12 +526,14 @@ async function run(roomName, runtimeName, think, opts = {}) {
     hb.reschedule();
   }
   if (!stop) return;                                                    // 没给 signal：照旧——循环靠 SSE 连接与 timer 活着，只在 SIGINT/SIGTERM 时睡
+  if (subruns) { try { const r = await subruns.recoverOnStartup(id => gw.getIntent(room.id, id), 10); if (r.interrupted) fs.writeSync(2, `[${room.name} subrun] 启动恢复：${r.interrupted} 个被中断的子任务已入 mailbox\n`); } catch (e) { fs.writeSync(2, `[${room.name} subrun] 启动恢复失败：${e.message}\n`); } }
   await new Promise(resolve => { if (stop.aborted) return resolve(); stop.addEventListener('abort', resolve, { once: true }); });
   stopped = true;
+  if (subruns) await subruns.stop(5000);   // 先停子任务（interrupted 入 mailbox），再收 SSE 与本轮
   clearTimeout(sseTimer); if (sseReq) sseReq.destroy();
   if (rtTimer) clearInterval(rtTimer); if (hb) hb.stop();
   if (active) active.ctrl.abort(new Error('适配器停下了'));
   for (let i = 0; i < 100 && active; i++) await new Promise(r => setTimeout(r, 50));   // 等正在跑的这一轮收尾（最多 5 秒）
   await sleep();
 }
-module.exports = { open, run, houseRoot, get HOUSE() { return houseRoot(); }, RUN, LANE, mergeRoutines, dueNow, countMissed, renderInboxLine, parseApprovalLine: gw.parseApprovalLine, parsePin: BB.parsePin, syncTaskRoutines: BB.syncTaskRoutines };
+module.exports = { parseSubLine, open, run, houseRoot, get HOUSE() { return houseRoot(); }, RUN, LANE, mergeRoutines, dueNow, countMissed, renderInboxLine, parseApprovalLine: gw.parseApprovalLine, parsePin: BB.parsePin, syncTaskRoutines: BB.syncTaskRoutines };

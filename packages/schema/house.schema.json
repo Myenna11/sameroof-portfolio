@@ -94,6 +94,63 @@
               "deny"
             ]
           }
+        },
+        "subagent": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "subagent V0 (docs/design/subagents.md): in-process subruns for broker-direct residents",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "max_parallel": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8
+            },
+            "budget": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "model_calls": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 200
+                },
+                "tool_calls": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 500
+                },
+                "minutes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 240
+                }
+              }
+            },
+            "tools": {
+              "type": "array",
+              "maxItems": 4,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "core.fs.read",
+                  "core.exec.ro"
+                ]
+              }
+            },
+            "inherit_max_chars": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 200000
+            },
+            "summary_max_words": {
+              "type": "integer",
+              "minimum": 20,
+              "maximum": 5000
+            }
+          }
         }
       }
     },

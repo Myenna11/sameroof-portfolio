@@ -80,6 +80,7 @@ async function runSubagent(opts) {
         if (c.parseError || !c.params) { results.push(`[${c.action}] 拒绝：JSON 参数不合法`); tr({ ev: 'tool_refused', action: c.action, reason: 'json' }); continue; }
         if (!allowed.has(c.action)) { results.push(`[${c.action}] 拒绝：子任务不可用（仅 ${[...allowed].join('、')}；写/可写执行需 ${residentName} 自行审批）`); tr({ ev: 'tool_refused', action: c.action, reason: 'not_allowed' }); continue; }
         toolCalls++;
+        if (c.action === 'core.exec.ro') { c.params = { ...c.params, writable_root_ids: [] }; if (c.params.timeout_ms == null) c.params.timeout_ms = 10000; }   // read-only by construction; the model needn't know the field
         // Contract B: persist request_id BEFORE registering, so a result DM that races us is recognised.
         const requestId = gateway.newRequestId(); requestIds.push(requestId);
         tr({ ev: 'tool_register', action: c.action, request_id: requestId, params: c.params });

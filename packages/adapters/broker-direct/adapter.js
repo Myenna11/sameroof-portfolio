@@ -45,4 +45,4 @@ async function callOnce(messages, signal, opts = {}) {
   catch (e) { if (!/broker 401/.test(String(e.message))) throw e; return call(messages, signal, readToken(), o); }
 }
 module.exports = { think, callOnce, call, shift, shiftPath };
-if (require.main === module) run(R.room.name, 'broker-direct', think, { dry: process.argv.includes('--dry'), once: process.argv.includes('--once') });
+if (require.main === module) run(R.room.name, 'broker-direct', think, { dry: process.argv.includes('--dry'), once: process.argv.includes('--once'), callOnce });   // callOnce: subagent V0 的无 shift 模型调用
