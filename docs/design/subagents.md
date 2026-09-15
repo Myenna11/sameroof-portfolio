@@ -1,9 +1,11 @@
-# Subagents — decision document (v2)
+# Subagents — decision document (v3)
 
 - Author: 规划员
 - Date: 2026-09-15
-- Supersedes: v1 of this file (commit a5c9075, "dynamic resident instances") — **rejected**, see §7
-- Also considered and rejected: fixed worker pool at the coordinator layer (审查员's V0 proposal, `docs/reviews/2026-09-15-reviewer-subagent-design-review.md`) — see §7
+- Supersedes: v2 (3d75071) after 审查员's review `docs/reviews/2026-09-15-reviewer-subagents-v2-review.md` — direction APPROVED, four gates (G1–G4) addressed here
+- Rejected earlier: v1 dynamic residents (a5c9075); coordinator-layer fixed worker pool — see §7
+- Depends on: `docs/rfc/2026-09-15-gateway-allow.md` (G1/G2) — must land first
+- Authorisation on record: 维护者 2026-09-15 — subruns may execute in a read-only sandbox without approval (`core.fs.read: allow`, `core.exec.ro: allow`); writes and writable exec stay `approve`
 - Status: **design for review**, nothing implemented
 - Reviewer: 审查员
 
@@ -29,45 +31,44 @@ That resolves every structural objection in the v1 review at once: no `#` in IDs
 
 A subrun is not a resident and never appears in `/members`, the task board, or SSE presence. It **is** visible where the resident's actions are already visible: broker ledger (tagged `purpose=subagent`, `run=sub_…`), gateway intents and audit (tagged `run_id=sub_…`), and its own transcript file.
 
-## 3. Prerequisite: the gateway's `allow` mode does not exist
+## 3. Prerequisite: gateway `allow` + `core.exec.ro` (G1, G2) → separate RFC
 
-`house.schema.json` promises permissions `allow | approve | deny`. Reality (read from code):
+Two distinct facts, kept distinct (审查员 G1):
 
-- `packages/gateway/server.js::ensurePermission` distinguishes only `deny` vs anything-else.
-- Every registered intent goes `awaiting_approval` → coordinator broadcasts to humans → human decides → gateway polls `/internal/gateway/approval-results` → executes.
-- `packages/living-room/server.js` has no auto-decision path either.
+1. **Technical gap** — `allow` is in the schema and implemented nowhere; the living room's result contract is keyed on `approval_id` (`server.js:450-480`), so a gateway that executes without approval has nowhere to deliver. The fix is `docs/rfc/2026-09-15-gateway-allow.md`: ceiling algebra `deny<approve<allow` with room-only-tightens, a new `core.exec.ro` action (existing bwrap: `--unshare-net` + `--ro-bind` roots + `writable_root_ids` forced empty), a `policy_allow` decision record, a living-room result contract that accepts a policy decision verified against the lock digest, `run_id` carried end to end, and a per-resident rate limit. **2.5 days, its own tests, its own gate.** v2's "living-room likely no change" was wrong; the RFC replaces it.
 
-So `core.fs.read: allow` in `house.yaml` still means a human clicks for every read. **No background worker can exist in this system today, in any layer**, because a worker that needs the human for every `grep` is not a worker.
+2. **Policy choice for this house** — 维护者 chose the read-only-sandbox tier on 2026-09-15 (see header). The 2026-09-08 `core.fs.read: approve` was the value picked while fixing a prompt/policy contradiction, not a strictness decision. The house file changes only after the RFC lands and 维护者 confirms the four-line policy in its §2.2.
 
-This is a pre-existing schema/implementation gap, independent of subagents, and it is **step 0**:
-
-- Gateway: if the effective permission is `allow`, execute immediately after `registerIntent` (same bwrap, same audit row with `decision_source: policy_allow`, same result posting). `approve` keeps today's path. `deny` unchanged.
-- The living-room must **not** broadcast an approval card for intents that never enter `awaiting_approval` (it currently only broadcasts on the awaiting path, so likely no change — to be verified in the test).
-- Test matrix: `allow` executes without decision + audited; `approve` still waits; `deny` still 403; policy digest mismatch still refuses; an `allow` action outside the room's mount roots still refuses.
-
-Estimate: 0.5 day. This ships on its own value before any subagent code.
+Exit criterion 1 (§6) is therefore conditional on both, explicitly.
 
 ## 4. Design
 
-### 4.1 Where it plugs in — the wake's post-turn phase
+### 4.1 Where it plugs in — a background manager beside `wake()`, not inside it (G3)
 
-`lib/room.js::wake()` today: build context → `think()` → parse directive lines (`PIN:`, `DM:`, `REMEMBER:` …) → post reply → ack inbox → return.
+Facts from `lib/room.js`: each wake reads unread messages from `GET /inbox` only (`:205-209`) and acks those ids (`:372`); there is no adapter-side queue. `runOnce` wraps the entire `wake()` in a watchdog (`limits.run_timeout_ms`, `:190-197`) and holds `active` so only one run per resident exists at a time (`:169-185`). A post-turn phase inside `wake()` would extend that watchdog and block human messages for the subrun's duration. So:
 
-Add one directive and one phase:
+**Directive** — `SUB:` is parsed where `PIN:` is parsed, stripped from the reply. The parent's turn then completes normally: reply posted, coordinator inbox acked, `active` released.
+
+**Subrun manager** — a separate object owned by `run()`, outside `runOnce`:
+
+- Own `AbortController` per subrun; own budget clock; `max_parallel` slots. Not covered by the wake watchdog.
+- On `SIGTERM`: abort all subruns, wait ≤ 5 s, then let the adapter exit. Transcript lines already written stay.
+- While a subrun runs, `requestWake('human', …)` proceeds as today — the parent can talk. A subrun never holds `active`.
+- The manager writes to the **adapter-local durable mailbox** (below) and calls `requestWake('agent', 'subresult')` when a subrun reaches a terminal state.
+
+**Adapter-local durable mailbox** — `rooms/<name>/state/mailbox.jsonl`, append-only:
 
 ```
-SUB: <task> | 带上: <brief> | 引用: <msg ids / paths> | 工具: <allowlist> | 预算: <model calls>/<tool calls>/<minutes> | 继承: <N>
+{ id, ts, kind: 'subresult', sub_id, status, summary, usage, tool_calls, consumed: false }
 ```
 
-Parsing happens where `PIN:` is parsed. The lines are stripped from the reply like the others. **The reply is posted and the inbox acked first** — the parent's turn commits normally ("正在查，稍后回你"). Then, in a post-turn phase with its own timeout, the adapter runs the subruns (up to `subagent.max_parallel` concurrently), persists each transcript, and enqueues one synthetic inbox item per subrun:
+- Written atomically (tmp + rename of the whole file is acceptable at this size; or append + fsync). Written **before** `requestWake`.
+- At the start of `wake()`, after `GET /inbox`, the adapter reads unconsumed mailbox items and renders them into the same inbox block the model sees, labelled `【子任务结果】` — distinct from coordinator messages; **not** faked as a `dm` with `from_id=self`, so hop counting, mention logic and DM visibility rules are untouched.
+- Mailbox items are marked `consumed` only after the turn's reply is posted successfully (same point where coordinator ids are acked; separate write). A crash between "rendered into prompt" and "consumed" replays the item next wake — at-most-once *consumption* is guaranteed, at-least-once *presentation* is accepted (the model may see a result twice after a crash; the item carries `ts` so it can tell).
+- A wake triggered by `subresult` with an empty coordinator inbox is still a wake: the model is asked to act on the results. `(静默)` is allowed.
+- On startup the manager scans `state/subruns/*.jsonl` for transcripts without a terminal line, writes an `interrupted` mailbox item for each, and requests a wake.
 
-```
-{ kind: 'subresult', from_id: <self>, meta: { sub_id, status, model_calls, tool_calls, elapsed_ms }, text: <summary> }
-```
-
-and schedules an immediate re-wake on the same lane. The parent's next `think()` sees the summaries in its inbox exactly like a DM reply — no new context mechanism.
-
-Why post-turn and not mid-turn: `think()` in every runtime is one request → one response; there is no tool loop in the parent. The three harnesses have a mid-turn tool loop; we don't, and adding one is a runtime-contract change out of scope. The `APPROVAL:` → gateway → `result` inbox pattern already proves the post-turn shape works for our adapters.
+Why not the coordinator: subresults are the resident's own working memory, not household communication. Routing them through `/dm` to self would make them visible to humans as chatter and subject to hop limits. The gateway results *are* routed through the coordinator (§4.5) — that is the human-visible audit.
 
 ### 4.2 The subrun loop — `lib/subagent.js`
 
@@ -78,24 +79,27 @@ runSubagent({
   brief,            // { task, constraints?, success?, refs: [{kind:'message'|'file', ref, text?}] }
   system,           // resolved system prompt (see 4.4)
   inherit,          // [] or the parent's last N rendered turns (see 4.3)
-  tools,            // subset of ['core.fs.read','core.exec'] — each must be `allow` for this resident
+  tools,            // subset of ['core.fs.read','core.exec.ro'] — each must resolve to `allow` for this resident
   budget,           // { modelCalls: 15, toolCalls: 20, ms: 600000 }
-  model,            // async (system, user, signal) => text   — the parent's own think()
+  model,            // async (messages, signal) => { text, usage }   — ONE-SHOT, see below
   gateway,          // { registerIntent, getIntent } bound to the parent's gateway token
+  runId,            // 'sub_' + id, generated by the manager; passed to every intent
   signal, log
-}) => { status: 'ok'|'budget'|'timeout'|'error', summary, transcript, usage, toolCalls }
+}) => { status: 'ok'|'budget'|'timeout'|'error'|'interrupted', summary, transcript, usage, toolCalls }
 ```
+
+**`model` is not the parent's `think()` (G4).** In `broker-direct/adapter.js`, `think = wrapThink(call, shift)` — every call appends to the resident's persistent shift (`state/shift-<id>.jsonl`), which is exactly the context the subrun must stay out of. The adapter exports a second function, `callOnce(messages, signal, { purpose })`, that hits the broker with the same token, model and parameters but **no shift**: the subrun owns its own `messages` array. Broker side: tokens carry `purposes` (default `['interactive']`, `store.js:212`) and the proxy rejects a request whose `x-sameroof-purpose` is not in the token's list (`:293`). So the parent's broker token must be issued with `purposes: ['interactive', 'subagent']` for `SUB:` to work — `serve` and the systemd token issuance do this when `subagent.enabled` is set; an existing token without it fails closed with a clear error in the subresult.
 
 Loop: render prompt → `model()` → if reply has `TOOL: <action> <json>` lines, register each intent with `run_id: sub_<id>`, poll `GET /v1/intents/:id` until terminal, append results as the next user message → repeat until reply has no `TOOL:` lines (that reply is the summary) or a budget trips. Every model call and tool call is appended to `transcript` (JSONL) as it happens, so a killed subrun still leaves evidence.
 
-The loop **refuses** `TOOL:` actions that are not in `tools` or whose effective permission is `approve` — a background worker never blocks on a human. It reports the refusal in the summary ("needed core.fs.write, not allowed for subruns") so the parent can escalate through its own `APPROVAL:` line.
+The loop **refuses** `TOOL:` actions that are not in `tools` or whose effective permission is not `allow` — a background worker never blocks on a human. The adapter's allowlist is a convenience, **not the security boundary**: the gateway re-evaluates ceiling, root, action and rate limit on every intent regardless of what the adapter believed (RFC §2.3, §2.6). The refusal is reported in the summary ("needed core.fs.write — approve-only, not available to subruns") so the parent can escalate through its own `APPROVAL:` line.
 
 No `SUB:` inside a subrun: the system prompt doesn't offer it and the parser is not wired. Depth = 1, structurally.
 
 ### 4.3 Context: zero by default, inherit by explicit count
 
 - **Default**: the subrun sees `system` (4.4) + `brief` + `refs`. Not the room, not the parent's history, not memory.
-- `引用:` — `msg_<id>` → the adapter looks up that message in its own recent-context buffer (it has the text; the coordinator is not asked) and inlines it; a path → inlined only if `core.fs.read` is in `tools`, otherwise the subrun must read it itself.
+- `引用:` — `msg_<id>` → the adapter looks up that message in its own recent-context buffer (it has the text; the coordinator is not asked) and inlines it; a path → **not** inlined by the adapter (it has no file access either); the subrun reads it via `TOOL: core.fs.read` if allowed.
 - `继承: N` — the adapter includes its own last N rendered turns (the same `recent context` block it built for `think()` this wake), capped at `subagent.inherit_max_chars`. This is the fork mode. Snapshot is taken at spawn time from data the adapter already holds — the coordinator is never asked to reconstruct anything (this was 审查员's point 8; it dissolves at this layer).
 - `带上:` is **required non-empty** unless `继承:` is given. An empty brief is a parse error with a system-message hint, not a spawn.
 
@@ -112,12 +116,14 @@ Optional specialised personas: `rooms/<name>/subagents/<kind>.md`, selected by `
 | domain | subrun uses | attribution |
 |---|---|---|
 | coordinator | nothing (no `/say`, no `/dm`, no tasks) | — |
-| broker | parent's token, unchanged scope | headers `x-sameroof-purpose: subagent`, `x-sameroof-run: sub_<id>`; the ledger already has a `purpose` column; add `run_id` (nullable) so `/cost` can split parent vs subruns |
-| gateway | parent's token, `run_id: sub_<id>` on every intent | audit rows carry `run_id`; `getIntent` scoped to the token's resident, which is the parent — correct |
+| broker | parent's token, unchanged alias/model scope; token must include purpose `subagent` | headers `x-sameroof-purpose: subagent`, `x-sameroof-run: sub_<id>`; ledger `purpose` column exists; add `run_id` (nullable) so `/cost` can split parent vs subruns |
+| gateway | parent's token, `run_id: sub_<id>` on every intent; only `core.fs.read` / `core.exec.ro` (both must be `allow`) | audit rows carry `run_id` + `decision_source=policy_allow`; `getIntent` scoped to the token's resident, which is the parent — correct. Gateway enforces independently of the adapter's allowlist. |
 
 A subrun therefore **cannot exceed the parent's scope** in any domain, by construction. What it can do is narrower (tool allowlist ∩ `allow` permissions, plus budget).
 
-Gateway results for `sub_` intents still get posted to the living-room and DM'd to the parent (today's path). The parent adapter treats a `result` DM whose `meta.run_id` starts with `sub_` as **already consumed** (the loop polled it): ack silently, do not wake. The DM remains in the human's fold-out — this is the "process is auditable, only the summary enters the parent's context" property 审查员 asked for, using an existing mechanism.
+Gateway results for subrun intents still get posted to the living room and DM'd to the parent (today's path, extended by the RFC to carry `meta.run_id` and `meta.decision`). The parent adapter treats a `result` DM as already consumed **iff** `meta.run_id` equals the `runId` of a subrun this manager started and the subrun's own poll of `GET /v1/intents/:id` has recorded that request_id (both conditions; the manager keeps the set). Then: ack silently, do not wake. Any other `result` DM — including one with an unknown `sub_` id — wakes the parent as today. The `run_id` is vouched for by the gateway (RFC §2.5), not inferred from a prefix (G4).
+
+The DM remains in the human's fold-out with `decision: policy` — this is the "process is auditable, only the summary enters the parent's context" property, using the existing mechanism.
 
 ### 4.6 Budgets and failure
 
@@ -128,7 +134,7 @@ subagent:
   enabled: false                 # default off; a room opts in
   max_parallel: 2
   budget: { model_calls: 15, tool_calls: 20, minutes: 10 }
-  tools: [core.fs.read]          # allowlist; each must also be `allow` in permissions
+  tools: [core.fs.read, core.exec.ro]   # allowlist; each must resolve to `allow` (house ceiling ∧ room)
   inherit_max_chars: 12000
   summary_max_words: 300
 ```
@@ -151,8 +157,8 @@ The post-turn phase has its own watchdog (`budget.minutes` × `max_parallel` upp
 | runtime | `SUB:` |
 |---|---|
 | `broker-direct` | implemented as above; `model` = the adapter's existing `call()` |
-| `claude-code` | **rejected at parse** with a system-message hint: "use your native Agent tool". Claude Code already has subagents with a real mid-turn tool loop; wrapping it would be worse. |
-| `pi` | same as claude-code until someone reads pi's agent-loop API and finds a clean hook |
+| `claude-code` | `SUB:` not supported by this adapter; the line is dropped and a system note says so. (Claude Code has its own `Agent` tool with a mid-turn loop; whether and how it's exposed to the model in this runtime is that runtime's business, not asserted here.) |
+| `pi` | same: not supported by this adapter. pi's agent-loop API has not been read; no claim about native capability. |
 
 V0 is broker-direct only. That is where our own house's long-running residents live.
 
@@ -162,28 +168,29 @@ V0 is broker-direct only. That is where our own house's long-running residents l
 - `/cost`: subagent tokens split out per resident via the ledger `run_id`.
 - Files: `rooms/<name>/state/subruns/sub_<id>.jsonl` — full transcript.
 
-## 5. Estimates (honest, per piece, tests included)
+## 5. Estimates (after the RFC lands)
 
 | piece | where | estimate |
 |---|---|---|
-| 0. gateway `allow` executes without decision | `packages/gateway` + one living-room test | 0.5 d |
-| 1. `lib/subagent.js` loop, budgets, `TOOL:` parse, refusal, transcript | `packages/adapters` | 1 d |
-| 2. `SUB:` directive, post-turn phase, parallelism, `subresult` injection, re-wake, `sub_` result-DM filter, interrupted-subrun recovery | `packages/adapters/lib/room.js` | 1 d |
-| 3. `subagent:` schema block, `subagents/*.md` discovery + frontmatter narrowing | `packages/schema`, `packages/adapters` | 0.5 d |
-| 4. broker `run_id` ledger column + `/cost` split | `packages/broker`, `packages/living-room` | 0.5 d |
-| 5. demo: parent gets "find every caller of X" → subrun greps via gateway → parent replies with the list; human sees `sub_` results in fold-out | `examples/` | 0.5 d |
+| 1. `callOnce` export (no shift), token purpose `subagent` in `serve` + deploy token issuance, broker `run_id` ledger column | `broker-direct/adapter.js`, `cli`, `broker` | 0.5 d |
+| 2. `lib/subagent.js` loop: prompt render, `TOOL:` parse, gateway register + poll, budgets, refusal, transcript append-as-you-go | `packages/adapters` | 1 d |
+| 3. subrun manager: slots, abort, SIGTERM, startup scan; local durable mailbox (write, render, consume, replay); `SUB:` parse; result-DM matching by `run_id`+poll-set | `packages/adapters/lib/room.js` + new `lib/mailbox.js`, `lib/subrun-manager.js` | 1.5 d |
+| 4. `subagent:` schema block; `subagents/*.md` discovery + frontmatter narrowing | `packages/schema`, `packages/adapters` | 0.5 d |
+| 5. `/cost` split by `run_id`; console: nothing new in V0 | `packages/living-room` | 0.25 d |
+| 6. demo: parent asked "找出所有调 recall() 的地方" → subrun runs `grep -rn` under `core.exec.ro` → parent replies with the list; human sees policy-allowed results in fold-outs; fault injection: kill adapter mid-subrun, expect `interrupted` next wake | `examples/` + tests | 0.75 d |
 
-**4 days**, then a gate. Existing tests: gateway gains cases; `room.js` seam tests unchanged; schema tests gain the new block. No existing test changes meaning.
+**4.5 days** after the RFC's 2.5 → **7 days total**, then a gate each. Existing `room.js` seam tests: unchanged; new tests are additive. Not a promise that no existing test changes — the mailbox read at wake start touches the prompt assembly path, and the seam tests assert on prompt shape; if they break, that's a finding to report, not to paper over.
 
 ## 6. Exit criteria for V0
 
 Ship when, on this house's own deployment:
 
-1. A broker-direct resident with `subagent.enabled` and `core.fs.read: allow` can be asked "找出所有调 `recall()` 的地方" and, without any human click, replies within budget with a list that matches `grep -rn`.
+1. **Given** the RFC has landed and this house's policy has `core.fs.read: allow` + `core.exec.ro: allow` (维护者's 2026-09-15 choice, applied only after the RFC gate): a broker-direct resident with `subagent.enabled` can be asked "找出所有调 `recall()` 的地方" and, without any human click, replies within budget with a list that matches `grep -rn`. Without that policy the same request yields a subresult saying the tool was approve-only — that is also a passing behaviour, not a bug.
 2. `/cost` shows the subrun's tokens separately.
 3. The gateway audit shows every read with `run_id: sub_…`.
-4. Killing the adapter mid-subrun produces an `interrupted` subresult on the next wake, and the transcript file is intact.
-5. A `SUB:` line from a `claude-code` resident produces the hint and nothing else.
+4. Killing the adapter mid-subrun produces an `interrupted` mailbox item and a wake on restart; the transcript file is intact; a human message arriving during a subrun is answered without waiting for it.
+5. A `SUB:` line from a `claude-code` or `pi` resident is dropped with a system note and nothing else.
+7. A `result` DM whose `run_id` is not in the manager's set wakes the parent normally (no false silence).
 6. All of the above in tests with a mock broker and the real gateway (bwrap), in CI.
 
 If after two weeks of daily use we want: cross-resident delegation with a reply obligation, a visible worker roster, or dynamic process scaling — that is the coordinator-layer feature 审查员 specified (subrun table, leases, reconciler), and it should be built **on top of** this, not instead of it: a coordinator-level subrun would *dispatch to* a resident, whose adapter then runs it as an in-process subrun. The two layers compose; V0 is the inner one.
@@ -198,8 +205,8 @@ If after two weeks of daily use we want: cross-resident delegation with a reply 
 
 ## 8. Questions for 审查员
 
-1. §3: do you agree gateway `allow` is a prerequisite and should ship first on its own? Any reason the schema promised it but nothing implemented it — a deliberate hold?
-2. §4.5: reusing the parent's gateway token with `run_id: sub_…` versus minting a narrowed capability. I'm reusing because the narrowing happens in the adapter (allowlist ∩ `allow`) and the gateway already enforces the resident ceiling; a second token buys defence-in-depth against a compromised adapter, which is the same trust domain anyway. Is that acceptable for V0?
-3. §4.1: post-turn phase + re-wake versus holding the turn open. Post-turn is simpler and the parent can talk while waiting; the cost is the human sees "正在查" then a second message. Fine?
-4. §4.7: rejecting `SUB:` for claude-code/pi runtimes rather than wrapping their native subagents. Agree?
-5. §6: exit criterion 1 is the whole point. Is "no human click" achievable in your view without changes I haven't seen (living-room auto-broadcast, result DM wake)?
+1. §4.1 mailbox consumption point: I mark items consumed after the reply posts (same point as coordinator ack), accepting at-least-once presentation across a crash. Alternative: consume when rendered, accepting loss on crash. I prefer replay over loss; agree?
+2. §4.1 the subrun manager lives in `room.js`'s `run()` scope so it can call `requestWake`. That grows `room.js`. Alternative: a separate process (`subrun-worker.js`) talking to the adapter over a Unix socket — cleaner isolation, one more process to supervise. For V0 I stay in-process; is that acceptable given the 5 s SIGTERM budget?
+3. §4.2 token purpose `subagent`: requires re-issuing existing broker tokens. `serve` can do it; for the systemd deployment it's a manual `brokerctl token issue`. Should the broker instead accept `subagent` for any token whose resident has `subagent.enabled` in the lock (policy-driven), avoiding re-issue?
+4. RFC §2.4(b) vs (a) — same question as in the RFC; it determines whether the subrun's tool results can be delivered at all.
+5. Anything in §4.1 that still smuggles a coordinator assumption.
