@@ -242,6 +242,10 @@ class Gateway {
     }
     this.policy = loadPolicyFiles(this.houseDir, null);
     this.rooms = this.policy.rooms; this.house = this.policy.house; this.roomConfigs = this.policy.roomConfigs;
+    // Upgrade path: rows that kept output_json before per-row retention existed have no promise to honour → clear, fail closed.
+    const legacy = this.state.db.prepare("SELECT request_id FROM intents WHERE output_json IS NOT NULL AND (output_expires_at IS NULL OR output_max_reads IS NULL)").all();
+    for (const r of legacy) this.clearOutput(r.request_id, 'legacy_no_snapshot');
+    this.legacyOutputsCleared = legacy.length;
     // Startup physical clearing of retained outputs — AFTER policy is loaded, BEFORE we listen. Failure is a real error, not swallowed.
     this.startupSweep = this.sweepOutput();
     this.server = null; this.listening = false;
@@ -359,8 +363,17 @@ class Gateway {
     let st; try { st = fs.lstatSync(mountPath); } catch { throw new GatewayError(403, 'GW-POLICY-DENIED', '挂载根不存在。'); }
     if (!st.isDirectory() || st.isSymbolicLink()) throw new GatewayError(403, 'GW-POLICY-DENIED', '挂载根必须是非链接目录。');
     if (mountPath === path.parse(mountPath).root || ['/etc', '/var', '/home', '/root', '/opt', '/srv', '/proc', '/sys', '/dev', '/usr'].includes(mountPath) || mountPath === '/run' || mountPath.startsWith('/run/') || mountPath === this.runDir || mountPath.startsWith(this.stateDir + path.sep) || (this.houseDir.startsWith(mountPath + path.sep) && mountPath !== this.houseDir)) throw new GatewayError(403, 'GW-POLICY-DENIED', '挂载根范围过宽或属于网关状态目录。');
-    const exclude = Array.isArray(mount.exclude) ? mount.exclude.map(x => normalizeRelative(String(x))).filter(Boolean) : [];
     const gate = mount.gate === 'approve' ? 'approve' : null;
+    // exclude entries must be existing, non-symlink directories inside the root. Anything else is a config error, not a skip:
+    // a missing/replaced exclude target would otherwise leave the whole root bound in the sandbox with nothing covering it.
+    const exclude = [];
+    for (const raw of Array.isArray(mount.exclude) ? mount.exclude : []) {
+      const rel = normalizeRelative(String(raw)); if (!rel) throw new GatewayError(403, 'GW-POLICY-DENIED', 'exclude 项不能为空或指向根本身。');
+      const full = path.join(mountPath, rel); if (full !== mountPath && !full.startsWith(mountPath + path.sep)) throw new GatewayError(403, 'GW-POLICY-DENIED', 'exclude 项超出挂载根。');
+      let est; try { est = fs.lstatSync(full); } catch { throw new GatewayError(503, 'GW-SANDBOX-DENIED', 'exclude 目标不存在：' + rel + '（无法保证遮挡，拒绝）。'); }
+      if (est.isSymbolicLink() || !est.isDirectory()) throw new GatewayError(503, 'GW-SANDBOX-DENIED', 'exclude 目标必须是非链接目录：' + rel + '。');
+      exclude.push(rel);
+    }
     // A mount may CONTAIN other residents' rooms: they are hidden inside the sandbox (hiddenHostPaths) and refused by
     // safeTarget — unless this root is gated, in which case a human approves each touch. `exclude` additionally empties subtrees.
     for (const [id, dir] of policy.rooms) if (id !== residentId && mountPath === dir) throw new GatewayError(403, 'GW-POLICY-DENIED', '不能把其他住户房间作为挂载根。');
@@ -536,7 +549,7 @@ class Gateway {
     if (expiresAt <= Date.now()) { this.clearOutput(requestId, 'expired'); throw new GatewayError(410, 'GW-OUTPUT-EXPIRED', '输出已过期。'); }
     // atomic read-count increment: concurrent GETs cannot exceed maxReads
     const claimed = this.state.db.prepare('UPDATE intents SET output_reads=output_reads+1 WHERE request_id=? AND output_json IS NOT NULL AND output_reads<? RETURNING output_json, output_reads').get(requestId, maxReads);
-    if (!claimed) throw new GatewayError(410, 'GW-OUTPUT-CONSUMED', '输出已读满或已清除。');
+    if (!claimed) { this.clearOutput(requestId, 'reads_exhausted'); throw new GatewayError(410, 'GW-OUTPUT-CONSUMED', '输出已读满或已清除。'); }
     let full; try { full = JSON.parse(claimed.output_json); } catch { this.clearOutput(requestId, 'corrupt'); throw new GatewayError(410, 'GW-OUTPUT-CONSUMED', '输出不可解析。'); }
     const remaining = maxReads - claimed.output_reads;
     if (remaining <= 0) this.clearOutput(requestId, 'reads_exhausted');
@@ -572,7 +585,9 @@ class Gateway {
     const ttlMs = Number(this.policy.house.gateway?.output_ttl_ms || 10 * 60 * 1000);
     const nowIso = now(), cutoff = new Date(Date.now() - ttlMs).toISOString();
     // expired by the row's own recorded promise OR by current (possibly tighter) policy; reads exhausted by row cap
-    const rows = this.state.db.prepare("SELECT request_id FROM intents WHERE output_json IS NOT NULL AND (output_expires_at<=? OR (executed_at IS NOT NULL AND executed_at<=?) OR (output_max_reads IS NOT NULL AND output_reads>=output_max_reads))").all(nowIso, cutoff);
+    const policyReads = Number(this.policy.house.gateway?.output_max_reads || 3);
+    // expired by the row's own promise OR by current (possibly tighter) policy; reads exhausted by min(row cap, current policy)
+    const rows = this.state.db.prepare("SELECT request_id FROM intents WHERE output_json IS NOT NULL AND (output_expires_at<=? OR (executed_at IS NOT NULL AND executed_at<=?) OR output_reads>=MIN(COALESCE(output_max_reads, ?), ?))").all(nowIso, cutoff, policyReads, policyReads);
     for (const r of rows) this.clearOutput(r.request_id, 'expired');
     return rows.length;
   }
@@ -686,7 +701,12 @@ class Gateway {
       else args.push('--ro-bind', '/dev/null', item.path);
     }
     // exclude: empty tmpfs over each excluded subtree — LAST, so hidden-path binds can't re-materialise entries inside it
-    for (const root of mountedRoots) for (const x of root.exclude || []) { const full = path.join(root.path, x); try { if (fs.statSync(full).isDirectory()) args.push('--tmpfs', full); } catch {} }
+    for (const root of mountedRoots) for (const x of root.exclude || []) {
+      const full = path.join(root.path, x); let est;
+      try { est = fs.lstatSync(full); } catch { throw new GatewayError(503, 'GW-SANDBOX-DENIED', 'exclude 目标在执行前消失：' + x + '，拒绝执行。'); }
+      if (est.isSymbolicLink() || !est.isDirectory()) throw new GatewayError(503, 'GW-SANDBOX-DENIED', 'exclude 目标类型已变化：' + x + '，拒绝执行。');
+      args.push('--tmpfs', full);
+    }
     args.push('--chdir', cwd, '--clearenv'); for (const [k, v] of Object.entries(p.env || {})) args.push('--setenv', k, v); args.push('--', ...argv);
     const timeout = p.timeout_ms || 30000; const child = spawn(this.bwrapPath, args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: '/usr/bin:/bin' } }); let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), outTr = false, errTr = false;
     const append = (old, chunk, which) => { const room = MAX_OUTPUT - old.length; if (room <= 0) { if (which === 'out') outTr = true; else errTr = true; return old; } if (chunk.length > room) { if (which === 'out') outTr = true; else errTr = true; return Buffer.concat([old, chunk.subarray(0, room)]); } return Buffer.concat([old, chunk]); };
