@@ -1,5 +1,5 @@
 'use strict';
-// Test launcher for a REAL gateway process (crash-recovery.test.js). Identical to server.js's main entry except it skips
+// Test launcher for a REAL gateway process (test/crash-recovery.test.js). Lives outside test/ so `node --test` doesn't run it as a test. Identical to server.js's main entry except it skips
 // assertUnprivileged() so the test can also run on a root-owned dev box. Everything else — constructor recovery, listen,
 // approval/delivery loop — is the production code path.
 const { createGateway } = require('../server');

@@ -56,7 +56,7 @@ gateway:
   const helper = createGateway({ houseDir: root, runDir, stateDir, socketPath: path.join(root, 'unused.sock'), lockRequired: false, bwrapProbe: false, resultClient: async () => ({}) });
   const token = helper.issueAdapterToken('resident_alpha_01').token; await helper.close();
   const env = { ...process.env, SAMEROOF_ROOT: root, HOME: root, SAMEROOF_GATEWAY_RUN_DIR: runDir, SAMEROOF_GATEWAY_STATE_DIR: stateDir, SAMEROOF_GATEWAY_SOCKET: sock, SAMEROOF_LIVING_ROOM_PORT: String(lrPort) };
-  const startGateway = (extraEnv = {}) => spawn(process.execPath, [path.join(__dirname, '_launch-gateway.js')], { env: { ...env, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const startGateway = (extraEnv = {}) => spawn(process.execPath, [path.join(__dirname, '..', 'test-support', 'launch-gateway.js')], { env: { ...env, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'] });
   const waitSock = () => until(() => fs.existsSync(sock));
   let gw1, gw2, gw3;
   try {
