@@ -325,12 +325,20 @@ class Gateway {
   // Effective permission = min(rank(house ceiling), rank(room value)); a room can tighten, never widen.
   // Unknown/missing ceiling → deny. Unknown room value → treated as deny (fail closed), audited by caller if desired.
   // Returns 'approve' | 'allow'; throws for deny. (RFC 2026-09-15-gateway-allow §2.1)
-  effectivePermission(action, residentId, policy = this.policy) {
+  // rootIds: every mount root the intent touches (fs: root_id; exec: cwd root + writable roots). A root with gate: approve
+  // caps the result at approve — a gated mount is never reachable on the policy_allow path.
+  effectivePermission(action, residentId, policy = this.policy, rootIds = []) {
     const ceiling = policy.house.defaults?.permissions?.[action];
     const roomValue = policy.roomConfigs.get(residentId)?.permissions?.[action];
     const rank = v => (v in PERMISSION_RANK ? PERMISSION_RANK[v] : PERMISSION_RANK.deny);
-    const eff = roomValue === undefined ? rank(ceiling) : Math.min(rank(ceiling), rank(roomValue));
+    let eff = roomValue === undefined ? rank(ceiling) : Math.min(rank(ceiling), rank(roomValue));
+    for (const id of rootIds) { if (id === 'own-room') continue; let root; try { root = this.rootFor(residentId, id, policy); } catch { continue; } if (root.gate === 'approve') eff = Math.min(eff, PERMISSION_RANK.approve); }
     return Object.keys(PERMISSION_RANK).find(k => PERMISSION_RANK[k] === eff) || 'deny';
+  }
+  static rootIdsOf(action, params) {
+    if (!params || typeof params !== 'object') return [];
+    if (action === 'core.fs.read' || action === 'core.fs.write') return params.root_id ? [String(params.root_id)] : [];
+    const ids = []; if (params.cwd && params.cwd.root_id) ids.push(String(params.cwd.root_id)); if (Array.isArray(params.writable_root_ids)) ids.push(...params.writable_root_ids.map(String)); return ids;
   }
   ensurePermission(action, residentId, policy = this.policy) {
     const effective = this.effectivePermission(action, residentId, policy);
@@ -351,12 +359,17 @@ class Gateway {
     let st; try { st = fs.lstatSync(mountPath); } catch { throw new GatewayError(403, 'GW-POLICY-DENIED', '挂载根不存在。'); }
     if (!st.isDirectory() || st.isSymbolicLink()) throw new GatewayError(403, 'GW-POLICY-DENIED', '挂载根必须是非链接目录。');
     if (mountPath === path.parse(mountPath).root || ['/etc', '/var', '/home', '/root', '/opt', '/srv', '/proc', '/sys', '/dev', '/usr'].includes(mountPath) || mountPath === '/run' || mountPath.startsWith('/run/') || mountPath === this.runDir || mountPath.startsWith(this.stateDir + path.sep) || (this.houseDir.startsWith(mountPath + path.sep) && mountPath !== this.houseDir)) throw new GatewayError(403, 'GW-POLICY-DENIED', '挂载根范围过宽或属于网关状态目录。');
+    const exclude = Array.isArray(mount.exclude) ? mount.exclude.map(x => normalizeRelative(String(x))).filter(Boolean) : [];
+    const gate = mount.gate === 'approve' ? 'approve' : null;
+    // A mount may CONTAIN other residents' rooms: they are hidden inside the sandbox (hiddenHostPaths) and refused by
+    // safeTarget — unless this root is gated, in which case a human approves each touch. `exclude` additionally empties subtrees.
     for (const [id, dir] of policy.rooms) if (id !== residentId && mountPath === dir) throw new GatewayError(403, 'GW-POLICY-DENIED', '不能把其他住户房间作为挂载根。');
-    return { id: rootId, path: mountPath, writable: access === 'read-write' };
+    return { id: rootId, path: mountPath, writable: access === 'read-write', gate, exclude };
   }
   safeTarget(root, relative, forWrite = false, residentId = null, policy = this.policy) {
     const rel = normalizeRelative(relative);
     if (protectedPath(rel)) throw new GatewayError(403, 'GW-PATH-PROTECTED', '路径属于网关硬保护范围。');
+    for (const x of root.exclude || []) if (rel === x || rel.startsWith(x + '/')) throw new GatewayError(403, 'GW-PATH-EXCLUDED', '路径在挂载根的 exclude 子树内。');
     const segments = rel.split('/'); let cur = root.path;
     for (let i = 0; i < segments.length - 1; i++) {
       cur = path.join(cur, segments[i]);
@@ -371,7 +384,9 @@ class Gateway {
       const roomsRoot = path.join(this.houseDir, 'rooms');
       if (resolved === roomsRoot || resolved.startsWith(roomsRoot + path.sep)) {
         const own = policy.rooms.get(residentId);
-        if (!own || (resolved !== own && !resolved.startsWith(own + path.sep))) throw new GatewayError(403, 'GW-PATH-PROTECTED', '不能访问其他住户的房间。');
+        const isOwn = own && (resolved === own || resolved.startsWith(own + path.sep));
+        // Other residents' rooms: hard-refused unless reached via a mount with gate: approve (then a human decides each time).
+        if (!isOwn && root.gate !== 'approve') throw new GatewayError(403, 'GW-PATH-PROTECTED', '不能访问其他住户的房间。');
       }
     }
     return { rel, target, resolved };
@@ -442,7 +457,7 @@ class Gateway {
     if (this.options.lockRequired !== false && this.verifyLockSource() !== policy.digest) throw new GatewayError(503, 'GW-POLICY-DENIED', '配置在 intent 登记期间变化，拒绝登记。');
     const paramsDigest = jcs.digest(body.params);
     const targetDigest = this.targetDigest(body.action, body.params);
-    const effective = this.effectivePermission(body.action, residentId, policy);   // validateIntent already threw for deny
+    const effective = this.effectivePermission(body.action, residentId, policy, Gateway.rootIdsOf(body.action, body.params));   // validateIntent already threw for deny; gated roots cap at approve
     const decisionSource = effective === 'allow' ? 'policy_allow' : 'human';
     const runId = body.run_id || null;
     const old = this.state.db.prepare('SELECT * FROM intents WHERE request_id=?').get(body.request_id);
@@ -663,13 +678,15 @@ class Gateway {
     const roots = new Map([[cwdRoot.path, { ...cwdRoot, writable: false }]]);
     for (const id of p.writable_root_ids || []) { const root = this.rootFor(residentId, id, policy); roots.set(root.path, { ...root, writable: true }); }
     const mountedRoots = [...roots.values()].sort((a, b) => a.path.length - b.path.length);
-    const hidden = this.hiddenHostPaths(mountedRoots.map(x => x.path), residentId, policy);
+    const hidden = this.hiddenHostPaths(mountedRoots.map(x => x.path), residentId, policy, mountedRoots.filter(r => r.gate === 'approve').map(r => r.path));
     const args = ['--die-with-parent', '--new-session', '--unshare-user', '--unshare-net', '--unshare-ipc', '--unshare-pid', '--unshare-uts', ...minimalRuntimeArgs(), ...destinationDirs([...mountedRoots.map(x => x.path), ...hidden.map(x => x.path)])];
     for (const root of mountedRoots) args.push(root.writable ? '--bind' : '--ro-bind', root.path, root.path);
     for (const item of hidden) {
       if (item.directory) args.push('--tmpfs', item.path, '--remount-ro', item.path);
       else args.push('--ro-bind', '/dev/null', item.path);
     }
+    // exclude: empty tmpfs over each excluded subtree — LAST, so hidden-path binds can't re-materialise entries inside it
+    for (const root of mountedRoots) for (const x of root.exclude || []) { const full = path.join(root.path, x); try { if (fs.statSync(full).isDirectory()) args.push('--tmpfs', full); } catch {} }
     args.push('--chdir', cwd, '--clearenv'); for (const [k, v] of Object.entries(p.env || {})) args.push('--setenv', k, v); args.push('--', ...argv);
     const timeout = p.timeout_ms || 30000; const child = spawn(this.bwrapPath, args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: '/usr/bin:/bin' } }); let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), outTr = false, errTr = false;
     const append = (old, chunk, which) => { const room = MAX_OUTPUT - old.length; if (room <= 0) { if (which === 'out') outTr = true; else errTr = true; return old; } if (chunk.length > room) { if (which === 'out') outTr = true; else errTr = true; return Buffer.concat([old, chunk.subarray(0, room)]); } return Buffer.concat([old, chunk]); };
@@ -684,9 +701,10 @@ class Gateway {
     if (code.timedOut) { const e = new GatewayError(408, 'GW-TIMEOUT', '命令超时。'); e.result = resultShell('timed_out', 'bwrap', { kind: 'human_action', reason: 'timeout' }); e.executor = 'bwrap'; throw e; }
     const out = resultShell(code.code === 0 ? 'succeeded' : 'failed', 'bwrap'); out.coverage.host_filesystem = 'minimal'; out.coverage.hidden_paths = hidden.length; out.coverage.stdout_truncated = outTr; out.coverage.stderr_truncated = errTr; out.coverage.requested = [`exec:${safeText(argv.join(' '), 200)}`]; out.coverage.completed = code.code === 0 ? out.coverage.requested.slice() : []; const rawOut = this.redactString(stdout.toString('utf8')), rawErr = this.redactString(stderr.toString('utf8')); const rawCap = Number(this.policy.house.gateway?.output_max_bytes || 64 * 1024); out.details = { exit_code: code.code, signal: code.signal || null, stdout: safeText(rawOut), stderr: safeText(rawErr), stdout_raw: Buffer.from(rawOut).subarray(0, rawCap).toString('utf8'), stderr_raw: Buffer.from(rawErr).subarray(0, rawCap).toString('utf8'), stdout_raw_bytes: Buffer.byteLength(rawOut), stderr_raw_bytes: Buffer.byteLength(rawErr) }; if (/EPERM|permission denied/i.test(out.details.stderr)) out.next = { kind: 'request_writable_root', reason: '沙箱内权限不足，只能扩一条明确可写根后重试。' }; return out;
   }
-  hiddenHostPaths(rootPaths, residentId, policy = this.policy) {
+  hiddenHostPaths(rootPaths, residentId, policy = this.policy, gatedRootPaths = []) {
     const candidates = [path.join(this.houseDir, 'state'), path.join(this.houseDir, '.sameroof'), this.runDir, this.stateDir, this.serviceTokenFile, this.adapterTokensDir, '/var/lib/sameroof-gateway', '/var/lib/sameroof-broker', '/var/lib/sameroof-living-room', ...(this.options.sensitivePaths || [])];
-    for (const [id, dir] of policy.rooms) if (id !== residentId) candidates.push(dir);
+    // other rooms are hidden — except under a gated root, where the human approved this specific touch
+    for (const [id, dir] of policy.rooms) if (id !== residentId && !gatedRootPaths.some(gp => dir === gp || dir.startsWith(gp + path.sep))) candidates.push(dir);
     for (const rootPath of rootPaths) {
       const queue = [{ dir: rootPath, rel: '' }]; let seen = 0;
       while (queue.length) {

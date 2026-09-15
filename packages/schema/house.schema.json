@@ -188,6 +188,22 @@
                     "read-write"
                   ]
                 }
+              },
+              "gate": {
+                "type": "string",
+                "enum": [
+                  "approve"
+                ],
+                "description": "Force every action touching this root through human approval, regardless of the action's allow/approve setting. Can only tighten."
+              },
+              "exclude": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[^/][^\\x00]{0,255}$"
+                },
+                "description": "Relative subdirectories hidden inside the sandbox (empty tmpfs) and refused for fs.read/fs.write."
               }
             }
           }
