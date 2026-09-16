@@ -211,9 +211,9 @@ V0 is broker-direct only. That is where our own house's long-running residents l
 | 2. `lib/subagent.js` loop: prompt render, `TOOL:` parse, gateway register + poll + `/output` read-once, `output_unavailable` / truncation handling, budgets, refusal, transcript append-as-you-go | `packages/adapters` | 1.25 d |
 | 3. subrun manager: slots, abort, SIGTERM, startup scan + bounded read-only probe; **pre-registration persist + request_id index (rebuilt at startup) + filter in `onMessage` and `/inbox` read**; local durable mailbox (write, render, per-exit consume incl. APPROVAL-after-living-room, replay with attempt marker); `SUB:` parse | `packages/adapters/lib/room.js` + new `lib/mailbox.js`, `lib/subrun-manager.js` | 2 d |
 | 4. `subagent:` schema block | `packages/schema` | 0.25 d |
-| 6. demo: parent asked "找出所有调 recall() 的地方" → subrun runs `grep -rn` under `core.exec.ro` → parent replies with the list; human sees policy-allowed results in fold-outs; fault injection: kill adapter mid-subrun, expect `interrupted` next wake | `examples/` + tests | 0.75 d |
+| 5. demo: parent asked "找出所有调 recall() 的地方" → subrun runs `grep -rn` under `core.exec.ro` → parent replies with the list; human sees policy-allowed results in fold-outs; fault injection: kill adapter mid-subrun, expect `interrupted` next wake | `examples/` + tests | 0.75 d |
 
-**5.25 days** after the RFC's 3.75 → **9 days total**, then a gate each. Existing `room.js` seam tests: unchanged; new tests are additive. Not a promise that no existing test changes — the mailbox read at wake start touches the prompt assembly path, and the seam tests assert on prompt shape; if they break, that's a finding to report, not to paper over.
+**4.75 days** after the RFC's 3.75 → **8.5 days total**, then a gate each. Existing `room.js` seam tests: unchanged; new tests are additive. Not a promise that no existing test changes — the mailbox read at wake start touches the prompt assembly path, and the seam tests assert on prompt shape; if they break, that's a finding to report, not to paper over.
 
 ## 6. Exit criteria for V0 (all met, 2026-09-16)
 

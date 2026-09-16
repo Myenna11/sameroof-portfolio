@@ -483,7 +483,11 @@ async function run(roomName, runtimeName, think, opts = {}) {
     fs.appendFileSync(path.join(hoDir, 'history.md'), fs.readFileSync(hoPath, 'utf8') + '\n---\n');
   }
   let sleeping = false;
-  const bounded = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('bounded: ' + ms + 'ms')), ms))]);
+  const bounded = (p, ms) => {
+    let timer = null;
+    const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('bounded: ' + ms + 'ms')), ms); if (timer.unref) timer.unref(); });
+    return Promise.race([p, timeout]).finally(() => { if (timer) clearTimeout(timer); });
+  };
   const sleep = async (deadlineAt = null) => { if (sleeping) return; sleeping = true; try { await writeHandover(deadlineAt); } catch (e) { fs.writeSync(2, `[交接信失败] ${e.message}\n`); } try { if (think.shift && think.shift.archive) think.shift.archive(); } catch (e) { fs.writeSync(2, `[shift归档失败] ${e.message}\n`); } try { if (R.memory && R.memory.compact) R.memory.compact(); } catch (e) { fs.writeSync(2, `[记忆 compact 失败] ${e.message}\n`); } state.last_sleep = new Date().toISOString(); save(); try { await bounded(api('POST', '/activity', { kind: 'sleep', text: `${room.name}：session ended, handover saved`, meta: { wakes_today: state.wakes_today } }), Math.max(500, Math.min(3000, deadlineAt ? deadlineAt - Date.now() : 3000))); } catch {} };   // best-effort, bounded
   // 统一收尾（审查员 P1-1）：SIGINT/SIGTERM 与测试 signal 走同一条路：stopped → subruns.stop → SSE/timer/active → sleep。不直接 process.exit 越过 manager。
   let shutdownP = null;
