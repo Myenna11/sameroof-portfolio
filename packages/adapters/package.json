@@ -4,7 +4,7 @@
   "private": true,
   "description": "同屋适配器：各运行时共用的醒/睡循环、cron 例行",
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test --test-concurrency=1 test/*.test.js"
   },
   "license": "MIT",
   "dependencies": {
