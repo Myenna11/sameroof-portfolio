@@ -407,7 +407,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
         for (const l of lines) {
           if (/^\s*SUB[:：]/i.test(l)) {                                   // subagent V0：派子任务；解析在 adapter（与 PIN 同层）
             run.directives.push({ k: 'SUB', t: l.trim().slice(0, 200) });
-            if (!subruns) { run.sub_error = (run.sub_error ? run.sub_error + '；' : '') + '本 runtime 不支持 SUB:'; fs.writeSync(2, `[${room.name} subrun] 丢弃 SUB:（${subCfg.enabled ? 'runtime 无 callOnce' : 'subagent 未启用'}）\n`); continue; }
+            if (!subruns) { run.sub_error = (run.sub_error ? run.sub_error + '；' : '') + '本 runtime 不支持 SUB:'; fs.writeSync(2, `[${room.name} subrun] 丢弃 SUB:（${subCfg.enabled ? 'runtime 无 callOnce' : 'subagent 未启用'}）\n`); keep.push(`（子任务未派出：${subCfg.enabled ? '本 runtime 不支持' : '未启用'}）`); continue; }   // #5: the note is VISIBLE in the public reply, not only stderr
             const spec = parseSubLine(l, { inbox, recentCtx, inheritMax: subCfg.inherit_max_chars || 12000 });
             if (!spec) { run.sub_error = (run.sub_error ? run.sub_error + '；' : '') + `看不懂或缺 带上:：${l.trim().slice(0, 80)}`; fs.writeSync(2, `[${room.name} subrun] SUB 看不懂或缺 带上:，没派\n`); continue; }
             try { const { sub_id } = subruns.start({ ...spec, system: soul }); run.sub_started = [...(run.sub_started || []), sub_id]; fs.writeSync(2, `[${room.name} subrun] 派了 ${sub_id}「${spec.task.slice(0, 60)}」\n`); }

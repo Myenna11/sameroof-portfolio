@@ -38,7 +38,7 @@ class SubrunManager {
 
   /** Contract B: does this gateway request_id belong to one of my subruns (live or recorded)? */
   ownsRequest(requestId) { return this.requestIndex.has(requestId); }
-  noteDelivered(requestId) { const s = this.live.get(this.requestIndex.get(requestId)); if (s) s.delivered.add(requestId); }
+  noteDelivered(requestId) { const subId = this.requestIndex.get(requestId); if (!subId) return; const s = this.live.get(subId); if (s) s.delivered.add(requestId); try { new Transcript(path.join(this.transcriptDir, subId + '.jsonl')).append({ ts: new Date().toISOString(), ev: 'delivered_via_dm', request_id: requestId }); } catch {} }   // persisted: audit that the coordinator DM was filtered, not just an in-memory Set
 
   /** Rebuild the request index from transcripts and turn unfinished ones into `interrupted` mailbox items. No re-execution. */
   async recoverOnStartup(probe = null, maxProbe = 10) {

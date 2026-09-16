@@ -6,7 +6,21 @@
 - Rejected earlier: v1 dynamic residents (a5c9075); coordinator-layer fixed worker pool — see §7
 - Depends on: `docs/rfc/2026-09-15-gateway-allow.md` rev 3 (contract A: claim/execute split, register timing) — must land first
 - Authorisation on record: 维护者 2026-09-15 — subruns may execute in a read-only sandbox without approval (`core.fs.read: allow`, `core.exec.ro: allow`); writes and writable exec stay `approve`. This is 规划员's record of a conversation; the release gate re-confirms with 维护者 before any `house.yaml` change.
-- Status: **V0 implemented** on `pivot-workharness` (832484f mailbox+loop, 6d4b353 manager, 044ee4a room.js+schema+e2e, 4256699 live on this house). See `examples/subagent/README.md` for the real transcript and how to enable.
+- Status: **V0 implemented, partial scope** — see "V0 scope decisions" below for what was cut from the original v5 text. Commits: 832484f mailbox+loop, 6d4b353 manager, 044ee4a room.js+schema+e2e, 4256699 live on this house, ba0d167 + 67d5719 fixes from 审查员's gate (`docs/reviews/2026-09-16-reviewer-subagent-v0-gate-adc1c96.md`). Real transcript and enablement: `examples/subagent/README.md`.
+
+## V0 scope decisions (2026-09-16, after 审查员's gate)
+
+These were in the v5 text and are **not** in V0. Each is a deliberate cut, not a silent omission.
+
+| item | decision | why |
+|---|---|---|
+| §6 #2 `/cost` splits subrun tokens | **removed from V0**; tracked as V0.1. Broker ledger has no `run_id` column and `/cost` doesn't read the `x-sameroof-run` header. | The header is already sent; adding the column + `/cost` grouping is ~0.5 d and orthogonal to the safety story. Until then `doctor` shows policy-allowed tool counts per resident; token attribution is per resident, not per subrun. |
+| §4.4 `类型: <kind>` and `rooms/<name>/subagents/*.md` personas | **deferred to V1**. `parseSubLine` does not accept `类型:`; `spec.kind` is only logged. Every subrun uses the parent's SOUL + the fixed overlay. | No user need surfaced in the first live runs. Adding it means a second prompt-composition path to test. |
+| §4.3 `继承: N` = last N rendered **turns** | **contract changed to last N rendered lines** of the parent's recent-context block, capped at `inherit_max_chars`. | `room.js` builds `recentCtx` as a string, not a turn list; reconstructing turns would mean re-rendering the parent's shift. Lines are what the adapter actually has. |
+| §4.5 `delivered_via_dm` record | **kept**: `noteDelivered` now appends a `delivered_via_dm` transcript row (67d5719); the in-memory Set is only a live convenience. | |
+| §4.7 unsupported runtime "system note" | **kept, made visible**: the parent's public reply gets `（子任务未派出：本 runtime 不支持 / 未启用）` appended, plus stderr. | 审查员: stderr alone is not a note the human sees. |
+
+Exit criteria status after the gate (see the gate request file for the pre-gate list): 1 ✓ live · 2 **cut** · 3 ✓ · 4 ✓ process-level (`subagent-lifecycle.test.js`) · 5 ✓ visible note (not unit-tested) · 6 ✓ CI · 7 ✓ · 8 ✓ · 9 (a)(b)(c)(d) ✓ · 10 ✓ (`mailbox-consumption.test.js`).
 - Reviewer: 审查员
 
 ## 1. The one-sentence correction

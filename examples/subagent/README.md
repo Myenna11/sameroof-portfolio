@@ -46,6 +46,7 @@ SUB: <task in one line> | 带上: <everything the subrun needs to know> | 引用
 
 - Only `broker-direct` residents. `claude-code` and `pi` residents get a note that `SUB:` isn't supported by their adapter.
 - No nesting (a subrun can't `SUB:`). No writes. No waiting for approvals. No cross-resident delegation (that's `PIN:`).
+- `/cost` does not yet split a subrun's tokens from its parent's (broker ledger has no `run_id`); token accounting is per resident. `类型:` personas are not implemented; every subrun uses the parent's SOUL. `继承: N` inherits the parent's last N rendered *lines*.
 - The mailbox guarantees **at-least-once presentation**: after a crash the parent may see a result twice, marked `（上一轮已尝试处理：…）`. It never guarantees the parent spoke exactly once.
 
 ## Tests that prove it
