@@ -20,7 +20,7 @@ These were in the v5 text and are **not** in V0. Each is a deliberate cut, not a
 | §4.5 `delivered_via_dm` record | **kept**: `noteDelivered` now appends a `delivered_via_dm` transcript row (67d5719); the in-memory Set is only a live convenience. | |
 | §4.7 unsupported runtime "system note" | **kept, made visible**: the parent's public reply gets `（子任务未派出：本 runtime 不支持 / 未启用）` appended, plus stderr. | 审查员: stderr alone is not a note the human sees. |
 
-Exit criteria status after the gate (see the gate request file for the pre-gate list): 1 ✓ live · 2 **cut** · 3 ✓ · 4 ✓ process-level (`subagent-lifecycle.test.js`) · 5 ✓ visible note (not unit-tested) · 6 ✓ CI · 7 ✓ · 8 ✓ · 9 (a)(b)(c)(d) ✓ · 10 ✓ (`mailbox-consumption.test.js`).
+Exit criteria: see §6 (renumbered after the `/cost` cut; all met). Cuts: see §6b Future work.
 - Reviewer: 审查员
 
 ## 1. The one-sentence correction
@@ -43,7 +43,7 @@ That resolves every structural objection in the v1 review at once: no `#` in IDs
 | **wake** | one turn | `run_id` in `state/runs/` | the parent adapter's existing unit of work: inbox → think → directives → reply |
 | **subrun** | inside one wake's post-turn phase | `sub_<id>`, recorded in `state/subruns/` | a nested loop: brief → (model → tools)* → summary. Acts **as** the resident, with the resident's tokens, under a narrowed tool allowlist and a hard budget. |
 
-A subrun is not a resident and never appears in `/members`, the task board, or SSE presence. It **is** visible where the resident's actions are already visible: broker ledger (tagged `purpose=subagent`, `run=sub_…`), gateway intents and audit (tagged `run_id=sub_…`), and its own transcript file.
+A subrun is not a resident and never appears in `/members`, the task board, or SSE presence. It **is** visible where the resident's actions are already visible: broker ledger (tagged `purpose=subagent`; per-resident, **not yet per-subrun** — see Future work), gateway intents, `output_read` audit rows and result DMs (all tagged `run_id=sub_…`), and its own transcript file.
 
 ## 3. Prerequisite: gateway `allow` + `core.exec.ro` (G1, G2) → separate RFC
 
@@ -104,7 +104,7 @@ A self-contained, testable module. Signature:
 runSubagent({
   brief,            // { task, constraints?, success?, refs: [{kind:'message'|'file', ref, text?}] }
   system,           // resolved system prompt (see 4.4)
-  inherit,          // [] or the parent's last N rendered turns (see 4.3)
+  inherit,          // [] or one message holding the parent's last N rendered LINES (see 4.3)
   tools,            // subset of ['core.fs.read','core.exec.ro'] — each must resolve to `allow` for this resident
   budget,           // { modelCalls: 15, toolCalls: 20, ms: 600000 }
   model,            // async (messages, signal) => { text, usage }   — ONE-SHOT, see below
@@ -128,23 +128,19 @@ No `SUB:` inside a subrun: the system prompt doesn't offer it and the parser is 
 
 - **Default**: the subrun sees `system` (4.4) + `brief` + `refs`. Not the room, not the parent's history, not memory.
 - `引用:` — `msg_<id>` → the adapter looks up that message in its own recent-context buffer (it has the text; the coordinator is not asked) and inlines it; a path → **not** inlined by the adapter (it has no file access either); the subrun reads it via `TOOL: core.fs.read` if allowed.
-- `继承: N` — the adapter includes its own last N rendered turns (the same `recent context` block it built for `think()` this wake), capped at `subagent.inherit_max_chars`. This is the fork mode. Snapshot is taken at spawn time from data the adapter already holds — the coordinator is never asked to reconstruct anything (this was 审查员's point 8; it dissolves at this layer).
+- `继承: N` — the adapter includes the last N **lines** of its own rendered recent-context block (the string it built for `think()` this wake), capped at `subagent.inherit_max_chars`. This is the fork mode. Snapshot is taken at spawn time from data the adapter already holds — the coordinator is never asked to reconstruct anything. (Lines, not turns: `room.js` holds recent context as a rendered string.)
 - `带上:` is **required non-empty** unless `继承:` is given. An empty brief is a parse error with a system-message hint, not a spawn.
 
 ### 4.4 Persona
 
-Default system prompt = the parent's `SOUL.md` + a fixed overlay:
-
-> You are running as a subagent of <name>. You have only this brief. Do the task, then reply with a concise summary (≤ N words) and nothing else. To act, write `TOOL: <action> <json>` lines; only these actions are allowed: …. Do not address the household; your reply goes back to <name>, not to the room.
-
-Optional specialised personas: `rooms/<name>/subagents/<kind>.md`, selected by `类型: <kind>`. Same shape as Claude's `.claude/agents/*.md` and Kimi's profile catalog: the file **replaces** the SOUL prefix, and its frontmatter may narrow `tools` and `budget` further — never widen. This borrows nothing from other residents.
+The subrun's system prompt = the parent's `SOUL.md` + a fixed overlay (who you are a subrun of, the `TOOL:` syntax, the allowlist, the budget, the summary rule). There is one persona: the parent's. Specialised personas are Future work.
 
 ### 4.5 Credentials and attribution — the three domains
 
 | domain | subrun uses | attribution |
 |---|---|---|
 | coordinator | nothing (no `/say`, no `/dm`, no tasks) | — |
-| broker | parent's token, unchanged alias/model scope; token must include purpose `subagent` | headers `x-sameroof-purpose: subagent`, `x-sameroof-run: sub_<id>`; ledger `purpose` column exists; add `run_id` (nullable) so `/cost` can split parent vs subruns |
+| broker | parent's token, unchanged alias/model scope; token must include purpose `subagent` | headers `x-sameroof-purpose: subagent`, `x-sameroof-run: sub_<id>` are sent; the ledger records `purpose` but **has no `run_id` column** — attribution is per resident (Future work) |
 | gateway | parent's token, `run_id: sub_<id>` on every intent; only `core.fs.read` / `core.exec.ro` (both must be `allow`) | audit rows carry `run_id` + `decision_source=policy_allow`; `getIntent` scoped to the token's resident, which is the parent — correct. Gateway enforces independently of the adapter's allowlist. |
 
 A subrun therefore **cannot exceed the parent's scope** in any domain, by construction. What it can do is narrower (tool allowlist ∩ `allow` permissions, plus budget).
@@ -204,38 +200,41 @@ V0 is broker-direct only. That is where our own house's long-running residents l
 ### 4.8 What the human sees
 
 - Console: the parent's reply ("正在查"), then gateway `result` fold-outs tagged `sub_…` as the subrun works, then the parent's follow-up with the conclusion. No new UI element in V0. A later console change can group `sub_` results under the parent message.
-- `/cost`: subagent tokens split out per resident via the ledger `run_id`.
+- `/cost`: per resident; a subrun's tokens are counted under its parent (no per-subrun split in V0).
 - Files: `rooms/<name>/state/subruns/sub_<id>.jsonl` — full transcript.
 
 ## 5. Estimates (after the RFC lands)
 
 | piece | where | estimate |
 |---|---|---|
-| 1. `callOnce` export (no shift), token purpose `subagent` in `serve` + deploy token issuance, broker `run_id` ledger column | `broker-direct/adapter.js`, `cli`, `broker` | 0.5 d |
+| 1. `callOnce` export (no shift), token purpose `subagent` in `serve` + deploy token issuance | `broker-direct/adapter.js`, `cli` | 0.5 d |
 | 2. `lib/subagent.js` loop: prompt render, `TOOL:` parse, gateway register + poll + `/output` read-once, `output_unavailable` / truncation handling, budgets, refusal, transcript append-as-you-go | `packages/adapters` | 1.25 d |
 | 3. subrun manager: slots, abort, SIGTERM, startup scan + bounded read-only probe; **pre-registration persist + request_id index (rebuilt at startup) + filter in `onMessage` and `/inbox` read**; local durable mailbox (write, render, per-exit consume incl. APPROVAL-after-living-room, replay with attempt marker); `SUB:` parse | `packages/adapters/lib/room.js` + new `lib/mailbox.js`, `lib/subrun-manager.js` | 2 d |
-| 4. `subagent:` schema block; `subagents/*.md` discovery + frontmatter narrowing | `packages/schema`, `packages/adapters` | 0.5 d |
-| 5. `/cost` split by `run_id`; console: nothing new in V0 | `packages/living-room` | 0.25 d |
+| 4. `subagent:` schema block | `packages/schema` | 0.25 d |
 | 6. demo: parent asked "找出所有调 recall() 的地方" → subrun runs `grep -rn` under `core.exec.ro` → parent replies with the list; human sees policy-allowed results in fold-outs; fault injection: kill adapter mid-subrun, expect `interrupted` next wake | `examples/` + tests | 0.75 d |
 
 **5.25 days** after the RFC's 3.75 → **9 days total**, then a gate each. Existing `room.js` seam tests: unchanged; new tests are additive. Not a promise that no existing test changes — the mailbox read at wake start touches the prompt assembly path, and the seam tests assert on prompt shape; if they break, that's a finding to report, not to paper over.
 
-## 6. Exit criteria for V0
+## 6. Exit criteria for V0 (all met, 2026-09-16)
 
-Ship when, on this house's own deployment:
+1. ✓ A broker-direct resident with `subagent.enabled` and `core.fs.read: allow` + `core.exec.ro: allow` can be asked "找出所有调 `recall()` 的地方" and, without any human click, replies within budget with a list that matches `grep -rn`. Live on this house: 检索员, 29 hits / 6 files = ground truth (`examples/subagent/`).
+2. ✓ Every gateway `output_read` / result DM for a subrun carries `run_id: sub_…` and `decision_source: policy_allow`.
+3. ✓ Killing the adapter mid-subrun produces an `interrupted` mailbox item and a wake on restart; the transcript is intact; nothing re-executes; a human message during a subrun is answered without waiting. **Process-level**: `subagent-lifecycle.test.js` (real adapter child, SIGKILL and SIGTERM, bounded shutdown with a hung handover model call).
+4. ✓ A `SUB:` line from a `claude-code` / `pi` resident is dropped with a visible note in the public reply (`（子任务未派出：本 runtime 不支持）`). Not unit-tested.
+5. ✓ CI runs all of this on a real gateway (bwrap).
+6. ✓ A `result` DM whose `request_id` is not in the manager's index wakes the parent normally (no false silence) — even if its `run_id` looks like `sub_…`.
+7. ✓ The subrun's transcript shows tool output came from `/output`; a forced 410 produces `output_unavailable` and the parent is told.
+8. ✓ Contract B (a)–(d): result before first poll; human not blocked; late delivery after restart filtered; unknown wakes.
+9. ✓ A living-room `POST /approval` failure (500, or 200 without `approval_id`) after a successful `registerIntent` leaves the mailbox item unconsumed with an attempt marker; it is re-presented next wake (`mailbox-consumption.test.js` exit-#10 case, via a controllable proxy).
 
-1. **Given** the RFC has landed and this house's policy has `core.fs.read: allow` + `core.exec.ro: allow` (维护者's 2026-09-15 choice, applied only after the RFC gate): a broker-direct resident with `subagent.enabled` can be asked "找出所有调 `recall()` 的地方" and, without any human click, replies within budget with a list that matches `grep -rn`. Without that policy the same request yields a subresult saying the tool was approve-only — that is also a passing behaviour, not a bug.
-2. `/cost` shows the subrun's tokens separately.
-3. The gateway audit shows every read with `run_id: sub_…`.
-4. Killing the adapter mid-subrun produces an `interrupted` mailbox item and a wake on restart; the transcript file is intact; a human message arriving during a subrun is answered without waiting for it.
-5. A `SUB:` line from a `claude-code` or `pi` resident is dropped with a system note and nothing else.
-7. A `result` DM whose `run_id` is not in the manager's set wakes the parent normally (no false silence).
-8. The subrun's transcript shows the grep output that reached the model came from `/output`, not from `getIntent`; a forced `/output` 410 produces `output_unavailable` in the transcript and the parent's reply says the search could not be read.
-9. Contract B tests (a)–(d) pass; in particular a result DM arriving before the first poll neither interrupts nor enters the parent prompt.
-10. A living-room `POST /approval` failure after a successful `registerIntent` leaves the mailbox item unconsumed and it is re-presented next wake.
-6. All of the above in tests with a mock broker and the real gateway (bwrap), in CI.
+Removed from V0 (was #2): `/cost` splits a subrun's tokens from its parent's — see Future work.
 
-If after two weeks of daily use we want: cross-resident delegation with a reply obligation, a visible worker roster, or dynamic process scaling — that is the coordinator-layer feature 审查员 specified (subrun table, leases, reconciler), and it should be built **on top of** this, not instead of it: a coordinator-level subrun would *dispatch to* a resident, whose adapter then runs it as an in-process subrun. The two layers compose; V0 is the inner one.
+## 6b. Future work (not in V0; do not describe as current behaviour)
+
+- **V0.1 — per-subrun cost**: broker ledger gains a nullable `run_id` column filled from `x-sameroof-run`; `/cost` groups by it. ~0.5 d.
+- **V1 — specialised personas**: `类型: <kind>` selecting `rooms/<name>/subagents/<kind>.md`, whose frontmatter may narrow tools/budget but never widen. Same shape as Claude's `.claude/agents/*.md`.
+- **V1 — inherit by turns** instead of lines, if the adapter ever holds recent context as structured turns.
+- **Later — cross-resident delegation with reply obligations, worker rosters, dynamic scaling**: the coordinator-layer feature 审查员 specified; builds on top of subruns, not instead of them.
 
 ## 7. Rejected alternatives
 

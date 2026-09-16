@@ -6,11 +6,13 @@ const test = require('node:test');
 const { stopChildren } = require('../house');
 
 const pidAlive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
-const spawnNode = code => spawn(process.execPath, ['-e', code], { stdio: 'ignore' });
+const spawnNode = code => spawn(process.execPath, ['-e', code + "; process.stdout.write('READY\\n')"], { stdio: ['ignore', 'pipe', 'ignore'] });
+// wait until the child has installed its handlers (under CPU contention a fixed sleep is not enough — the default SIGTERM would kill it first)
+const ready = c => new Promise(r => { let s = ''; c.stdout.on('data', d => { s += d; if (s.includes('READY')) r(); }); });
 
 test('cooperative child: SIGTERM is enough, no SIGKILL sent', async () => {
   const c = spawnNode('setInterval(() => {}, 1000)');
-  await new Promise(r => setTimeout(r, 150));
+  await ready(c);
   const r = await stopChildren([c], { graceMs: 2000 });
   assert.deepEqual(r.killed, [], 'not escalated');
   assert.deepEqual(r.stillAlive, []);
@@ -19,7 +21,7 @@ test('cooperative child: SIGTERM is enough, no SIGKILL sent', async () => {
 
 test('stubborn child ignores SIGTERM: escalates to SIGKILL and confirms the pid is gone', async () => {
   const c = spawnNode("process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)");
-  await new Promise(r => setTimeout(r, 200));
+  await ready(c);
   // Demonstrate the trap the old code fell into:
   c.kill('SIGTERM'); await new Promise(r => setTimeout(r, 200));
   assert.equal(c.killed, true, 'child.killed is true after kill() was called…');
@@ -34,7 +36,7 @@ test('stubborn child ignores SIGTERM: escalates to SIGKILL and confirms the pid 
 test('mixed batch: only the stubborn one is escalated', async () => {
   const good = spawnNode('setInterval(() => {}, 1000)');
   const bad = spawnNode("process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)");
-  await new Promise(r => setTimeout(r, 200));
+  await Promise.all([ready(good), ready(bad)]);
   const r = await stopChildren([good, bad], { graceMs: 500 });
   assert.deepEqual(r.killed, [bad.pid]);
   assert.deepEqual(r.stillAlive, []);

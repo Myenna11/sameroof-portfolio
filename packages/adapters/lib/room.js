@@ -448,7 +448,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
         let reg; try { reg = await gw.registerIntent({ residentId: room.id, runId: run.id, action: intent.action, params: intent.params, ttl: 1800 }); }
         catch (e) { run.status = 'gateway_unavailable'; run.error = `${e.code || 'GATEWAY-UNAVAILABLE'}: ${String(e.message).slice(0, 200)}`; fs.writeSync(2, `[${room.name}] 网关不可用，审批没登记（${run.error}）\n`); shift.push({ at: new Date().toISOString(), heard: inbox.map(m => `${m.from}：${m.text}`), said: `（你想 ${intent.action}，但网关不可用，没登记：${run.error.slice(0, 80)}）` }); return; }
         const a = await api('POST', '/approval', reg.approval_body);
-        if (!a || !a.approval_id) { if (mailbox && mailItems.length) { mailMarked = true; mailbox.markAttempt(mailItems.map(i => i.id), 'approval_rejected', false); } run.status = 'approval_rejected'; run.error = '客厅没收审批：' + JSON.stringify(a).slice(0, 300); fs.writeSync(2, `[${room.name}] ${run.error}\n`); return; }
+        if (!ok2xx(a, 'approval_id')) { if (mailbox && mailItems.length) { mailMarked = true; mailbox.markAttempt(mailItems.map(i => i.id), 'approval_rejected', false); } run.status = 'approval_rejected'; run.error = '客厅没收审批：' + JSON.stringify(a).slice(0, 300); fs.writeSync(2, `[${room.name}] ${run.error}\n`); return; }
         run.status = 'approval'; run.gateway_request_id = reg.request_id; run.approval_id = a.approval_id; run.action = intent.action;
         if (mailbox && mailItems.length) { mailMarked = true; mailbox.markAttempt(mailItems.map(i => i.id), 'approval', true); }   // 客厅收了审批才算消费（gateway 登记成功不够）
         console.log(`[${room.name} 审批] ${intent.action} → ${a.approval_id}（${reg.request_id}）`); return; }
@@ -465,33 +465,40 @@ async function run(roomName, runtimeName, think, opts = {}) {
       if (hb && lane !== 'routine') hb.backoff(reason === 'heartbeat' && ['passive_idle', 'silent', 'nothing', 'passive_budget'].includes(run.status));   // 例行是定时的，不算"有真事"，不归零心跳退避
     }
   }
-  async function writeHandover() {
+  async function writeHandover(deadlineAt = null) {   // deadlineAt: epoch ms; the model note is skipped/abandoned past it (facts are already on disk)
     const hoDir = path.join(R.roomDir, 'handover'); fs.mkdirSync(hoDir, { recursive: true });
     const hoPath = path.join(hoDir, 'latest.md');
     const facts = shift.length ? shift.map(s => `- ${s.at.slice(11, 16)} 听到：${s.heard.join(' / ').slice(0, 200)}\n  我说：${s.said.slice(0, 200)}`).join('\n') : '- no interactions this session。';
     const render = note => `# 交接信 · ${room.name}\n\n写于 ${R.houseTime().replace('【时间】', '')}\n\n## 我想对明天的自己说\n${note || '（这一班没来得及写，看下面的事实）'}\n\n## 房子记下的事实\n${facts}\n`;
     fs.writeFileSync(hoPath, render(''));                       // 先把事实落盘（checkpoint 是底）
     console.log(`[${room.name}] 交接信·事实已写`);
-    if (shift.length && !opts.dry) {                            // 再让本人补一句（交接信是面）
-      try { const raw = await think(`你是${room.name}。现在要睡了，给明天醒来的自己写两三句交接信：这一班发生了什么、你惦记什么、有什么没做完。像给自己留便条，不要客套。`, `这一班的事实：\n${facts}`);
+    const noteBudget = deadlineAt ? deadlineAt - Date.now() : Infinity;
+    if (shift.length && !opts.dry && noteBudget > 1500) {       // 再让本人补一句（交接信是面）；收尾 deadline 不够就跳过，事实已落盘
+      const noteAc = new AbortController(); const noteTimer = Number.isFinite(noteBudget) ? setTimeout(() => noteAc.abort(new Error('便条超时')), noteBudget) : null;
+      try { const raw = await Promise.race([think(`你是${room.name}。现在要睡了，给明天醒来的自己写两三句交接信：这一班发生了什么、你惦记什么、有什么没做完。像给自己留便条，不要客套。`, `这一班的事实：\n${facts}`, noteAc.signal), new Promise((_, rej) => noteAc.signal.addEventListener('abort', () => rej(noteAc.signal.reason), { once: true }))]);
         const note = unpackReply(raw).text.trim();
         fs.writeSync(2, `[${room.name}] 便条原文长度 ${note.length}\n`);
-        if (note) { fs.writeFileSync(hoPath, render(note)); fs.writeSync(2, `[${room.name}] 交接信·便条已写\n`); } } catch (e) { fs.writeSync(2, `[便条没写成] ${e && e.stack || e}\n`); }
-    }
+        if (note) { fs.writeFileSync(hoPath, render(note)); fs.writeSync(2, `[${room.name}] 交接信·便条已写\n`); } } catch (e) { fs.writeSync(2, `[便条没写成] ${e && e.message || e}\n`); } finally { if (noteTimer) clearTimeout(noteTimer); }
+    } else if (shift.length && !opts.dry) fs.writeSync(2, `[${room.name}] 收尾时间不够，跳过便条（事实已落盘）\n`);
     fs.appendFileSync(path.join(hoDir, 'history.md'), fs.readFileSync(hoPath, 'utf8') + '\n---\n');
   }
   let sleeping = false;
-  const sleep = async () => { if (sleeping) return; sleeping = true; try { await writeHandover(); } catch (e) { fs.writeSync(2, `[交接信失败] ${e.message}\n`); } try { if (think.shift && think.shift.archive) think.shift.archive(); } catch (e) { fs.writeSync(2, `[shift归档失败] ${e.message}\n`); } try { if (R.memory && R.memory.compact) R.memory.compact(); } catch (e) { fs.writeSync(2, `[记忆 compact 失败] ${e.message}\n`); } state.last_sleep = new Date().toISOString(); save(); try { await api('POST', '/activity', { kind: 'sleep', text: `${room.name}：session ended, handover saved`, meta: { wakes_today: state.wakes_today } }); } catch {} };
+  const bounded = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('bounded: ' + ms + 'ms')), ms))]);
+  const sleep = async (deadlineAt = null) => { if (sleeping) return; sleeping = true; try { await writeHandover(deadlineAt); } catch (e) { fs.writeSync(2, `[交接信失败] ${e.message}\n`); } try { if (think.shift && think.shift.archive) think.shift.archive(); } catch (e) { fs.writeSync(2, `[shift归档失败] ${e.message}\n`); } try { if (R.memory && R.memory.compact) R.memory.compact(); } catch (e) { fs.writeSync(2, `[记忆 compact 失败] ${e.message}\n`); } state.last_sleep = new Date().toISOString(); save(); try { await bounded(api('POST', '/activity', { kind: 'sleep', text: `${room.name}：session ended, handover saved`, meta: { wakes_today: state.wakes_today } }), Math.max(500, Math.min(3000, deadlineAt ? deadlineAt - Date.now() : 3000))); } catch {} };   // best-effort, bounded
   // 统一收尾（审查员 P1-1）：SIGINT/SIGTERM 与测试 signal 走同一条路：stopped → subruns.stop → SSE/timer/active → sleep。不直接 process.exit 越过 manager。
   let shutdownP = null;
+  const SHUTDOWN_MS = Number(process.env.SAMEROOF_SHUTDOWN_MS || 15000);   // whole-shutdown deadline (systemd TimeoutStopSec is 90s; we must beat it)
   const shutdown = () => shutdownP || (shutdownP = (async () => {
+    const deadlineAt = Date.now() + SHUTDOWN_MS;
+    const hardExit = setTimeout(() => { fs.writeSync(2, `[${room.name}] 收尾超过 ${SHUTDOWN_MS}ms，强制退出\n`); process.exit(3); }, SHUTDOWN_MS + 2000); hardExit.unref();
     stopped = true;
     if (subruns) { try { const left = await subruns.stop(5000); if (left) fs.writeSync(2, `[${room.name} subrun] 收尾超时，${left} 个子任务未在 5s 内停下\n`); } catch (e) { fs.writeSync(2, `[${room.name} subrun] 收尾失败：${e.message}\n`); } }
     try { clearTimeout(sseTimer); if (sseReq) sseReq.destroy(); } catch {}
     try { if (rtTimer) clearInterval(rtTimer); if (hb) hb.stop(); } catch {}
     if (active) active.ctrl.abort(new Error('适配器停下了'));
-    for (let i = 0; i < 100 && active; i++) await new Promise(r => setTimeout(r, 50));   // 等正在跑的这一轮收尾（最多 5 秒）
-    await sleep();
+    for (let i = 0; i < 100 && active && Date.now() < deadlineAt; i++) await new Promise(r => setTimeout(r, 50));   // 等正在跑的这一轮收尾（最多 5 秒 / deadline）
+    await sleep(deadlineAt);
+    clearTimeout(hardExit);
   })());
   process.on('SIGINT', async () => { await shutdown(); process.exit(0); }); process.on('SIGTERM', async () => { await shutdown(); process.exit(0); });
   let sseReq = null, sseTimer = null, rtTimer = null;   // 提前声明：shutdown 会引用

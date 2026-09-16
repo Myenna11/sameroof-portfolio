@@ -6,7 +6,8 @@ const { run } = require('../lib/room');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const delay = Number(process.env.SUB_DELAY_MS || 0);
 const seen = [];
-const think = async (system, user) => {
+const think = async (system, user, signal) => {
+  if (process.env.HANG_HANDOVER === '1' && /现在要睡了/.test(system)) { process.stdout.write('HANDOVER_THINK_HANG\n'); return new Promise((_, rej) => { if (signal) signal.addEventListener('abort', () => rej(signal.reason), { once: true }); }); }   // never resolves unless abandoned
   seen.push(user); process.stdout.write('PROMPT ' + JSON.stringify(user.slice(0, 4000)) + '\n');
   const inboxPart = user.split('【你没读的客厅记录')[1] || '';   // triggers only on NEW inbox lines, never on recent context (else a restart re-triggers SUB:)
   const parts = [];

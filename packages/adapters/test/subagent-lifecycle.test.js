@@ -33,7 +33,7 @@ test('SIGKILL mid-subrun → restart: one interrupted, no re-exec, late known re
   const trDir = path.join(ROOT, 'rooms', '乙', 'state', 'subruns'); const mailFile = path.join(ROOT, 'rooms', '乙', 'state', 'mailbox.jsonl');
   const mail = () => fs.existsSync(mailFile) ? fs.readFileSync(mailFile, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
   const online = () => until(async () => ((await req(port, '/members', { token: human })).body || []).some(m => m.id === 'resident_beta_01' && m.online), 'online');
-  let A, B, C;
+  let A, B, C, D;
   try {
     // ---- run A: subrun's 2nd model call sleeps 8s; kill inside that window, AFTER the tool ran and its result DM was delivered ----
     A = launch({ SUB_DELAY_MS: '8000' }); await online();
@@ -75,9 +75,21 @@ test('SIGKILL mid-subrun → restart: one interrupted, no re-exec, late known re
     const t0 = Date.now(); C.kill('SIGTERM'); const code = await new Promise(r => C.on('exit', r));
     assert.ok(Date.now() - t0 < 8000, 'exited before the subrun would have finished on its own'); assert.equal(code, 0, 'clean exit');
     assert.equal(mail().filter(i => i.status === 'interrupted').length, 1, 'SIGTERM path wrote the interrupted item before exiting');
-  } catch (e) { for (const P of [A, B, C]) if (P) console.error('--- child out ---\n' + P.out.slice(-3000)); try { console.error('GW results:', JSON.stringify(gateway.state.db.prepare('SELECT request_id, message_id, delivered_at FROM results').all())); console.error('GW audit tail:', JSON.stringify(gateway.state.db.prepare('SELECT event, status, substr(details_json,1,160) d FROM audit ORDER BY id DESC LIMIT 4').all())); } catch (x) { console.error('dbg', x.message); } throw e; }
+
+    // ---- run D: SIGTERM while the sleep-time handover think NEVER resolves → bounded shutdown must still exit 0 within the deadline ----
+    fs.rmSync(mailFile, { force: true }); for (const f of fs.readdirSync(trDir)) fs.unlinkSync(path.join(trDir, f));
+    D = launch({ SUB_DELAY_MS: '8000', HANG_HANDOVER: '1', SAMEROOF_SHUTDOWN_MS: '4000' }); await online();
+    await req(port, '/say', { method: 'POST', token: human, body: { text: '@乙 找出所有调 recall() 的地方' } });
+    await until(() => fs.existsSync(trDir) && fs.readdirSync(trDir).some(f => fs.readFileSync(path.join(trDir, f), 'utf8').includes('"ev":"tool_done"')), 'D tool executed');
+    const t1 = Date.now(); D.kill('SIGTERM'); const codeD = await new Promise(r => D.on('exit', r)); const tookD = Date.now() - t1;
+    assert.ok(/HANDOVER_THINK_HANG/.test(D.out), 'the handover note think was actually entered and hung');
+    assert.ok(tookD < 4000 + 3000, `exited within deadline+slack (took ${tookD}ms)`); assert.equal(codeD, 0, 'clean exit, not the hard-exit guard');
+    assert.equal(mail().filter(i => i.status === 'interrupted').length, 1, 'interrupted item on disk');
+    assert.ok(fs.existsSync(path.join(ROOT, 'rooms', '乙', 'handover', 'latest.md')), 'facts handover written before the note was abandoned');
+    assert.ok(/便条超时|跳过便条|便条没写成/.test(D.out), 'note abandoned or skipped, logged');
+  } catch (e) { for (const P of [A, B, C, D]) if (P) console.error('--- child out ---\n' + P.out.slice(-3000)); try { console.error('GW results:', JSON.stringify(gateway.state.db.prepare('SELECT request_id, message_id, delivered_at FROM results').all())); console.error('GW audit tail:', JSON.stringify(gateway.state.db.prepare('SELECT event, status, substr(details_json,1,160) d FROM audit ORDER BY id DESC LIMIT 4').all())); } catch (x) { console.error('dbg', x.message); } throw e; }
   finally {
-    for (const P of [A, B, C]) if (P && P.exitCode === null && P.signalCode === null) P.kill('SIGKILL');
+    for (const P of [A, B, C, D]) if (P && P.exitCode === null && P.signalCode === null) P.kill('SIGKILL');
     await gateway.close().catch(() => {}); await room.close().catch(() => {}); fs.rmSync(ROOT, { recursive: true, force: true });
   }
 });
