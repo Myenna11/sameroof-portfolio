@@ -327,6 +327,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
         R.memory ? '- 值得以后还记得的事，在回复末尾另起一行写 REMEMBER: 一句话（可多行）。房子会存下来，标记为你自己写的、未审。' : '',
         '- 你自己房间的钥匙（同样另起一行）：CONCERN: 一句话 记进惦记本；DONE: 一句话 划掉做完的；NOTE: 一句话 记在自己的小本上；' + (R.memory ? 'FORGET: 一句话 把记忆里对上的那条冷藏（不删）。' : ''),
         '- 黑板：家里共享的事。钉一件：PIN: 标题 | 验收: … | 给: 名字 | 到期: 时间；改状态：PIN <task_id>: doing / done 结果 / blocked 原因 / drop 理由。没进展不更新。',
+        ...(subruns ? ['- 子任务：需要去查、去搜、去读一堆文件时，别自己灌进上下文，派一个子任务：另起一行 SUB: 任务一句话 | 带上: 它需要知道的全部背景（它没有你的记忆和这段对话）| 工具: core.exec.ro,core.fs.read。它在只读沙箱里干活，做完把结论放进【子任务结果】叫醒你。先正常回复人（比如"我去查"），SUB: 行会被剥掉不公开。不能写文件、不能等审批；那些你自己用 APPROVAL: 申请。'] : []),
         '',
         '【上次交接信】', handover,
         R.keys.concerns().length ? '【我惦记的事】\n' + R.keys.concerns().join('\n') : '',

@@ -26,7 +26,7 @@ const think = wrapThink(async (messages, signal) => {
 }, shift);
 function call(messages, signal, brokerToken, opts = {}) {
   const purpose = opts.purpose || 'interactive';
-  const body = JSON.stringify({ model: R.room.model.id, messages, stream: false, max_tokens: opts.maxTokens || 4000, thinking: { type: 'enabled', effort: 'low' } });
+  const body = JSON.stringify({ model: R.room.model.id, messages, stream: false, max_tokens: opts.maxTokens || 8192, thinking: { type: 'enabled', effort: 'low' } });
   fs.writeSync(2, `[broker] 发 ${messages.length} 条消息（这一班累积）\n`);
   return new Promise((resolve, reject) => {
     const req = http.request({ socketPath: SOCK, path: '/v1/chat/completions', method: 'POST', headers: { authorization: `Bearer ${brokerToken}`, 'content-type': 'application/json', 'x-sameroof-purpose': purpose, 'x-sameroof-credential': R.room.model.auth.credential, ...(opts.runId ? { 'x-sameroof-run': opts.runId } : {}) } }, res => {

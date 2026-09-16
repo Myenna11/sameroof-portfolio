@@ -119,7 +119,8 @@ const cmds = {
         if (r.model && r.model.auth && r.model.auth.mode === 'broker') {
           if (!creds.includes(credAlias)) { log(r.name, `skip: credential "${credAlias}" not in broker`); continue; }
           if (!fs.existsSync(brokerTokenFile)) {
-            store.issueToken({ residentId: r.id, credentials: [credAlias], models: [modelId], ttlSeconds: 604800 });
+            const subEnabled = !!(((house.defaults || {}).subagent || {}).enabled || (r.subagent || {}).enabled);
+            store.issueToken({ residentId: r.id, credentials: [credAlias], models: [modelId], ttlSeconds: 604800, purposes: subEnabled ? ['interactive', 'heartbeat', 'subagent'] : ['interactive', 'heartbeat'] });   // subagent V0: purpose is explicit at issuance (design v5 §4.2)
             log(r.name, `broker token issued → ${credAlias} / ${modelId}`);
           }
         }
