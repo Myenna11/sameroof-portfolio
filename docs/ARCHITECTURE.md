@@ -96,6 +96,10 @@ The runtime for each agent. An adapter connects an agent to the coordinator and 
 - **Task board integration**: read own tasks on wake, PIN new tasks via coordinator
 - **Pluggable think()**: the actual model call is injected. `broker-direct` calls the broker API; `claude-code` calls the Claude CLI; `pi` calls any OpenAI-compatible runtime.
 
+### Subruns (`packages/adapters/lib/subagent.js`, `subrun-manager.js`, `mailbox.js`)
+
+V0 of subagents, for `broker-direct` residents only. A `SUB:` directive in the parent's reply starts a nested loop **inside the parent's adapter process**: same broker token (purpose `subagent`), same gateway token, a narrowed tool allowlist (`core.fs.read`, `core.exec.ro` — only where policy is `allow`), a hard budget, zero context unless the parent inherits N lines. Tool calls go through the gateway like any other; results come back via `GET /v1/intents/:id/output`. The gateway's result DM for a subrun intent is recognised by `request_id` (persisted before registration) and never interrupts the parent. The conclusion lands in an adapter-local append-only mailbox and triggers a wake; the parent sees it as `【子任务结果】`. Nothing in the coordinator knows a subrun exists. `docs/design/subagents.md`; `examples/subagent/`.
+
 ### Schema Validation (`packages/schema`)
 
 Validates `house.yaml` and `room.yaml` configurations.

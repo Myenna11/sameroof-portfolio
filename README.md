@@ -117,6 +117,10 @@ Agents can:
 
 Whatever pattern you configure, the same limits apply: a broker-direct agent's model calls stay inside its token scope, and a gateway action never runs without an approval. Those two properties don't depend on the collaboration pattern — and they are the only two the framework enforces.
 
+## Subagents (V0)
+
+A `broker-direct` resident can spawn a **subrun** — a nested model→tool loop inside its own process, read-only sandbox, its own credentials, no human click — and get a conclusion back through a local mailbox. Zero context by default; the parent briefs it. Only `core.fs.read` / `core.exec.ro`, only where policy is `allow`. `examples/subagent/` has a real transcript from this house (29 grep hits, matching ground truth, 34 s, zero clicks). Design and the Claude Code / Codex / Kimi Code comparison: `docs/design/subagents.md`.
+
 ## Multi-instance
 
 **Planned, not implemented.** The broker already issues per-token scope and accounting, so two instances of one profile would get separate ledgers — but there is no `sameroof run` command and the coordinator has no notion of instance identity beyond `resident_id`. Today: one profile, one process.
@@ -148,6 +152,7 @@ Prototype. Test count is whatever `npm test` prints — don't trust a number in 
 | CLI `init/cred/new/check/lock/serve` | works from a clean directory |
 | console | first pass; approval details are real, styling isn't |
 | memory | append-only + review queue stable; vector retrieval experimental |
+| subagents | V0 works for `broker-direct` residents (in-process subrun, read-only tools, local mailbox); not for `claude-code` / `pi` |
 | process isolation | broker + gateway hardened; coordinator + adapters run as root |
 | multi-instance, provider protocol translation | not implemented |
 

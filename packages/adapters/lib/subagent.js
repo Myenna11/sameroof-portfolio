@@ -96,14 +96,17 @@ async function runSubagent(opts) {
           await new Promise(res => setTimeout(res, pollMs));
         }
         if (!st) { tr({ ev: 'tool_error', request_id: requestId, stage: 'poll', code }); results.push(`[${c.action}] output_unavailable: ${code || 'aborted'}`); continue; }
-        if (st.state !== 'succeeded') { tr({ ev: 'tool_done', request_id: requestId, state: st.state }); results.push(`[${c.action}] ${st.state}${st.result && st.result.error ? ': ' + st.result.error.code : ''}`); continue; }
+        // 'failed' with an exit code means the command RAN (grep exits 2 on one unreadable file yet still prints matches): read the output.
+        // Only denied / failed_unknown / expired / no-exit-code are terminal without output.
+        const ranButNonZero = st.state === 'failed' && st.result && st.result.details && Number.isInteger(st.result.details.exit_code);
+        if (st.state !== 'succeeded' && !ranButNonZero) { tr({ ev: 'tool_done', request_id: requestId, state: st.state }); results.push(`[${c.action}] ${st.state}${st.result && st.result.error ? ': ' + st.result.error.code : ''}`); continue; }
         // read output once; never present [output omitted]
         const out = await gateway.readOutput(opts.residentId, requestId, runId).catch(e => ({ status: 0, error: { code: 'GATEWAY-UNAVAILABLE' } }));
-        if (out.status !== 200) { tr({ ev: 'tool_done', request_id: requestId, state: 'succeeded', output: 'unavailable:' + ((out.error && out.error.code) || out.status) }); results.push(`[${c.action}] output_unavailable: ${(out.error && out.error.code) || out.status}`); continue; }
+        if (out.status !== 200) { tr({ ev: 'tool_done', request_id: requestId, state: st.state, output: 'unavailable:' + ((out.error && out.error.code) || out.status) }); results.push(`[${c.action}] output_unavailable: ${(out.error && out.error.code) || out.status}`); continue; }
         const d = (out.body.result && out.body.result.details) || {};
         let body = c.action === 'core.fs.read' ? String(d.content ?? '') : `exit=${d.exit_code}\n${d.stdout || ''}${d.stderr ? '\n[stderr]\n' + d.stderr : ''}`;
         if (out.body.truncated) body = `[truncated: ${JSON.stringify(out.body.total_bytes)} total bytes; partial below — do not report as complete]\n` + body;
-        tr({ ev: 'tool_done', request_id: requestId, state: 'succeeded', bytes: body.length, truncated: !!out.body.truncated });
+        tr({ ev: 'tool_done', request_id: requestId, state: st.state, exit_code: d.exit_code, bytes: body.length, truncated: !!out.body.truncated });
         results.push(`[${c.action}] ${body}`);
       }
       // §4.2: fsync the transcript (caller's append does it) BEFORE the next model call

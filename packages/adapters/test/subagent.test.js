@@ -83,3 +83,11 @@ test('inherit: turns are placed between system and brief', async () => {
   await runSubagent({ brief: { task: 't' }, inherit: [{ role: 'user', content: 'earlier' }, { role: 'assistant', content: 'reply' }], model, gateway: mkGateway(), runId: 'sub_x', residentId: 'r' });
   assert.deepEqual(seen.map(x => x.role), ['system', 'user', 'assistant', 'user']); assert.equal(seen[1].content, 'earlier');
 });
+
+test("gateway 'failed' with an exit code (grep rc=2 on one unreadable file) still yields the output, labelled exit=2", async () => {
+  const gw = mkGateway({ terminal: 'failed' });
+  gw.getIntent = async (_r, requestId) => ({ status: 200, body: { state: 'failed', result: { details: { exit_code: 2, stdout: '[output omitted]' } } } });
+  gw.readOutput = async () => ({ status: 200, body: { truncated: false, total_bytes: {}, result: { details: { exit_code: 2, stdout: 'a.js:1:hit\n', stderr: 'grep: x.yaml: Permission denied' } } } });
+  const r = await runSubagent({ brief: { task: 't' }, tools: ['core.exec.ro'], model: scripted(['TOOL: core.exec.ro {"argv":["/bin/sh","-lc","grep -rn hit ."],"cwd":{"root_id":"code","path":""}}', m => ({ text: m[m.length - 1].content })]), gateway: gw, runId: 'sub_x', residentId: 'r' });
+  assert.match(r.summary, /exit=2\na\.js:1:hit/); assert.match(r.summary, /\[stderr\]\ngrep: x\.yaml: Permission denied/); assert.doesNotMatch(r.summary, /output omitted/);
+});

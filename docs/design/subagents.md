@@ -6,7 +6,7 @@
 - Rejected earlier: v1 dynamic residents (a5c9075); coordinator-layer fixed worker pool — see §7
 - Depends on: `docs/rfc/2026-09-15-gateway-allow.md` rev 3 (contract A: claim/execute split, register timing) — must land first
 - Authorisation on record: 维护者 2026-09-15 — subruns may execute in a read-only sandbox without approval (`core.fs.read: allow`, `core.exec.ro: allow`); writes and writable exec stay `approve`. This is 规划员's record of a conversation; the release gate re-confirms with 维护者 before any `house.yaml` change.
-- Status: **design for review**, nothing implemented
+- Status: **V0 implemented** on `pivot-workharness` (832484f mailbox+loop, 6d4b353 manager, 044ee4a room.js+schema+e2e, 4256699 live on this house). See `examples/subagent/README.md` for the real transcript and how to enable.
 - Reviewer: 审查员
 
 ## 1. The one-sentence correction
