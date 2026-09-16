@@ -39,9 +39,10 @@ function open(roomName, openOpts = {}) {
   fs.mkdirSync(path.dirname(statePath), { recursive: true });
   const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf8')) : { last_sleep: null, last_wake: null, wakes_today: 0, day: null };
   const save = () => fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
+  const ok2xx = (r, key) => !!(r && typeof r === 'object' && r.$status >= 200 && r.$status < 300 && !r.error && (key ? r[key] : true));   // 只有 2xx 且形状对才算发布成功（审查员 P1-2）
   const api = (method, p, body) => new Promise((resolve, reject) => {
     const u = new URL(p, lrBase);
-    const req = http.request({ hostname: u.hostname, port: u.port, path: u.pathname + u.search, method, headers: { authorization: `Bearer ${lrToken}`, 'content-type': 'application/json' } }, res => { let s = ''; res.on('data', c => s += c); res.on('end', () => { try { resolve(JSON.parse(s)); } catch { resolve(s); } }); });
+    const req = http.request({ hostname: u.hostname, port: u.port, path: u.pathname + u.search, method, headers: { authorization: `Bearer ${lrToken}`, 'content-type': 'application/json' } }, res => { let s = ''; res.on('data', c => s += c); res.on('end', () => { let v; try { v = JSON.parse(s); } catch { v = s; } if (v && typeof v === 'object') Object.defineProperty(v, '$status', { value: res.statusCode, enumerable: false }); else v = { $raw: v, $status: res.statusCode }; resolve(v); }); });
     req.on('error', reject); if (body) req.write(JSON.stringify(body)); req.end();
   });
   const tz = (room.schedule && room.schedule.timezone && room.schedule.timezone !== 'inherit') ? room.schedule.timezone : house.timezone;
@@ -78,7 +79,7 @@ function open(roomName, openOpts = {}) {
     api('POST', '/activity', { kind, text: `${room.name}：${brief}`, meta: { run_id: rec.id, reason: rec.reason, status: rec.status, ms: rec.ms, usage: rec.usage || null, model_calls: rec.model_calls || 0, error: rec.error || null } }).catch(() => {}); };
   const plugins = room.plugins || (house.defaults || {}).plugins || [];
   const memory = plugins.includes('memory') ? memoryPlugin.open(roomDir) : null;
-  return { room, house, roomDir, api, houseTime, inQuiet, budgetLeft, state, save, soul, memory, keys, recordRun, tz, lrBase };
+  return { room, house, roomDir, api, ok2xx, houseTime, inQuiet, budgetLeft, state, save, soul, memory, keys, recordRun, tz, lrBase };
 }
 
 const byName = (id, members) => (members.find(m => m.id === id) || {}).name || id;
@@ -139,6 +140,27 @@ const abortable = (promise, signal) => new Promise((resolve, reject) => {
 // think 的返回值：字符串照旧；{ text, usage } 就拆开（V2-U）
 const unpackReply = r => (r && typeof r === 'object' && !Array.isArray(r)) ? { text: r.text == null ? '' : String(r.text), usage: (r.usage && typeof r.usage === 'object') ? r.usage : null } : { text: r == null ? '' : String(r), usage: null };
 const addUsage = (run, usage) => { if (!usage) return; if (!run.usage) { run.usage = { ...usage }; return; } for (const [k, v] of Object.entries(usage)) if (typeof v === 'number' && typeof run.usage[k] === 'number') run.usage[k] += v; else if (run.usage[k] === undefined) run.usage[k] = v; };   // 同一次 run 调了两回模型：数字相加
+// subagent config: room.enabled ?? house.enabled ?? false (room can tighten); budget merged per field; every cap must be a finite positive integer.
+// A partial room budget must NOT wipe the house's other caps (that produced NaN → unlimited before).
+function mergeSubagentConfig(houseSub, roomSub) {
+  const h = houseSub && typeof houseSub === 'object' ? houseSub : {}; const r = roomSub && typeof roomSub === 'object' ? roomSub : {};
+  const pickInt = (v, d, lo, hi) => { const n = Number.isInteger(v) ? v : d; return Number.isFinite(n) && n >= lo && n <= hi ? n : d; };
+  const hb = h.budget || {}, rb = r.budget || {};
+  const houseTools = Array.isArray(h.tools) ? h.tools : ['core.fs.read'];
+  const roomTools = Array.isArray(r.tools) ? r.tools.filter(t => houseTools.includes(t)) : houseTools;   // room narrows within house
+  return {
+    enabled: r.enabled !== undefined ? !!r.enabled : h.enabled !== undefined ? !!h.enabled : false,
+    max_parallel: Math.min(pickInt(r.max_parallel, pickInt(h.max_parallel, 2, 1, 8), 1, 8), pickInt(h.max_parallel, 2, 1, 8)),
+    budget: {
+      model_calls: Math.min(pickInt(rb.model_calls, pickInt(hb.model_calls, 15, 1, 200), 1, 200), pickInt(hb.model_calls, 15, 1, 200)),
+      tool_calls: Math.min(pickInt(rb.tool_calls, pickInt(hb.tool_calls, 20, 0, 500), 0, 500), pickInt(hb.tool_calls, 20, 0, 500)),
+      minutes: Math.min(pickInt(rb.minutes, pickInt(hb.minutes, 10, 1, 240), 1, 240), pickInt(hb.minutes, 10, 1, 240)),
+    },
+    tools: roomTools,
+    inherit_max_chars: Math.min(pickInt(r.inherit_max_chars, pickInt(h.inherit_max_chars, 12000, 0, 200000), 0, 200000), pickInt(h.inherit_max_chars, 12000, 0, 200000)),
+    summary_max_words: pickInt(r.summary_max_words, pickInt(h.summary_max_words, 300, 20, 5000), 20, 5000),
+  };
+}
 // SUB: <task> | 带上: <brief> | 引用: msg_id,path | 工具: a,b | 预算: m/t/min | 继承: N   —— 带上: 必填除非 继承:>0（零上下文默认）
 function parseSubLine(line, { inbox = [], recentCtx = '', inheritMax = 12000 } = {}) {
   const body = line.replace(/^\s*SUB[:：]\s*/i, '');
@@ -158,7 +180,7 @@ function parseSubLine(line, { inbox = [], recentCtx = '', inheritMax = 12000 } =
   return spec;
 }
 async function run(roomName, runtimeName, think, opts = {}) {
-  const R = open(roomName, { lr: opts.lr }); const { room, api, state, save, soul } = R; const lrBase = R.lrBase;
+  const R = open(roomName, { lr: opts.lr }); const { room, api, ok2xx, state, save, soul } = R; const lrBase = R.lrBase;
   const stop = opts.signal || null; let stopped = false;                       // opts.signal：abort 后关 SSE、清 timer、不再 pump，睡下，run() resolve（没给就照旧）
   // ---- 地基配置（先放 extensions.dev.sameroof.*，等审查员升核心字段）----
   // deliver / limits 用审查员 Y2 的共同解析口（核心字段优先，旧 extensions.dev.sameroof.* 只作迁移回退）；routines 原始列表也核心优先，但仍过我们自己的 mergeRoutines（支持 W1.1 的 at，等 schema 对齐后再切到 resolveExecutionConfig）
@@ -168,7 +190,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
   const routines = mergeRoutines(R.house, room, R.tz); state.routines = state.routines || {};   // 可变数组：黑板任务的 due 会往里 push / splice（syncTaskRoutines），tick 遍历的就是它
   const routineById = id => routines.find(r => r.id === id);
   // ---- subagent V0：manager 在 wake() 之外，不占 active、不受 watchdog；结果走本地 mailbox；只有 broker-direct 传 callOnce ----
-  const subCfg = { enabled: false, ...((R.house.defaults || {}).subagent || {}), ...(room.subagent || {}) };
+  const subCfg = mergeSubagentConfig((R.house.defaults || {}).subagent, room.subagent);   // room 可收紧、字段级合并、预算校验（审查员 P1-3）
   const mailbox = subCfg.enabled ? new Mailbox(path.join(R.roomDir, 'state', 'mailbox.jsonl')) : null;
   let subruns = null;
   if (subCfg.enabled && typeof opts.callOnce === 'function') {
@@ -226,6 +248,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
 
   async function wake(reason, lane, signal) {
     const run = { id: 'run_' + Date.now().toString(36), resident_id: room.id, ts: new Date().toISOString(), reason, lane, status: 'started' };
+    let mailItems = [], mailMarked = true;   // mailMarked=true until the wake actually read the mailbox; then every exit must mark (finally 兜底)
     const routine = lane === 'routine' ? routineById(reason.replace(/^routine:/, '')) : null; if (routine) run.routine_id = routine.id;
     const t0 = Date.now();
     try {
@@ -234,8 +257,8 @@ async function run(roomName, runtimeName, think, opts = {}) {
       const subResults = inboxAll.filter(subOwns);                          // 合同 B（第二处）：子任务的网关结果不进 prompt、不算唤醒理由，静默 ack
       if (subResults.length) { for (const m of subResults) subruns.noteDelivered(m.meta.request_id); await api('POST', '/inbox/ack', { ids: subResults.map(m => m.id) }).catch(() => {}); }
       const inbox = inboxAll.filter(m => !subOwns(m));
-      const mailItems = mailbox ? mailbox.pending() : [];                   // 本地 mailbox：子任务结果，和客厅消息分开渲染
-      run.mail_items = mailItems.length;
+      mailItems = mailbox ? mailbox.pending() : [];                   // 本地 mailbox：子任务结果，和客厅消息分开渲染
+      run.mail_items = mailItems.length; mailMarked = false;
       const myTasks = await fetchTasks(); syncTasks(myTasks);              // 黑板上我的事（每次醒来都看一眼，顺手把 due 落成 routine；没叫我也同步）
       // 例行醒来：inbox 空也不算 nothing，没 @ 我也不 deferred——例行本来就不是因为有人叫
       if (!routine && inbox.length === 0 && mailItems.length === 0 && reason !== 'heartbeat') { run.status = 'nothing'; return; }   // 有子任务结果也算有事
@@ -416,8 +439,8 @@ async function run(roomName, runtimeName, think, opts = {}) {
       if (inbox.length) { const a = await api('POST', '/inbox/ack', { ids: inbox.map(m => m.id) }); if (!a || typeof a.acked !== 'number') { run.ack_error = JSON.stringify(a).slice(0, 300); fs.writeSync(2, `[${room.name}] 标已读失败，下次会重复读到这些话：${run.ack_error}\n`); } }
       if (!reply || /^[(（]静默[)）]/.test(reply)) {                        // "(静默)" 后面再跟解释也算静默（实现员 46 次把"(静默)\n\n我还在读…"发进了客厅），解释只记进 run 不发
         const note = reply.replace(/^[(（]静默[)）]\s*/, '').trim(); if (note) run.silent_note = note.slice(0, 300);
-        console.log(`[静默] 原始长度 ${String(reply || '').length}${note ? '，附了解释，不发' : ''}`); run.status = 'silent'; if (mailbox && mailItems.length) mailbox.markAttempt(mailItems.map(i => i.id), 'silent', true); return; }
-      if (reply.startsWith('DM:')) { const m = reply.match(/^DM:\s*(\S+)\s*[:：]?\s*([\s\S]*)$/); if (m) { await api('POST', '/dm', { to: m[1], text: m[2], hop: hopOut }); if (mailbox && mailItems.length) mailbox.markAttempt(mailItems.map(i => i.id), 'dm', true); run.status = 'dm'; run.said = m[2].slice(0, 500); run.to = m[1]; return; } }
+        console.log(`[静默] 原始长度 ${String(reply || '').length}${note ? '，附了解释，不发' : ''}`); run.status = 'silent'; if (mailbox && mailItems.length) { mailMarked = true; mailbox.markAttempt(mailItems.map(i => i.id), 'silent', true); } return; }
+      if (reply.startsWith('DM:')) { const m = reply.match(/^DM:\s*(\S+)\s*[:：]?\s*([\s\S]*)$/); if (m) { const dmR = await api('POST', '/dm', { to: m[1], text: m[2], hop: hopOut }); const dmOk = ok2xx(dmR, 'id'); if (mailbox && mailItems.length) { mailMarked = true; mailbox.markAttempt(mailItems.map(i => i.id), dmOk ? 'dm' : 'dm_failed', dmOk); } if (!dmOk) { run.status = 'dm_failed'; run.error = JSON.stringify(dmR).slice(0, 200); fs.writeSync(2, `[${room.name}] 私信没发出去（${dmR && dmR.$status}）：${run.error}\n`); return; } run.status = 'dm'; run.said = m[2].slice(0, 500); run.to = m[1]; return; } }
       if (/^APPROVAL[:：]/.test(reply)) {                                   // 两阶段（GATEWAY.md §2.1）：先向网关登记不可变 intent，再把 approval_body 原样交客厅，这轮到此结束；网关不可用就不发审批
         run.said = reply.slice(0, 500);
         let intent; try { intent = gw.parseApprovalLine(reply); }
@@ -425,18 +448,19 @@ async function run(roomName, runtimeName, think, opts = {}) {
         let reg; try { reg = await gw.registerIntent({ residentId: room.id, runId: run.id, action: intent.action, params: intent.params, ttl: 1800 }); }
         catch (e) { run.status = 'gateway_unavailable'; run.error = `${e.code || 'GATEWAY-UNAVAILABLE'}: ${String(e.message).slice(0, 200)}`; fs.writeSync(2, `[${room.name}] 网关不可用，审批没登记（${run.error}）\n`); shift.push({ at: new Date().toISOString(), heard: inbox.map(m => `${m.from}：${m.text}`), said: `（你想 ${intent.action}，但网关不可用，没登记：${run.error.slice(0, 80)}）` }); return; }
         const a = await api('POST', '/approval', reg.approval_body);
-        if (!a || !a.approval_id) { run.status = 'approval_rejected'; run.error = '客厅没收审批：' + JSON.stringify(a).slice(0, 300); fs.writeSync(2, `[${room.name}] ${run.error}\n`); return; }
+        if (!a || !a.approval_id) { if (mailbox && mailItems.length) { mailMarked = true; mailbox.markAttempt(mailItems.map(i => i.id), 'approval_rejected', false); } run.status = 'approval_rejected'; run.error = '客厅没收审批：' + JSON.stringify(a).slice(0, 300); fs.writeSync(2, `[${room.name}] ${run.error}\n`); return; }
         run.status = 'approval'; run.gateway_request_id = reg.request_id; run.approval_id = a.approval_id; run.action = intent.action;
-        if (mailbox && mailItems.length) mailbox.markAttempt(mailItems.map(i => i.id), 'approval', true);   // 客厅收了审批才算消费（gateway 登记成功不够）
+        if (mailbox && mailItems.length) { mailMarked = true; mailbox.markAttempt(mailItems.map(i => i.id), 'approval', true); }   // 客厅收了审批才算消费（gateway 登记成功不够）
         console.log(`[${room.name} 审批] ${intent.action} → ${a.approval_id}（${reg.request_id}）`); return; }
-      await api('POST', '/say', { text: reply, hop: hopOut }); if (mailbox && mailItems.length) mailbox.markAttempt(mailItems.map(i => i.id), 'say', true); console.log(`[${room.name} 说] ${reply.slice(0, 80)}`); run.status = 'said'; run.said = reply.slice(0, 500);
+      const sayR = await api('POST', '/say', { text: reply, hop: hopOut }); const sayOk = ok2xx(sayR, 'id'); if (mailbox && mailItems.length) { mailMarked = true; mailbox.markAttempt(mailItems.map(i => i.id), sayOk ? 'say' : 'say_failed', sayOk); } if (!sayOk) { run.status = 'say_failed'; run.error = JSON.stringify(sayR).slice(0, 200); fs.writeSync(2, `[${room.name}] 没说出去（${sayR && sayR.$status}）：${run.error}\n`); return; } console.log(`[${room.name} 说] ${reply.slice(0, 80)}`); run.status = 'said'; run.said = reply.slice(0, 500);
       shift.push({ at: new Date().toISOString(), heard: inbox.map(m => `${m.from}：${m.text}`), said: reply });
     } catch (e) {
       if (signal && signal.aborted) { run.status = 'interrupted'; run.error = String((signal.reason && signal.reason.message) || signal.reason || e.message).slice(0, 300); console.log(`[打断] ${run.error}（这轮不标已读，下轮重读）`); }
       else { console.error('[醒来失败]', e.message); run.status = 'error'; run.error = String(e.message || e).slice(0, 300); }
-      try { if (mailbox && typeof mailItems !== 'undefined' && mailItems.length) mailbox.markAttempt(mailItems.map(i => i.id), run.status, false); } catch {}   // 不消费：下次重放，带尝试标记
     }
     finally {
+      // 兜底（审查员 P1-2）：这一轮读了 mailbox 却没有任何出口标记（早 return：gateway_unavailable / approval_invalid / nothing / deferred / 异常）→ 记一次未消费的尝试，下次重放
+      try { if (mailbox && !mailMarked && mailItems.length) mailbox.markAttempt(mailItems.map(i => i.id), run.status, false); } catch {}
       run.ms = Date.now() - t0; R.recordRun(run);
       if (hb && lane !== 'routine') hb.backoff(reason === 'heartbeat' && ['passive_idle', 'silent', 'nothing', 'passive_budget'].includes(run.status));   // 例行是定时的，不算"有真事"，不归零心跳退避
     }
@@ -458,7 +482,21 @@ async function run(roomName, runtimeName, think, opts = {}) {
   }
   let sleeping = false;
   const sleep = async () => { if (sleeping) return; sleeping = true; try { await writeHandover(); } catch (e) { fs.writeSync(2, `[交接信失败] ${e.message}\n`); } try { if (think.shift && think.shift.archive) think.shift.archive(); } catch (e) { fs.writeSync(2, `[shift归档失败] ${e.message}\n`); } try { if (R.memory && R.memory.compact) R.memory.compact(); } catch (e) { fs.writeSync(2, `[记忆 compact 失败] ${e.message}\n`); } state.last_sleep = new Date().toISOString(); save(); try { await api('POST', '/activity', { kind: 'sleep', text: `${room.name}：session ended, handover saved`, meta: { wakes_today: state.wakes_today } }); } catch {} };
-  process.on('SIGINT', async () => { await sleep(); process.exit(0); }); process.on('SIGTERM', async () => { await sleep(); process.exit(0); });
+  // 统一收尾（审查员 P1-1）：SIGINT/SIGTERM 与测试 signal 走同一条路：stopped → subruns.stop → SSE/timer/active → sleep。不直接 process.exit 越过 manager。
+  let shutdownP = null;
+  const shutdown = () => shutdownP || (shutdownP = (async () => {
+    stopped = true;
+    if (subruns) { try { const left = await subruns.stop(5000); if (left) fs.writeSync(2, `[${room.name} subrun] 收尾超时，${left} 个子任务未在 5s 内停下\n`); } catch (e) { fs.writeSync(2, `[${room.name} subrun] 收尾失败：${e.message}\n`); } }
+    try { clearTimeout(sseTimer); if (sseReq) sseReq.destroy(); } catch {}
+    try { if (rtTimer) clearInterval(rtTimer); if (hb) hb.stop(); } catch {}
+    if (active) active.ctrl.abort(new Error('适配器停下了'));
+    for (let i = 0; i < 100 && active; i++) await new Promise(r => setTimeout(r, 50));   // 等正在跑的这一轮收尾（最多 5 秒）
+    await sleep();
+  })());
+  process.on('SIGINT', async () => { await shutdown(); process.exit(0); }); process.on('SIGTERM', async () => { await shutdown(); process.exit(0); });
+  let sseReq = null, sseTimer = null, rtTimer = null;   // 提前声明：shutdown 会引用
+  // 启动恢复（审查员 P1-1）：必须在首次 wake 和 SSE 之前，否则启动 inbox 里迟到的子任务结果会先泄漏进 prompt；与是否传测试 signal 无关
+  if (subruns) { try { const r = await subruns.recoverOnStartup(id => gw.getIntent(room.id, id), 10); if (r.interrupted) fs.writeSync(2, `[${room.name} subrun] 启动恢复：${r.interrupted} 个被中断的子任务已入 mailbox\n`); } catch (e) { fs.writeSync(2, `[${room.name} subrun] 启动恢复失败：${e.message}\n`); } }
   console.log(`[${room.name}] 适配器上线，runtime=${runtimeName}，客厅=${lrBase}${opts.dry ? '，dry-run' : ''}`);
   await refreshMembers();
   for (let i = 0; i < 30; i++) { try { const m = await api('GET', '/members'); if (Array.isArray(m)) break; } catch {} await new Promise(r => setTimeout(r, 500)); }   // 客厅可能还在开门（systemd 一起拉起时 adapter 早 1 秒），最多等 15 秒
@@ -466,7 +504,6 @@ async function run(roomName, runtimeName, think, opts = {}) {
   await requestWake('human', '启动时看看有没有人找我');
   if (opts.once || opts.dry) { await sleep(); return; }
   const u = new URL('/events', lrBase);
-  let sseReq = null, sseTimer = null, rtTimer = null;
   const resub = ms => { if (!stopped) sseTimer = setTimeout(sub, ms); };
   const sub = () => { if (stopped) return; const req = sseReq = http.request({ hostname: u.hostname, port: u.port, path: u.pathname, headers: { authorization: `Bearer ${JSON.parse(fs.readFileSync(path.join(RUN, 'living-room-tokens.json'), 'utf8'))[room.id]}` } }, res => {
     let buf = ''; res.on('data', c => { buf += c; let i; while ((i = buf.indexOf('\n\n')) >= 0) { const chunk = buf.slice(0, i); buf = buf.slice(i + 2); if (!chunk.startsWith('data:')) continue; try { const m = JSON.parse(chunk.slice(5)); onMessage(m); } catch {} } });
@@ -526,15 +563,8 @@ async function run(roomName, runtimeName, think, opts = {}) {
     };
     hb.reschedule();
   }
-  if (!stop) return;                                                    // 没给 signal：照旧——循环靠 SSE 连接与 timer 活着，只在 SIGINT/SIGTERM 时睡
-  if (subruns) { try { const r = await subruns.recoverOnStartup(id => gw.getIntent(room.id, id), 10); if (r.interrupted) fs.writeSync(2, `[${room.name} subrun] 启动恢复：${r.interrupted} 个被中断的子任务已入 mailbox\n`); } catch (e) { fs.writeSync(2, `[${room.name} subrun] 启动恢复失败：${e.message}\n`); } }
+  if (!stop) return;                                                    // 没给 signal：循环靠 SSE 连接与 timer 活着；SIGINT/SIGTERM 走上面的 shutdown()
   await new Promise(resolve => { if (stop.aborted) return resolve(); stop.addEventListener('abort', resolve, { once: true }); });
-  stopped = true;
-  if (subruns) await subruns.stop(5000);   // 先停子任务（interrupted 入 mailbox），再收 SSE 与本轮
-  clearTimeout(sseTimer); if (sseReq) sseReq.destroy();
-  if (rtTimer) clearInterval(rtTimer); if (hb) hb.stop();
-  if (active) active.ctrl.abort(new Error('适配器停下了'));
-  for (let i = 0; i < 100 && active; i++) await new Promise(r => setTimeout(r, 50));   // 等正在跑的这一轮收尾（最多 5 秒）
-  await sleep();
+  await shutdown();
 }
-module.exports = { parseSubLine, open, run, houseRoot, get HOUSE() { return houseRoot(); }, RUN, LANE, mergeRoutines, dueNow, countMissed, renderInboxLine, parseApprovalLine: gw.parseApprovalLine, parsePin: BB.parsePin, syncTaskRoutines: BB.syncTaskRoutines };
+module.exports = { parseSubLine, mergeSubagentConfig, open, run, houseRoot, get HOUSE() { return houseRoot(); }, RUN, LANE, mergeRoutines, dueNow, countMissed, renderInboxLine, parseApprovalLine: gw.parseApprovalLine, parsePin: BB.parsePin, syncTaskRoutines: BB.syncTaskRoutines };

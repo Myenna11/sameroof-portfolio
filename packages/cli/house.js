@@ -120,7 +120,7 @@ const cmds = {
         if (r.model && r.model.auth && r.model.auth.mode === 'broker') {
           if (!creds.includes(credAlias)) { log(r.name, `skip: credential "${credAlias}" not in broker`); continue; }
           if (!fs.existsSync(brokerTokenFile)) {
-            const subEnabled = !!(((houseDoc.defaults || {}).subagent || {}).enabled || (r.subagent || {}).enabled);
+            const subEnabled = (r.subagent && r.subagent.enabled !== undefined) ? !!r.subagent.enabled : !!(((houseDoc.defaults || {}).subagent || {}).enabled);   // room ?? house：房间可收紧，token capability 不多签（审查员 P1-3）
             store.issueToken({ residentId: r.id, credentials: [credAlias], models: [modelId], ttlSeconds: 604800, purposes: subEnabled ? ['interactive', 'heartbeat', 'subagent'] : ['interactive', 'heartbeat'] });   // subagent V0: purpose is explicit at issuance (design v5 §4.2)
             log(r.name, `broker token issued → ${credAlias} / ${modelId}`);
           }

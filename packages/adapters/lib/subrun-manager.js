@@ -74,7 +74,9 @@ class SubrunManager {
     transcript.append({ ts: new Date().toISOString(), ev: 'task', task: spec.task, kind: spec.kind || null });
     const tools = (spec.tools || this.cfg.tools).filter(t => this.cfg.tools.includes(t));   // spec can only narrow
     const b = { ...this.cfg.budget, ...(spec.budget || {}) };
-    const budget = { modelCalls: Math.min(b.model_calls, this.cfg.budget.model_calls), toolCalls: Math.min(b.tool_calls, this.cfg.budget.tool_calls), ms: Math.min(b.minutes, this.cfg.budget.minutes) * 60000 };
+    const cap = (v, ceil, name) => { const n = Number.isInteger(v) ? v : ceil; if (!Number.isInteger(n) || n < 0 || !Number.isInteger(ceil)) throw new Error(`subrun 预算 ${name} 非法（${v} / ${ceil}）：fail closed`); return Math.min(n, ceil); };
+    const budget = { modelCalls: cap(b.model_calls, this.cfg.budget.model_calls, 'model_calls'), toolCalls: cap(b.tool_calls, this.cfg.budget.tool_calls, 'tool_calls'), ms: cap(b.minutes, this.cfg.budget.minutes, 'minutes') * 60000 };
+    if (!(budget.modelCalls >= 1) || !(budget.ms >= 1000)) throw new Error('subrun 预算为零：fail closed');
     const entry = { ac, requestIds: new Set(), delivered: new Set(), startedAt: Date.now(), task: spec.task };
     this.live.set(subId, entry);
     // wrap gateway so every request_id is indexed the moment it is generated (before registerIntent — contract B)
