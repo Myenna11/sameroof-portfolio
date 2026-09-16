@@ -41,3 +41,12 @@ test('mixed batch: only the stubborn one is escalated', async () => {
   assert.equal(pidAlive(good.pid), false);
   assert.equal(pidAlive(bad.pid), false);
 });
+
+// Regression for CI #15-17: serve referenced an undefined `house` when computing token purposes → "serve failed: house is not defined".
+// serve is process-level; the cheapest guard is a load-time symbol check on the function body.
+test('serve does not reference an undefined `house` symbol', () => {
+  const src = require('node:fs').readFileSync(require.resolve('../house.js'), 'utf8');
+  const serveBody = src.slice(src.indexOf('  serve(args, opts) {'), src.indexOf('  /** sameroof cred add'));
+  assert.ok(serveBody.includes('const houseDoc = loadYaml('), 'serve loads house.yaml into houseDoc');
+  assert.ok(!/[^a-zA-Z_.]house\.defaults/.test(serveBody), 'no bare `house.defaults` in serve');
+});

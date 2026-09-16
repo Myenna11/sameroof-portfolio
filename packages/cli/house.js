@@ -78,6 +78,7 @@ const cmds = {
   serve(args, opts) {
     const root = h(opts);
     const port = parseInt(opts.port || '8790', 10);
+    const houseDoc = loadYaml(path.join(root, 'house.yaml'));
     const { spawn } = require('node:child_process');
     const home = process.env.HOME || os.homedir();
     const runDir = path.join(home, '.sameroof', 'run');
@@ -119,7 +120,7 @@ const cmds = {
         if (r.model && r.model.auth && r.model.auth.mode === 'broker') {
           if (!creds.includes(credAlias)) { log(r.name, `skip: credential "${credAlias}" not in broker`); continue; }
           if (!fs.existsSync(brokerTokenFile)) {
-            const subEnabled = !!(((house.defaults || {}).subagent || {}).enabled || (r.subagent || {}).enabled);
+            const subEnabled = !!(((houseDoc.defaults || {}).subagent || {}).enabled || (r.subagent || {}).enabled);
             store.issueToken({ residentId: r.id, credentials: [credAlias], models: [modelId], ttlSeconds: 604800, purposes: subEnabled ? ['interactive', 'heartbeat', 'subagent'] : ['interactive', 'heartbeat'] });   // subagent V0: purpose is explicit at issuance (design v5 §4.2)
             log(r.name, `broker token issued → ${credAlias} / ${modelId}`);
           }
