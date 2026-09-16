@@ -53,7 +53,7 @@ gateway:
     // --- real coordinator + real gateway, wired to each other ---
     room = createLivingRoom({ houseDir: ROOT, runDir: RUN_DIR, dataDir: path.join(ROOT, 'state'), port: 0, approvalLimit: 50, gatewayServiceTokenFile: path.join(gwDir, 'svc.token') });
     const port = (await room.listen()).port;
-    fs.writeFileSync(path.join(gwDir, 'svc.token'), 'svc-e2e-token\n', { mode: 0o600 });
+    fs.writeFileSync(path.join(gwDir, 'svc.token'), 'svc-e2e-token-0123456789abcdef0123456789abcdef\n', { mode: 0o600 });   // living-room requires ≥32 chars; a short one made delivery fail silently and the filter assertion vacuous
     fs.writeFileSync(path.join(RUN_DIR, 'living-room-tokens.json'), JSON.stringify({ resident_beta_01: room.tokenStore.issue('resident_beta_01').token }));
     const human = room.tokenStore.issue('resident_alpha_01').token;
     gateway = createGateway({ houseDir: ROOT, runDir: gwDir, stateDir: path.join(gwDir, 'state'), socketPath: path.join(gwDir, 'gateway.sock'), lockRequired: false, livingRoomPort: port, serviceTokenFile: path.join(gwDir, 'svc.token') });
@@ -98,7 +98,10 @@ gateway:
     assert.equal((await req(port, '/approval', { token: human })).body.filter(a => a.status === 'pending').length, 0, 'no approval card was ever created');
     assert.equal(subModelCalls, 2);
 
-    // 4. contract B: the gateway's result DM for the subrun intent never entered the parent's prompt as a gateway result
+    // 4. contract B: the gateway's result DM for the subrun intent was DELIVERED (not vacuous) and never entered the parent's prompt
+    const subReq = gateway.state.db.prepare('SELECT request_id FROM intents').get().request_id;
+    await until(() => gateway.state.db.prepare('SELECT delivered_at FROM results WHERE request_id=?').get(subReq)?.delivered_at, 'result DM delivered to living-room');
+    assert.equal(room.db.prepare("SELECT count(*) c FROM messages WHERE kind='result' AND to_id='resident_beta_01'").get().c, 1, 'exactly one result DM exists for the parent');
     assert.ok(!seenPrompts.some(p => /网关结果|\[result\]/.test(p) && /grep -rn/.test(p)), 'subrun result DM did not reach the parent prompt');
     const mailFile = path.join(ROOT, 'rooms', '乙', 'state', 'mailbox.jsonl'); assert.ok(fs.existsSync(mailFile));
     const items = fs.readFileSync(mailFile, 'utf8').trim().split('\n').map(JSON.parse); assert.equal(items.length, 1); assert.equal(items[0].status, 'ok'); assert.equal(items[0].consumed, true); assert.equal(items[0].attempts[0].exit, 'say');
