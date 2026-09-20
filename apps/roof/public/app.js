@@ -798,6 +798,7 @@ function bind(root = document) {
             state.approvals = state.approvals.filter(
               (a) => a.approval_id !== el.dataset.id,
             );
+            render();
           } else {
             await api("/approval/" + el.dataset.id, {
               method: "POST",
