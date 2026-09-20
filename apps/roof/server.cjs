@@ -3,6 +3,7 @@
 const http = require("node:http");
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const net = require("node:net");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const exec = promisify(execFile);
@@ -69,9 +70,19 @@ function json(res, status, body) {
   });
   res.end(JSON.stringify(body));
 }
-async function upstream(url, auth, timeout = 8000) {
+// Only our loopback ingress may supply Cloudflare's client identity. Never trust
+// arbitrary X-Forwarded-For chains. Missing identity still gets a limiter key.
+function clientHeaders(req, trustLoopbackProxy = true) {
+  const remote = String(req.socket.remoteAddress || "").replace(/^::ffff:/, "");
+  const cf = String(req.headers["cf-connecting-ip"] || "").trim();
+  const trusted = trustLoopbackProxy && ["127.0.0.1", "::1"].includes(remote);
+  const ip =
+    trusted && net.isIP(cf) ? cf : net.isIP(remote) ? remote : "127.0.0.1";
+  return { "cf-connecting-ip": ip };
+}
+async function upstream(url, auth, timeout = 8000, origin = {}) {
   const r = await fetch(UPSTREAM + url, {
-    headers: { authorization: auth },
+    headers: { authorization: auth, ...origin },
     signal: AbortSignal.timeout(timeout),
   });
   if (!r.ok)
@@ -101,11 +112,11 @@ async function boundedFile(file, base) {
     await handle.close();
   }
 }
-async function work(url, auth) {
-  const me = await upstream("/me", auth);
+async function work(url, auth, origin) {
+  const me = await upstream("/me", auth, 8000, origin);
   if (me.species !== "human")
     throw Object.assign(new Error("工作记录仅供家人查看。"), { status: 403 });
-  const members = await upstream("/members", auth);
+  const members = await upstream("/members", auth, 8000, origin);
   const resident = members.find(
     (m) => m.id === url.searchParams.get("resident"),
   );
@@ -224,23 +235,25 @@ async function work(url, auth) {
     };
   }
 }
-async function energy(url, auth) {
-  const me = await upstream("/me", auth);
+async function energy(url, auth, origin) {
+  const me = await upstream("/me", auth, 8000, origin);
   if (me.species !== "human")
     throw Object.assign(new Error("电量面板仅供家人查看。"), { status: 403 });
-  const members = await upstream("/members", auth);
+  const members = await upstream("/members", auth, 8000, origin);
   const resident = members.find(
     (m) => m.id === url.searchParams.get("resident") && m.species !== "human",
   );
   if (!resident || !/^resident_[a-zA-Z0-9_-]+$/.test(resident.id))
     throw Object.assign(new Error("请选择一位 AI 住户。"), { status: 400 });
   const results = await Promise.allSettled([
-    upstream("/quota", auth, 21000),
+    upstream("/quota", auth, 21000, origin),
     upstream(
       "/rooms/" + encodeURIComponent(resident.id) + "/runs?limit=500",
       auth,
+      8000,
+      origin,
     ),
-    upstream("/rooms/" + encodeURIComponent(resident.id), auth),
+    upstream("/rooms/" + encodeURIComponent(resident.id), auth, 8000, origin),
   ]);
   const value = (i) =>
     results[i].status === "fulfilled" ? results[i].value : null;
@@ -265,7 +278,7 @@ async function energy(url, auth) {
     }),
   );
 }
-function createServer() {
+function createServer(options = {}) {
   return http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, "http://localhost");
@@ -274,14 +287,15 @@ function createServer() {
       if (url.pathname.startsWith("/api/")) {
         const target = url.pathname.slice(4);
         const auth = req.headers.authorization || "";
+        const origin = clientHeaders(req, options.trustLoopbackProxy !== false);
         if (!/^Bearer \S+$/.test(auth))
           return json(res, 401, {
             error: { message: "连接房子后才能读取私人数据。" },
           });
         if (target === "/work" && req.method === "GET")
-          return json(res, 200, await work(url, auth));
+          return json(res, 200, await work(url, auth, origin));
         if (target === "/energy" && req.method === "GET")
-          return json(res, 200, await energy(url, auth));
+          return json(res, 200, await energy(url, auth, origin));
         if (!routes.some((r) => r.test(target)))
           return json(res, 404, { error: { message: "没有这个接口。" } });
         const chunks = [];
@@ -298,6 +312,7 @@ function createServer() {
             method: req.method,
             headers: {
               authorization: auth,
+              ...origin,
               "content-type": "application/json",
               ...(size ? { "content-length": size } : {}),
             },
@@ -308,6 +323,9 @@ function createServer() {
               "content-type":
                 remote.headers["content-type"] || "application/json",
               "x-accel-buffering": "no",
+              ...(remote.headers["retry-after"]
+                ? { "retry-after": remote.headers["retry-after"] }
+                : {}),
             });
             remote.pipe(res);
           },
@@ -349,4 +367,4 @@ if (require.main === module)
   createServer().listen(Number(process.env.PORT || 17930), "127.0.0.1", () =>
     console.log("Same Roof web listening on loopback"),
   );
-module.exports = { createServer, redact, boundedFile };
+module.exports = { createServer, redact, boundedFile, clientHeaders };

@@ -209,6 +209,7 @@ function createLivingRoom(options = {}) {
     'CREATE TABLE IF NOT EXISTS push_subscriptions(',
     'endpoint TEXT PRIMARY KEY, resident_id TEXT NOT NULL, subscription TEXT NOT NULL, created_ts TEXT NOT NULL, updated_ts TEXT NOT NULL);',
     'CREATE INDEX IF NOT EXISTS push_subscriptions_resident ON push_subscriptions(resident_id);',
+    'CREATE TABLE IF NOT EXISTS message_requests(resident_id TEXT NOT NULL, request_id TEXT NOT NULL, digest TEXT NOT NULL, response TEXT NOT NULL, PRIMARY KEY(resident_id,request_id));',
     'CREATE TABLE IF NOT EXISTS activity(seq INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, kind TEXT NOT NULL, actor_id TEXT, text TEXT, meta TEXT);',
   ].join('\n'));
   // 网关接缝的表：审批多两列（老库 ALTER 补上）、权威决定流、结果幂等键
@@ -301,6 +302,16 @@ function createLivingRoom(options = {}) {
   }
 
   function post(input) {
+    const requestId = input.client_request_id;
+    if (requestId !== undefined && (typeof requestId !== 'string' || !/^send_[a-f0-9]{32}$/.test(requestId))) throw new HttpError(400, 'MESSAGE-REQUEST-ID-INVALID', 'client_request_id must be send_ plus 32 lowercase hex characters.');
+    const requestDigest = requestId ? jcs.digest({ kind: input.kind, to_id: input.to_id || null, text: input.text, reply_to: input.reply_to || null, meta: input.meta || null }) : null;
+    if (requestId) {
+      const previous = db.prepare('SELECT digest,response FROM message_requests WHERE resident_id=? AND request_id=?').get(input.from_id, requestId);
+      if (previous) {
+        if (previous.digest !== requestDigest) throw new HttpError(409, 'MESSAGE-REQUEST-CONFLICT', 'This publication key already belongs to a different message.');
+        return JSON.parse(previous.response);
+      }
+    }
     const isPrivate = input.kind === 'dm' || input.kind === 'result';          // result：网关结果，只给申请住户（GATEWAY.md §3.3）
     if (input.from_id !== 'house' && !byId.has(input.from_id)) throw new HttpError(400, 'ACTOR-INVALID', '发言者不在房子里。');
     if (isPrivate && !byId.has(input.to_id)) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', 'Recipient not found.');
@@ -323,6 +334,7 @@ function createLivingRoom(options = {}) {
     db.transaction(() => {
       insMsg.run(id, row.seq, ts, row.kind, row.from_id, row.to_id, row.text, JSON.stringify(mentions), row.reply_to, row.meta ? JSON.stringify(row.meta) : null);
       for (const target of targets) insDelivery.run(id, target, 'queued', ts);
+      if (requestId) db.prepare('INSERT INTO message_requests(resident_id,request_id,digest,response) VALUES(?,?,?,?)').run(input.from_id, requestId, requestDigest, JSON.stringify(row));
     })();
     if (!isPrivate) {
       try { fs.appendFileSync(path.join(dataDir, 'living-room', ts.slice(0, 7) + '.jsonl'), JSON.stringify(row) + '\n'); }
@@ -532,7 +544,7 @@ function createLivingRoom(options = {}) {
         const text = textField(body, 'text');
         const replyTo = body.reply_to == null ? null : String(body.reply_to);
         if (replyTo && !/^msg_[a-f0-9]{16,24}$/.test(replyTo)) throw new HttpError(400, 'REPLY-ID-INVALID', 'reply_to 不是合法消息 id。');
-        return writeJson(res, 200, post({ kind: 'say', from_id: me.id, text, reply_to: replyTo, meta: deliveryMeta(body) }));
+        return writeJson(res, 200, post({ kind: 'say', from_id: me.id, text, reply_to: replyTo, meta: deliveryMeta(body), client_request_id: body.client_request_id }));
       }
 
       if (req.method === 'POST' && url.pathname === '/dm') {
@@ -542,7 +554,7 @@ function createLivingRoom(options = {}) {
         if (typeof body.to !== 'string' || body.to.length > 100) throw new HttpError(400, 'RECIPIENT-INVALID', 'Valid recipient required.');
         const to = byName.get(norm(body.to)) || byId.get(body.to);
         if (!to) throw new HttpError(404, 'RECIPIENT-NOT-FOUND', 'Recipient not found.');
-        return writeJson(res, 200, post({ kind: 'dm', from_id: me.id, to_id: to.id, text, meta: deliveryMeta(body) }));
+        return writeJson(res, 200, post({ kind: 'dm', from_id: me.id, to_id: to.id, text, meta: deliveryMeta(body), client_request_id: body.client_request_id }));
       }
 
       // ---- 任务派发（多 agent 协作核心 API） ----

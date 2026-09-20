@@ -77,7 +77,13 @@ let streamController,
   refreshTimer,
   workPoll,
   toastTimer,
-  energyRequest = 0;
+  energyRequest = 0,
+  dmRequest = 0,
+  memoryRequest = 0,
+  workRequest = 0,
+  refreshRequest = 0,
+  connectRequest = 0;
+const pendingSends = new Set();
 const member = (id) =>
   state.members.find((m) => m.id === id) || {
     id,
@@ -447,48 +453,69 @@ async function quotaDialog(id) {
 }
 async function loadDM() {
   const id = state.room,
-    gen = state.generation;
+    gen = state.generation,
+    ticket = ++dmRequest;
   if (!id) return;
-  const data = state.demo
-    ? state.demoDM?.[id] || [
-        {
-          id: "demo_dm_" + id,
-          from_id: id,
-          kind: "dm",
-          text: "在的。门给你留着，想聊什么都可以。",
-          ts: new Date().toISOString(),
-        },
-      ]
-    : await api("/dm/history?with=" + encodeURIComponent(id) + "&limit=100");
-  if (id === state.room && gen === state.generation) {
-    state.dm = data;
-    const box = $("#messages"),
-      pos = box?.scrollTop || 0,
-      bottom = box
-        ? box.scrollHeight - box.scrollTop - box.clientHeight < 100
-        : true;
-    const focus = document.activeElement?.id;
+  try {
+    const data = state.demo
+      ? state.demoDM?.[id] || [
+          {
+            id: "demo_dm_" + id,
+            from_id: id,
+            kind: "dm",
+            text: "在的。门给你留着，想聊什么都可以。",
+            ts: new Date().toISOString(),
+          },
+        ]
+      : await api("/dm/history?with=" + encodeURIComponent(id) + "&limit=100");
+    if (id === state.room && gen === state.generation && ticket === dmRequest) {
+      state.dm = data;
+      delete state.errors.messages;
+      const box = $("#messages"),
+        pos = box?.scrollTop || 0,
+        bottom = box
+          ? box.scrollHeight - box.scrollTop - box.clientHeight < 100
+          : true;
+      const focus = document.activeElement?.id;
+      render();
+      if ($("#messages"))
+        $("#messages").scrollTop = bottom ? $("#messages").scrollHeight : pos;
+      if (focus === "compose") $("#compose")?.focus();
+    }
+  } catch (e) {
+    if (id !== state.room || gen !== state.generation || ticket !== dmRequest)
+      return;
+    state.errors.messages = e.message;
     render();
-    if ($("#messages"))
-      $("#messages").scrollTop = bottom ? $("#messages").scrollHeight : pos;
-    if (focus === "compose") $("#compose")?.focus();
   }
 }
 async function loadMemory() {
   state.memoryResident ||= state.members.find((m) => m.species !== "human")?.id;
   if (!state.memoryResident) return;
   const id = state.memoryResident,
-    gen = state.generation;
+    gen = state.generation,
+    ticket = ++memoryRequest;
   try {
     if (!state.demo) {
       const data = await api(
         "/rooms/" + encodeURIComponent(id) + "/memory?limit=100",
       );
-      if (gen !== state.generation || id !== state.memoryResident) return;
+      if (
+        gen !== state.generation ||
+        id !== state.memoryResident ||
+        ticket !== memoryRequest
+      )
+        return;
       state.memory = data;
     }
     delete state.errors.memory;
   } catch (e) {
+    if (
+      gen !== state.generation ||
+      id !== state.memoryResident ||
+      ticket !== memoryRequest
+    )
+      return;
     state.errors.memory = e.message;
     state.memory = [];
   }
@@ -501,7 +528,8 @@ async function loadWork() {
   if (!state.workResident) return;
   const id = state.workResident,
     tab = state.workTab,
-    gen = state.generation;
+    gen = state.generation,
+    ticket = ++workRequest;
   let w;
   try {
     if (state.demo) {
@@ -540,7 +568,8 @@ async function loadWork() {
   if (
     id !== state.workResident ||
     tab !== state.workTab ||
-    gen !== state.generation
+    gen !== state.generation ||
+    ticket !== workRequest
   )
     return;
   state.work = w;
@@ -553,7 +582,8 @@ async function loadWork() {
 }
 async function refresh() {
   if (state.demo) return;
-  const gen = state.generation;
+  const gen = state.generation,
+    ticket = ++refreshRequest;
   await Promise.all(
     [
       ["members", "/members"],
@@ -565,15 +595,16 @@ async function refresh() {
     ].map(async ([key, url]) => {
       try {
         const data = await api(url);
-        if (gen !== state.generation) return;
+        if (gen !== state.generation || ticket !== refreshRequest) return;
         state[key] = data;
         delete state.errors[key];
       } catch (e) {
-        if (gen === state.generation) state.errors[key] = e.message;
+        if (gen === state.generation && ticket === refreshRequest)
+          state.errors[key] = e.message;
       }
     }),
   );
-  if (gen !== state.generation) return;
+  if (gen !== state.generation || ticket !== refreshRequest) return;
   const active = document.activeElement?.id;
   const pos = $("#messages")?.scrollTop;
   const bottom = $("#messages")
@@ -586,6 +617,7 @@ async function refresh() {
   if (active === "compose") $("#compose")?.focus();
   if ($("#messages"))
     $("#messages").scrollTop = bottom ? $("#messages").scrollHeight : pos || 0;
+  if (state.room) await loadDM();
 }
 async function stream() {
   streamController?.abort();
@@ -607,7 +639,6 @@ async function stream() {
         clearTimeout(refreshTimer);
         refreshTimer = setTimeout(() => {
           refresh();
-          if (state.room) loadDM().catch((e) => toast(e.message));
         }, 600);
       }
     }
@@ -619,7 +650,11 @@ async function stream() {
 }
 function navigate(page, room = null) {
   saveDraft();
-  if (room !== state.room) state.dm = [];
+  if (room !== state.room) {
+    state.dm = [];
+    dmRequest++;
+    delete state.errors.messages;
+  }
   state.reply = null;
   state.page = page;
   state.room = room;
@@ -659,9 +694,18 @@ function enterDemo() {
   render(false);
 }
 async function connect(token) {
-  const me = await api("/me", {
-    headers: { Authorization: "Bearer " + token },
-  });
+  const gen = state.generation,
+    ticket = ++connectRequest;
+  let me;
+  try {
+    me = await api("/me", {
+      headers: { Authorization: "Bearer " + token },
+    });
+  } catch (e) {
+    if (gen !== state.generation || ticket !== connectRequest) return;
+    throw e;
+  }
+  if (gen !== state.generation || ticket !== connectRequest) return;
   if (me.species !== "human") throw new Error("请使用人类住户的配对令牌。");
   streamController?.abort();
   state.generation++;
@@ -690,16 +734,30 @@ async function connect(token) {
   sessionStorage.setItem("roof-token", token);
   $("#overlay").innerHTML = "";
   render(false);
+  const connectedGeneration = state.generation;
   await refresh();
+  if (
+    state.generation !== connectedGeneration ||
+    ticket !== connectRequest ||
+    state.token !== token ||
+    state.demo
+  )
+    return;
   stream();
   toast("门开了，欢迎回家。");
 }
 async function send(form) {
   const input = $("#compose");
+  const original = input.value;
   const text = input.value.trim();
   if (!text) return;
   const key = state.room || "public",
-    room = state.room;
+    room = state.room,
+    gen = state.generation,
+    reply = state.reply,
+    pendingKey = gen + ":" + key;
+  if (pendingSends.has(pendingKey)) return;
+  pendingSends.add(pendingKey);
   const btn = form.querySelector("button");
   btn.disabled = true;
   try {
@@ -726,19 +784,31 @@ async function send(form) {
         method: "POST",
         body: JSON.stringify(payload),
       });
-      if (room) state.dm.push(row);
-      else state.messages.push(row);
+      if (gen !== state.generation) return;
+      refreshRequest++; // In-flight history snapshots predate this confirmed send.
+      if (room === state.room) dmRequest++;
+      if (room && room === state.room) {
+        if (!state.dm.some((m) => m.id === row.id)) state.dm.push(row);
+      } else if (!room && !state.messages.some((m) => m.id === row.id))
+        state.messages.push(row);
     }
-    input.value = "";
-    state.drafts[key] = "";
-    state.reply = null;
-    render();
-    $("#messages")?.scrollTo(0, $("#messages").scrollHeight);
-    $("#compose")?.focus();
+    saveDraft();
+    if (state.drafts[key] === original) state.drafts[key] = "";
+    if (room === state.room && state.reply === reply) state.reply = null;
+    if (room === state.room) {
+      render(false);
+      $("#messages")?.scrollTo(0, $("#messages").scrollHeight);
+      $("#compose")?.focus();
+    }
   } catch (e) {
-    toast(e.message);
+    if (gen === state.generation) toast(e.message);
   } finally {
+    pendingSends.delete(pendingKey);
     btn.disabled = false;
+    if (gen === state.generation && room === state.room) {
+      const current = $("#compose-form button");
+      if (current) current.disabled = false;
+    }
   }
 }
 function bind(root = document) {
@@ -844,6 +914,7 @@ function bind(root = document) {
   root.querySelectorAll("[data-decision]").forEach(
     (el) =>
       (el.onclick = async () => {
+        const gen = state.generation;
         el.disabled = true;
         try {
           if (state.demo) {
@@ -856,8 +927,10 @@ function bind(root = document) {
               method: "POST",
               body: JSON.stringify({ decision: el.dataset.decision }),
             });
+            if (gen !== state.generation) return;
             await refresh();
           }
+          if (gen !== state.generation) return;
           approvalsDialog();
           toast(
             el.dataset.decision === "allow"
@@ -865,6 +938,7 @@ function bind(root = document) {
               : "已拒绝这次请求。",
           );
         } catch (e) {
+          if (gen !== state.generation) return;
           toast(e.message);
           el.disabled = false;
         }
@@ -872,6 +946,9 @@ function bind(root = document) {
   );
   const compose = root.querySelector("#compose-form");
   if (compose) {
+    compose.querySelector("button").disabled = pendingSends.has(
+      state.generation + ":" + (state.room || "public"),
+    );
     compose.onsubmit = (e) => {
       e.preventDefault();
       send(compose);
@@ -909,6 +986,7 @@ function bind(root = document) {
   if (nf)
     nf.onsubmit = async (e) => {
       e.preventDefault();
+      const gen = state.generation;
       const data = Object.fromEntries(new FormData(nf));
       nf.querySelector("button").disabled = true;
       try {
@@ -923,12 +1001,15 @@ function bind(root = document) {
           });
         else {
           await api("/tasks", { method: "POST", body: JSON.stringify(data) });
+          if (gen !== state.generation) return;
           await refresh();
         }
+        if (gen !== state.generation) return;
         $("#overlay").innerHTML = "";
         navigate("tasks");
         toast("已经钉在黑板上了。");
       } catch (err) {
+        if (gen !== state.generation) return;
         toast(err.message);
         nf.querySelector("button").disabled = false;
       }
@@ -937,6 +1018,7 @@ function bind(root = document) {
   if (tf)
     tf.onsubmit = async (e) => {
       e.preventDefault();
+      const gen = state.generation;
       const data = Object.fromEntries(new FormData(tf));
       tf.querySelector("button").disabled = true;
       try {
@@ -951,12 +1033,15 @@ function bind(root = document) {
             method: "PATCH",
             body: JSON.stringify(data),
           });
+          if (gen !== state.generation) return;
           await refresh();
         }
+        if (gen !== state.generation) return;
         $("#overlay").innerHTML = "";
         render();
         toast("进展记下了。");
       } catch (err) {
+        if (gen !== state.generation) return;
         toast(err.message);
         tf.querySelector("button").disabled = false;
       }

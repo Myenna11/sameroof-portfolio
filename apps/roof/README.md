@@ -7,13 +7,15 @@ runtime dependency. It does not replace `apps/house` or restart resident adapter
 
 ```sh
 node apps/roof/server.cjs
-node --test apps/roof/server.test.cjs apps/roof/energy.test.cjs
+node --test apps/roof/*.test.cjs
 ```
 
 Defaults: bind `127.0.0.1:17930`, proxy `http://127.0.0.1:8790`, read records from
 `/root/sameroof`. Override with `PORT`, `ROOF_UPSTREAM`, `SAMEROOF_ROOT`.
 Open the trailing-slash URL. All browser assets and API requests are relative,
 so deployment at `/sameroof/` is supported.
+The integration tests require the repository workspace dependencies (`npm ci`);
+they start an isolated coordinator with temporary data and fictional identities.
 
 ## Experience and data boundary
 
@@ -28,6 +30,11 @@ so deployment at `/sameroof/` is supported.
   approvals, quota information and read-only memories use existing APIs.
 - Event stream refreshes the UI, with a polling fallback. Work records refresh
   every eight seconds while visible. This is observation, not terminal control.
+- Async responses are scoped to the connection generation and selected room.
+  Private conversations participate in polling fallback; stale successes and
+  failures cannot overwrite a newer selection. Pending sends block duplicate
+  submissions in the same room without erasing newer drafts. This does not
+  promise durable browser drafts or idempotent manual resubmission after reload.
 - No telemetry, CDN, remote font, service worker, third-party avatar or analytics.
 
 ## Per-resident energy panels
@@ -78,6 +85,13 @@ views. Download exports the displayed, scoped records, not an entire filesystem.
 from `/members`, restricts file realpaths and journal unit names, and has no shell
 input or write operation. API proxy routes are allowlisted; internal/admin routes
 are not exposed. The service binds loopback and sends no-store/CSP headers.
+The loopback reverse proxy is a trust boundary: preserve Cloudflare's validated
+`CF-Connecting-IP`. The web server forwards that identity to the coordinator for
+authentication throttling, including `/work` and `/energy`. It ignores arbitrary
+`X-Forwarded-For` and does not trust client-IP headers from non-loopback peers.
+Do not expose this loopback listener directly or replace the ingress with one
+that accepts unvalidated client-IP headers. Missing identity shares a fallback
+limiter bucket rather than bypassing rate limiting.
 
 ## Deploy without disturbing the house
 
@@ -93,6 +107,11 @@ the example-site server block**, run `nginx -t`, then reload nginx. This preserv
 and `/kitchen/`. Start only `sameroof-web.service`; do not restart living-room,
 broker, gateway or residents. Roll back by restoring the nginx backup and the
 previous `current` symlink. No database migration or token rotation is needed.
+
+That procedure is for **web-only** releases. A release changing the coordinator
+or adapters needs a separately coordinated backend restart. See
+[`delivery-recovery.md`](../../docs/design/delivery-recovery.md) for database,
+deployment order and rollback boundaries of the publication recovery change.
 
 Before release: run the authorization tests, check unauthenticated requests return
 401, verify existing token access without publishing it, inspect desktop/mobile

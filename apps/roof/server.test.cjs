@@ -348,3 +348,27 @@ test("redactor does not remove ordinary task IDs or text", () => {
   assert.equal(r.authorization, "[redacted]");
   assert.equal(r.nested[0].password, "[redacted]");
 });
+test("client identity trusts only loopback Cloudflare ingress, not arbitrary forwarded chains", () => {
+  const req = (remote, cf) => ({
+    socket: { remoteAddress: remote },
+    headers: { "cf-connecting-ip": cf, "x-forwarded-for": "198.51.100.99" },
+  });
+  assert.equal(
+    mod.clientHeaders(req("127.0.0.1", "203.0.113.10"))["cf-connecting-ip"],
+    "203.0.113.10",
+  );
+  assert.equal(
+    mod.clientHeaders(req("192.0.2.20", "203.0.113.10"))["cf-connecting-ip"],
+    "192.0.2.20",
+  );
+  assert.equal(
+    mod.clientHeaders(req("127.0.0.1", "malformed"))["cf-connecting-ip"],
+    "127.0.0.1",
+  );
+  assert.equal(
+    mod.clientHeaders(req("127.0.0.1", "203.0.113.10"), false)[
+      "cf-connecting-ip"
+    ],
+    "127.0.0.1",
+  );
+});

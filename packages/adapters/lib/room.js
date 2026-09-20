@@ -11,6 +11,7 @@ const BB = require('./blackboard');                                       // 黑
 const C = require('./context');                                          // 上下文拼装的纯函数：打分挑选、摘要帧、工具留壳
 const gw = require('./gateway-client');
 const { Mailbox } = require('./mailbox');
+const { DeliveryOutbox } = require('./delivery-outbox');
 const { SubrunManager } = require('./subrun-manager');   // subagent V0 (docs/design/subagents.md v5)
 const LR = process.env.SAMEROOF_LR || 'http://127.0.0.1:8790';
 const RUN = path.join(process.env.HOME || '/root', '.sameroof', 'run');
@@ -42,8 +43,9 @@ function open(roomName, openOpts = {}) {
   const ok2xx = (r, key) => !!(r && typeof r === 'object' && r.$status >= 200 && r.$status < 300 && !r.error && (key ? r[key] : true));   // 只有 2xx 且形状对才算发布成功（审查员 P1-2）
   const api = (method, p, body) => new Promise((resolve, reject) => {
     const u = new URL(p, lrBase);
-    const req = http.request({ hostname: u.hostname, port: u.port, path: u.pathname + u.search, method, headers: { authorization: `Bearer ${lrToken}`, 'content-type': 'application/json' } }, res => { let s = ''; res.on('data', c => s += c); res.on('end', () => { let v; try { v = JSON.parse(s); } catch { v = s; } if (v && typeof v === 'object') Object.defineProperty(v, '$status', { value: res.statusCode, enumerable: false }); else v = { $raw: v, $status: res.statusCode }; resolve(v); }); });
-    req.on('error', reject); if (body) req.write(JSON.stringify(body)); req.end();
+    const req = http.request({ hostname: u.hostname, port: u.port, path: u.pathname + u.search, method, headers: { authorization: `Bearer ${lrToken}`, 'content-type': 'application/json' } }, res => { let s = ''; res.on('error', reject); res.on('aborted', () => reject(new Error('Coordinator response interrupted'))); res.on('data', c => s += c); res.on('end', () => { let v; try { v = JSON.parse(s); } catch { v = s; } if (v && typeof v === 'object') Object.defineProperty(v, '$status', { value: res.statusCode, enumerable: false }); else v = { $raw: v, $status: res.statusCode }; resolve(v); }); });
+    const timeout = setTimeout(() => req.destroy(new Error('Coordinator request timed out')), 15000); timeout.unref();
+    req.on('close', () => clearTimeout(timeout)); req.on('error', reject); if (body) req.write(JSON.stringify(body)); req.end();
   });
   const tz = (room.schedule && room.schedule.timezone && room.schedule.timezone !== 'inherit') ? room.schedule.timezone : house.timezone;
   const houseTime = () => {
@@ -192,6 +194,13 @@ async function run(roomName, runtimeName, think, opts = {}) {
   // ---- subagent V0：manager 在 wake() 之外，不占 active、不受 watchdog；结果走本地 mailbox；只有 broker-direct 传 callOnce ----
   const subCfg = mergeSubagentConfig((R.house.defaults || {}).subagent, room.subagent);   // room 可收紧、字段级合并、预算校验（审查员 P1-3）
   const mailbox = subCfg.enabled ? new Mailbox(path.join(R.roomDir, 'state', 'mailbox.jsonl')) : null;
+  const outbox = new DeliveryOutbox(path.join(R.roomDir, 'state', 'delivery-outbox.json'));
+  const acknowledge = async ids => {
+    if (!ids.length) return;
+    const a = await api('POST', '/inbox/ack', { ids });
+    if (!ok2xx(a) || typeof a.acked !== 'number') throw new Error('Inbox acknowledgement failed: ' + JSON.stringify(a).slice(0, 200));
+  };
+  const flushPublication = () => outbox.flush({ api, ok2xx, acknowledge, markMail: mailbox ? (ids, exit, consumed) => mailbox.markAttempt(ids, exit, consumed) : null });
   let subruns = null;
   if (subCfg.enabled && typeof opts.callOnce === 'function') {
     subruns = new SubrunManager({ dir: path.join(R.roomDir, 'state'), mailbox, requestWake: (lane, why) => requestWake(lane, why), model: opts.callOnce, gateway: gw, residentId: room.id, residentName: room.name, config: subCfg, log: (...a) => fs.writeSync(2, `[${room.name} subrun] ${a.join(' ')}\n`) });
@@ -252,6 +261,14 @@ async function run(roomName, runtimeName, think, opts = {}) {
     const routine = lane === 'routine' ? routineById(reason.replace(/^routine:/, '')) : null; if (routine) run.routine_id = routine.id;
     const t0 = Date.now();
     try {
+      if (outbox.read()) {
+        const delivered = await flushPublication();
+        run.status = delivered.exit === 'say' ? 'said' : 'dm'; run.recovered_publication = delivered.id;
+        // Finish old delivery before thinking again (also when model budget is
+        // exhausted). Check any newer inputs in the next serialized wake.
+        requestWake('agent', 'pending publication delivered', 'after_turn');
+        return;
+      }
       if (!R.budgetLeft()) { console.log('[预算] daily request budget exhausted, passive mode'); run.status = 'passive_budget'; return; }
       const inboxAll = await api('GET', '/inbox'); if (!Array.isArray(inboxAll)) throw new Error('客厅没开门: ' + JSON.stringify(inboxAll));
       const subResults = inboxAll.filter(subOwns);                          // 合同 B（第二处）：子任务的网关结果不进 prompt、不算唤醒理由，静默 ack
@@ -436,11 +453,16 @@ async function run(roomName, runtimeName, think, opts = {}) {
           else keep.push(l); }
         if (pinned) syncTasks(await fetchTasks());                          // 刚钉/刚改的，routine 立刻跟上（做完的闹钟当场拆掉）
         reply = keep.join('\n').trim(); }
-      if (inbox.length) { const a = await api('POST', '/inbox/ack', { ids: inbox.map(m => m.id) }); if (!a || typeof a.acked !== 'number') { run.ack_error = JSON.stringify(a).slice(0, 300); fs.writeSync(2, `[${room.name}] 标已读失败，下次会重复读到这些话：${run.ack_error}\n`); } }
       if (!reply || /^[(（]静默[)）]/.test(reply)) {                        // "(静默)" 后面再跟解释也算静默（实现员 46 次把"(静默)\n\n我还在读…"发进了客厅），解释只记进 run 不发
+        await acknowledge(inbox.map(m => m.id));
         const note = reply.replace(/^[(（]静默[)）]\s*/, '').trim(); if (note) run.silent_note = note.slice(0, 300);
         console.log(`[静默] 原始长度 ${String(reply || '').length}${note ? '，附了解释，不发' : ''}`); run.status = 'silent'; if (mailbox && mailItems.length) { mailMarked = true; mailbox.markAttempt(mailItems.map(i => i.id), 'silent', true); } return; }
-      if (reply.startsWith('DM:')) { const m = reply.match(/^DM:\s*(\S+)\s*[:：]?\s*([\s\S]*)$/); if (m) { const dmR = await api('POST', '/dm', { to: m[1], text: m[2], hop: hopOut }); const dmOk = ok2xx(dmR, 'id'); if (mailbox && mailItems.length) { mailMarked = true; mailbox.markAttempt(mailItems.map(i => i.id), dmOk ? 'dm' : 'dm_failed', dmOk); } if (!dmOk) { run.status = 'dm_failed'; run.error = JSON.stringify(dmR).slice(0, 200); fs.writeSync(2, `[${room.name}] 私信没发出去（${dmR && dmR.$status}）：${run.error}\n`); return; } run.status = 'dm'; run.said = m[2].slice(0, 500); run.to = m[1]; return; } }
+      if (reply.startsWith('DM:')) { const m = reply.match(/^DM:\s*(\S+)\s*[:：]?\s*([\s\S]*)$/); if (m) {
+        outbox.prepare({ route: '/dm', body: { to: m[1], text: m[2], hop: hopOut }, inboxIds: inbox.map(m => m.id), mailIds: mailItems.map(i => i.id), exit: 'dm' });
+        mailMarked = true;
+        try { await flushPublication(); } catch (e) { run.status = 'dm_failed'; run.error = e.message; return; }
+        run.status = 'dm'; run.said = m[2].slice(0, 500); run.to = m[1]; return;
+      } }
       if (/^APPROVAL[:：]/.test(reply)) {                                   // 两阶段（GATEWAY.md §2.1）：先向网关登记不可变 intent，再把 approval_body 原样交客厅，这轮到此结束；网关不可用就不发审批
         run.said = reply.slice(0, 500);
         let intent; try { intent = gw.parseApprovalLine(reply); }
@@ -451,8 +473,12 @@ async function run(roomName, runtimeName, think, opts = {}) {
         if (!ok2xx(a, 'approval_id')) { if (mailbox && mailItems.length) { mailMarked = true; mailbox.markAttempt(mailItems.map(i => i.id), 'approval_rejected', false); } run.status = 'approval_rejected'; run.error = '客厅没收审批：' + JSON.stringify(a).slice(0, 300); fs.writeSync(2, `[${room.name}] ${run.error}\n`); return; }
         run.status = 'approval'; run.gateway_request_id = reg.request_id; run.approval_id = a.approval_id; run.action = intent.action;
         if (mailbox && mailItems.length) { mailMarked = true; mailbox.markAttempt(mailItems.map(i => i.id), 'approval', true); }   // 客厅收了审批才算消费（gateway 登记成功不够）
+        await acknowledge(inbox.map(m => m.id));
         console.log(`[${room.name} 审批] ${intent.action} → ${a.approval_id}（${reg.request_id}）`); return; }
-      const sayR = await api('POST', '/say', { text: reply, hop: hopOut }); const sayOk = ok2xx(sayR, 'id'); if (mailbox && mailItems.length) { mailMarked = true; mailbox.markAttempt(mailItems.map(i => i.id), sayOk ? 'say' : 'say_failed', sayOk); } if (!sayOk) { run.status = 'say_failed'; run.error = JSON.stringify(sayR).slice(0, 200); fs.writeSync(2, `[${room.name}] 没说出去（${sayR && sayR.$status}）：${run.error}\n`); return; } console.log(`[${room.name} 说] ${reply.slice(0, 80)}`); run.status = 'said'; run.said = reply.slice(0, 500);
+      outbox.prepare({ route: '/say', body: { text: reply, hop: hopOut }, inboxIds: inbox.map(m => m.id), mailIds: mailItems.map(i => i.id), exit: 'say' });
+      mailMarked = true;
+      try { await flushPublication(); } catch (e) { run.status = 'say_failed'; run.error = e.message; return; }
+      console.log(`[${room.name} 说] ${reply.slice(0, 80)}`); run.status = 'said'; run.said = reply.slice(0, 500);
       shift.push({ at: new Date().toISOString(), heard: inbox.map(m => `${m.from}：${m.text}`), said: reply });
     } catch (e) {
       if (signal && signal.aborted) { run.status = 'interrupted'; run.error = String((signal.reason && signal.reason.message) || signal.reason || e.message).slice(0, 300); console.log(`[打断] ${run.error}（这轮不标已读，下轮重读）`); }
@@ -505,7 +531,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
     clearTimeout(hardExit);
   })());
   process.on('SIGINT', async () => { await shutdown(); process.exit(0); }); process.on('SIGTERM', async () => { await shutdown(); process.exit(0); });
-  let sseReq = null, sseTimer = null, rtTimer = null;   // 提前声明：shutdown 会引用
+  let sseReq = null, sseTimer = null, rtTimer = null, connectedOnce = false;   // 提前声明：shutdown 会引用
   // 启动恢复（审查员 P1-1）：必须在首次 wake 和 SSE 之前，否则启动 inbox 里迟到的子任务结果会先泄漏进 prompt；与是否传测试 signal 无关
   if (subruns) { try { const r = await subruns.recoverOnStartup(id => gw.getIntent(room.id, id), 10); if (r.interrupted) fs.writeSync(2, `[${room.name} subrun] 启动恢复：${r.interrupted} 个被中断的子任务已入 mailbox\n`); } catch (e) { fs.writeSync(2, `[${room.name} subrun] 启动恢复失败：${e.message}\n`); } }
   console.log(`[${room.name}] 适配器上线，runtime=${runtimeName}，客厅=${lrBase}${opts.dry ? '，dry-run' : ''}`);
@@ -517,6 +543,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
   const u = new URL('/events', lrBase);
   const resub = ms => { if (!stopped) sseTimer = setTimeout(sub, ms); };
   const sub = () => { if (stopped) return; const req = sseReq = http.request({ hostname: u.hostname, port: u.port, path: u.pathname, headers: { authorization: `Bearer ${JSON.parse(fs.readFileSync(path.join(RUN, 'living-room-tokens.json'), 'utf8'))[room.id]}` } }, res => {
+    if (res.statusCode === 200) { if (connectedOnce) requestWake('agent', 'coordinator reconnected; check pending inbox', 'after_turn'); connectedOnce = true; }
     let buf = ''; res.on('data', c => { buf += c; let i; while ((i = buf.indexOf('\n\n')) >= 0) { const chunk = buf.slice(0, i); buf = buf.slice(i + 2); if (!chunk.startsWith('data:')) continue; try { const m = JSON.parse(chunk.slice(5)); onMessage(m); } catch {} } });
     res.on('end', () => resub(3000)); }); req.on('error', () => resub(5000)); req.end(); };
   function onMessage(m) {
