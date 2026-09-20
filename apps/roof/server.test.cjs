@@ -5,7 +5,12 @@ const http = require("node:http");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-let server, upstream, base, root, mod;
+let server,
+  upstream,
+  base,
+  root,
+  mod,
+  failedEnergySource = null;
 const listen = (s) =>
   new Promise((r) => s.listen(0, "127.0.0.1", () => r(s.address().port)));
 test("public demo uses only fictional identities, including cross-references", async () => {
@@ -89,7 +94,47 @@ before(async () => {
       return res.end(
         JSON.stringify([
           { id: "resident_test_01", name: "Test", species: "agent" },
+          { id: "resident_human_01", name: "Human", species: "human" },
         ]),
+      );
+    if (req.url === failedEnergySource) {
+      res.writeHead(503);
+      res.end("{}");
+      return;
+    }
+    if (req.url === "/quota")
+      return res.end(
+        JSON.stringify({
+          providers: [
+            {
+              provider: "test",
+              label: "Test account",
+              residents: ["Test", "Other"],
+              status: "ok",
+              fetchedAt: new Date().toISOString(),
+              windows: [{ label: "5h", usedPercent: 12 }],
+              token: "do-not-forward",
+            },
+          ],
+        }),
+      );
+    if (req.url === "/rooms/resident_test_01/runs?limit=500")
+      return res.end(
+        JSON.stringify([
+          {
+            resident_id: "resident_test_01",
+            ts: new Date().toISOString(),
+            usage: { input_tokens: 100, output_tokens: 25, cached_tokens: 80 },
+          },
+        ]),
+      );
+    if (req.url === "/rooms/resident_test_01")
+      return res.end(
+        JSON.stringify({
+          schedule: { timezone: "Asia/Singapore" },
+          soul: "do-not-forward",
+          model: { auth: { alias: "do-not-forward" } },
+        }),
       );
     if (req.url === "/say") {
       let data = "";
@@ -115,6 +160,70 @@ after(async () => {
     new Promise((r) => upstream.close(r)),
   ]);
   await fs.rm(root, { recursive: true, force: true });
+});
+test("energy validates human identity and resident selection on every call", async () => {
+  for (const [auth, status] of [
+    [null, 401],
+    ["Bearer wrong", 401],
+    ["Bearer agent", 403],
+  ]) {
+    const r = await fetch(base + "/api/energy?resident=resident_test_01", {
+      headers: auth ? { authorization: auth } : {},
+    });
+    assert.equal(r.status, status);
+  }
+  for (const id of ["../secret", "resident_missing_01", "resident_human_01"])
+    assert.equal(
+      (
+        await fetch(base + "/api/energy?resident=" + encodeURIComponent(id), {
+          headers: { authorization: "Bearer human" },
+        })
+      ).status,
+      400,
+    );
+  assert.equal(
+    (
+      await fetch(base + "/api/energy?resident=resident_test_01", {
+        method: "POST",
+        headers: { authorization: "Bearer human" },
+      })
+    ).status,
+    404,
+  );
+});
+test("energy returns only resident-scoped measurements, not config, accounts or tokens", async () => {
+  const r = await fetch(base + "/api/energy?resident=resident_test_01", {
+    headers: { authorization: "Bearer human" },
+  });
+  assert.equal(r.status, 200);
+  const b = await r.json();
+  assert.equal(b.personal.today.tokens, 125);
+  assert.equal(b.context.status, "unavailable");
+  assert.equal(b.accounts[0].windows[0].usedPercent, 12);
+  assert.doesNotMatch(JSON.stringify(b), /do-not-forward|"soul"|"auth"/);
+});
+test("one energy source failure does not hide the other sources", async () => {
+  try {
+    failedEnergySource = "/quota";
+    let b = await (
+      await fetch(base + "/api/energy?resident=resident_test_01", {
+        headers: { authorization: "Bearer human" },
+      })
+    ).json();
+    assert.ok(b.errors.account);
+    assert.equal(b.personal.today.tokens, 125);
+    failedEnergySource = "/rooms/resident_test_01/runs?limit=500";
+    b = await (
+      await fetch(base + "/api/energy?resident=resident_test_01", {
+        headers: { authorization: "Bearer human" },
+      })
+    ).json();
+    assert.ok(b.errors.personal);
+    assert.equal(b.personal.today.tokens, null);
+    assert.equal(b.accounts.length, 1);
+  } finally {
+    failedEnergySource = null;
+  }
 });
 test("public shell works, private data requires bearer and ignores query credentials", async () => {
   const r = await fetch(base + "/");

@@ -7,7 +7,7 @@ runtime dependency. It does not replace `apps/house` or restart resident adapter
 
 ```sh
 node apps/roof/server.cjs
-node --test apps/roof/server.test.cjs
+node --test apps/roof/server.test.cjs apps/roof/energy.test.cjs
 ```
 
 Defaults: bind `127.0.0.1:17930`, proxy `http://127.0.0.1:8790`, read records from
@@ -29,6 +29,35 @@ so deployment at `/sameroof/` is supported.
 - Event stream refreshes the UI, with a polling fallback. Work records refresh
   every eight seconds while visible. This is observation, not terminal control.
 - No telemetry, CDN, remote font, service worker, third-party avatar or analytics.
+
+## Per-resident energy panels
+
+Each AI has its own panel, accessible from the room, workbench and global energy
+button. The fictional demonstration has three separate account fixtures. Never
+use real residents as demo identities.
+
+Authenticated `GET /api/energy?resident=<id>` separates three kinds of data:
+
+- Account windows: only quota cards explicitly naming this resident are selected.
+  The existing provider-level API does not identify account pools. The panel
+  labels account attribution as unverified and lists other associated residents;
+  it does not claim that the entire provider is a private or shared account.
+- Personal usage: input/output/total tokens from up to 500 recent resident run
+  records, grouped into seven calendar days in the house timezone. Only records
+  with matching resident IDs are counted; cache tokens are not added twice.
+  Missing values remain unknown, and sampling limits / incomplete coverage are
+  visible. These are recorded totals, not guaranteed whole-account consumption.
+- Current context: unavailable until the runtime supplies a verifiable current
+  session reading. Never infer it from lifetime usage or an advertised model
+  window. Only the explicitly labelled demo supplies sample context readings.
+
+Account, personal-log and configuration reads fail independently. Last-success
+timestamps survive cached errors, and data older than 20 minutes is marked stale.
+Invalid or absent percentages render as unknown, not zero. Reset countdowns use
+the provided timestamp and update every 30 seconds without claiming a reset has
+already changed the balance. No credentials, room prompts or config are returned
+by this aggregate endpoint. No login refresh, account mutation or cost estimate
+is introduced.
 
 ## Workbench: honest sources, not a fabricated terminal
 

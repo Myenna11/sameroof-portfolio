@@ -14,6 +14,7 @@ const assets = {
   "/app.js": ["app.js", "text/javascript"],
   "/style.css": ["style.css", "text/css"],
   "/demo.js": ["demo.js", "text/javascript"],
+  "/energy.mjs": ["energy.mjs", "text/javascript"],
   "/icon.svg": ["icon.svg", "image/svg+xml"],
   "/manifest.webmanifest": [
     "manifest.webmanifest",
@@ -68,10 +69,10 @@ function json(res, status, body) {
   });
   res.end(JSON.stringify(body));
 }
-async function upstream(url, auth) {
+async function upstream(url, auth, timeout = 8000) {
   const r = await fetch(UPSTREAM + url, {
     headers: { authorization: auth },
-    signal: AbortSignal.timeout(8000),
+    signal: AbortSignal.timeout(timeout),
   });
   if (!r.ok)
     throw Object.assign(
@@ -223,6 +224,47 @@ async function work(url, auth) {
     };
   }
 }
+async function energy(url, auth) {
+  const me = await upstream("/me", auth);
+  if (me.species !== "human")
+    throw Object.assign(new Error("电量面板仅供家人查看。"), { status: 403 });
+  const members = await upstream("/members", auth);
+  const resident = members.find(
+    (m) => m.id === url.searchParams.get("resident") && m.species !== "human",
+  );
+  if (!resident || !/^resident_[a-zA-Z0-9_-]+$/.test(resident.id))
+    throw Object.assign(new Error("请选择一位 AI 住户。"), { status: 400 });
+  const results = await Promise.allSettled([
+    upstream("/quota", auth, 21000),
+    upstream(
+      "/rooms/" + encodeURIComponent(resident.id) + "/runs?limit=500",
+      auth,
+    ),
+    upstream("/rooms/" + encodeURIComponent(resident.id), auth),
+  ]);
+  const value = (i) =>
+    results[i].status === "fulfilled" ? results[i].value : null;
+  const { buildEnergy } = await import("./public/energy.mjs");
+  return redact(
+    buildEnergy({
+      resident,
+      quota: value(0),
+      runs: Array.isArray(value(1)) ? value(1) : [],
+      timezone: value(2)?.schedule?.timezone || "UTC",
+      errors: {
+        ...(results[0].status === "rejected"
+          ? { account: "账户额度暂时读取失败。" }
+          : {}),
+        ...(results[1].status === "rejected"
+          ? { personal: "个人运行记录暂时读取失败。" }
+          : {}),
+        ...(!value(2)?.schedule?.timezone
+          ? { timezone: "房子时区未提供，暂按 UTC 分日。" }
+          : {}),
+      },
+    }),
+  );
+}
 function createServer() {
   return http.createServer(async (req, res) => {
     try {
@@ -238,6 +280,8 @@ function createServer() {
           });
         if (target === "/work" && req.method === "GET")
           return json(res, 200, await work(url, auth));
+        if (target === "/energy" && req.method === "GET")
+          return json(res, 200, await energy(url, auth));
         if (!routes.some((r) => r.test(target)))
           return json(res, 404, { error: { message: "没有这个接口。" } });
         const chunks = [];

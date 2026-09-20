@@ -1731,6 +1731,231 @@ button:active {
 .mobile-nav {
   display: none;
 }
+.energy-dialog {
+  width: 680px;
+}
+.energy-residents {
+  display: flex;
+  gap: 9px;
+  overflow-x: auto;
+  padding-bottom: 18px;
+}
+.energy-residents button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-shrink: 0;
+  padding: 10px 14px;
+  border: 1px solid #dce1d3;
+  border-radius: 14px;
+  color: #56684d;
+  font-size: 14px;
+}
+.energy-residents button[aria-pressed="true"] {
+  background: #e7ecdc;
+  border-color: #7c916a;
+}
+.energy-residents .avatar {
+  width: 30px;
+  height: 30px;
+  font-size: 16px;
+}
+.energy-intro,
+.energy-scope {
+  color: #63725a;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.energy-section {
+  padding: 22px 0;
+  border-bottom: 1px solid #e3e5d8;
+}
+.energy-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.energy-section-head h3 {
+  font-size: 19px;
+  font-family: LocalSerif, serif;
+  font-weight: 500;
+}
+.energy-section-head > span {
+  font-size: 11px;
+  color: #69775f;
+}
+.energy-account {
+  border: 1px solid #e0e3d4;
+  border-radius: 16px;
+  padding: 18px;
+  margin-top: 15px;
+}
+.energy-account h3 {
+  font-size: 16px;
+}
+.energy-status {
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #e3ead8;
+}
+.energy-status.warning {
+  background: #f1dfc9;
+  color: #895b3c;
+}
+.energy-footnote {
+  color: #6f7965;
+  font-size: 12px;
+  line-height: 1.8;
+  margin-top: 13px;
+}
+.energy-dialog .notice {
+  font-size: 12px;
+  margin-top: 10px;
+}
+.energy-dialog .gauge-block {
+  flex: 1;
+  min-width: 110px;
+}
+.energy-dialog .gauge-block b {
+  font-size: 13px;
+}
+.energy-dialog .gauge-block small {
+  color: #6d785e;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.gauge.unknown {
+  background: repeating-conic-gradient(#e1dfd0 0 12deg, #f4f1e7 12deg 24deg);
+}
+.energy-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 9px;
+}
+.energy-metrics > div {
+  padding: 16px 10px;
+  border-radius: 12px;
+  background: #efefdf;
+  text-align: center;
+  min-width: 0;
+}
+.energy-metrics small {
+  display: block;
+  font-size: 11px;
+  color: #69775e;
+}
+.energy-metrics strong {
+  display: block;
+  margin-top: 10px;
+  font-family: Georgia, serif;
+  font-size: clamp(18px, 4vw, 27px);
+  font-weight: 400;
+  color: #485e43;
+  overflow-wrap: anywhere;
+}
+.energy-section h4 {
+  font-size: 13px;
+  font-weight: 500;
+  margin: 22px 0 13px;
+}
+.energy-history {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 8px;
+}
+.energy-day {
+  min-width: 0;
+  text-align: center;
+  color: #68745c;
+}
+.energy-day small {
+  display: block;
+  font-size: 10px;
+  min-height: 24px;
+  overflow-wrap: anywhere;
+}
+.energy-day > span {
+  font-size: 10px;
+}
+.energy-bar-track {
+  height: 65px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  margin-bottom: 8px;
+  border-bottom: 1px solid #dcdfce;
+}
+.energy-bar-track i {
+  width: 60%;
+  background: #98ac89;
+  border-radius: 5px 5px 0 0;
+}
+.energy-bar-track i.missing {
+  background: transparent;
+  border-top: 2px dashed #aaa98e;
+}
+.context-reading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.context-reading strong {
+  font:
+    30px Georgia,
+    serif;
+  color: #546c4e;
+}
+.context-reading small,
+.context-reading > span {
+  font: 12px sans-serif;
+  color: #64715d;
+}
+.context-track {
+  height: 8px;
+  border-radius: 8px;
+  background: #e2e5d5;
+  overflow: hidden;
+  margin-top: 14px;
+}
+.context-track i {
+  height: 100%;
+  display: block;
+  background: #8a9b76;
+}
+.work-heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.room-energy {
+  margin-left: auto;
+  white-space: nowrap;
+}
+.energy-dialog .full {
+  margin-top: 18px;
+}
+@media (max-width: 680px) {
+  .energy-dialog .modal-body {
+    padding: 18px;
+  }
+  .energy-account {
+    padding: 14px;
+  }
+  .energy-dialog .gauge-row {
+    gap: 14px;
+  }
+  .energy-history {
+    gap: 4px;
+  }
+  .energy-residents button {
+    padding: 9px 10px;
+  }
+}
 #toast {
   position: fixed;
   left: 50%;

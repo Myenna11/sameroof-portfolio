@@ -1,4 +1,5 @@
-import { makeDemo, demoEvents, demoTerminal } from "./demo.js";
+import { makeDemo, demoEvents, demoTerminal, demoEnergyInput } from "./demo.js";
+import { buildEnergy } from "./energy.mjs";
 const $ = (s) => document.querySelector(s);
 const esc = (v) =>
   String(v ?? "").replace(
@@ -72,7 +73,11 @@ const state = {
   drafts: {},
   generation: 0,
 };
-let streamController, refreshTimer, workPoll, toastTimer;
+let streamController,
+  refreshTimer,
+  workPoll,
+  toastTimer,
+  energyRequest = 0;
 const member = (id) =>
   state.members.find((m) => m.id === id) || {
     id,
@@ -157,7 +162,7 @@ function render(preserveDraft = true) {
       .join(
         "",
       )}</div><div class="side-bottom"><div class="little-house">${icon("sun", 26)}<p>灯亮着，<br/>就有人在等你。</p></div><button class="user" data-action="connect">${avatar(state.me || { name: "访客", id: "visitor" })}<span>${esc(state.me?.name || "访客")}<small>${state.demo ? "演示中的家" : "已连接房子"}</small></span>${icon("more")}</button></div></aside>
-  <div class="main-shell"><header class="topbar"><div class="breadcrumb"><span>Same Roof</span><i>/</i><strong>${esc(title)}</strong></div><div class="top-actions"><span class="connection ${state.demo ? "demo" : ""}"><i></i>${state.demo ? "演示模式" : "已连接"}</span><button class="icon-btn" data-action="quota" aria-label="查看额度">${icon("quota")}</button><button class="connect-btn" data-action="connect">${state.demo ? "连接我的房子" : "连接设置"}${icon("arrow", 16)}</button></div></header><div class="content ${state.page === "chat" ? "chat-layout" : state.page === "work" ? "work-layout" : "page-layout"}">${state.page === "chat" ? chatPage() : state.page === "home" ? homePage() : state.page === "tasks" ? tasksPage() : state.page === "memory" ? memoryPage() : workPage()}</div></div>
+  <div class="main-shell"><header class="topbar"><div class="breadcrumb"><span>Same Roof</span><i>/</i><strong>${esc(title)}</strong></div><div class="top-actions"><span class="connection ${state.demo ? "demo" : ""}"><i></i>${state.demo ? "演示模式" : "已连接"}</span><button class="icon-btn" data-action="quota" aria-label="查看 AI 电量">${icon("quota")}</button><button class="connect-btn" data-action="connect">${state.demo ? "连接我的房子" : "连接设置"}${icon("arrow", 16)}</button></div></header><div class="content ${state.page === "chat" ? "chat-layout" : state.page === "work" ? "work-layout" : "page-layout"}">${state.page === "chat" ? chatPage() : state.page === "home" ? homePage() : state.page === "tasks" ? tasksPage() : state.page === "memory" ? memoryPage() : workPage()}</div></div>
   <nav class="mobile-nav">${Object.entries(labels)
     .map(
       ([key, text]) =>
@@ -170,7 +175,7 @@ function render(preserveDraft = true) {
 }
 function chatPage() {
   const m = state.room ? member(state.room) : null;
-  return `<section class="conversation"><div class="conversation-heading"><div class="eyebrow">${m ? "A ROOM OF ONE’S OWN" : "THE LIVING ROOM"}</div><div class="heading-line"><h1>${m ? esc(m.name) + "的房间" : "坐下来，聊一会儿。"}</h1><button class="icon-btn" data-action="search" aria-label="筛选消息">${icon("search")}</button></div><div class="subheading">${m ? `${esc(m.model?.id || "家人")} · ${m.online ? "此刻在家" : "消息会留在房间里"}` : `${state.members.filter((m) => m.online).length} 位住户在家 <span class="dot-sep">·</span> 想法、近况，还有一起做的事。`}</div></div>
+  return `<section class="conversation"><div class="conversation-heading"><div class="eyebrow">${m ? "A ROOM OF ONE’S OWN" : "THE LIVING ROOM"}</div><div class="heading-line"><h1>${m ? esc(m.name) + "的房间" : "坐下来，聊一会儿。"}</h1>${m && m.species !== "human" ? `<button class="soft-btn room-energy" data-action="quota" data-id="${esc(m.id)}">${icon("quota", 16)} 电量</button>` : ""}<button class="icon-btn" data-action="search" aria-label="筛选消息">${icon("search")}</button></div><div class="subheading">${m ? `${esc(m.model?.id || "家人")} · ${m.online ? "此刻在家" : "消息会留在房间里"}` : `${state.members.filter((m) => m.online).length} 位住户在家 <span class="dot-sep">·</span> 想法、近况，还有一起做的事。`}</div></div>
  <button class="task-ribbon" data-page="tasks"><span class="task-ribbon-icon">${icon("task")}</span><span><strong>${activeTasks().length ? "有 " + activeTasks().length + " 件事，等我们一起完成" : "今天的黑板"}</strong><small>${esc(activeTasks()[0]?.title || "把心里惦记的事，轻轻钉在这里。")}</small></span>${icon("chevron", 17)}</button>
  ${state.query !== "" ? `<div class="query-label">正在筛选：${esc(state.query)} <button data-action="clear-search">清除</button></div>` : ""}${errorFor("messages")}
  <div class="messages" id="messages" aria-live="polite">${messagesHTML()}</div><div class="composer-wrap">${state.reply ? `<div class="reply-bar">${icon("reply", 16)} 回复 ${esc(member(state.reply.from_id).name)}：${esc(state.reply.text.slice(0, 60))}<button data-action="cancel-reply" aria-label="取消回复">${icon("close", 16)}</button></div>` : ""}<div class="composer-tools"><button data-action="new-task">${icon("plus", 16)} 钉一件事</button><button data-page="work">${icon("work", 16)} 看看在忙什么</button><button data-action="approvals">${icon("lock", 16)} 待确认 ${state.approvals.filter((a) => a.status === "pending").length || ""}</button></div><form id="compose-form" class="composer"><textarea id="compose" rows="2" maxlength="8000" placeholder="${m ? "对" + esc(m.name) + "说点什么…" : "在客厅说点什么…"}" aria-label="消息内容"></textarea><button type="submit" class="send" aria-label="发送消息">${icon("send", 22)}</button></form><div class="composer-foot"><span>${state.demo ? "演示消息只留在当前页面" : "消息会送到 " + (m ? esc(m.name) + " 的房间" : "客厅")}</span><span>Enter 发送 · Shift + Enter 换行</span></div></div></section>${roomAside(m)}`;
@@ -216,7 +221,7 @@ function roomAside(m) {
           `<div class="activity-item"><i></i><div><span>${esc(a.text)}</span><small>${time(a.ts)}</small></div></div>`,
       )
       .join("") || '<p class="muted">还没有新的活动。</p>'
-  }</div><button class="quota-teaser" data-action="quota"><span>${icon("quota", 18)} 住户的电量</span><small>看看大家还有多少余量 ${icon("arrow", 14)}</small></button><div class="aside-footer">同一屋檐，各自生长。<br/><span>SAME ROOF, DIFFERENT WORLDS.</span></div></aside>`;
+  }</div><button class="quota-teaser" data-action="quota" ${m ? `data-id="${esc(m.id)}"` : ""}><span>${icon("quota", 18)} ${m && m.species !== "human" ? esc(m.name) + "的电量" : "住户的电量"}</span><small>逐位查看额度与个人用量 ${icon("arrow", 14)}</small></button><div class="aside-footer">同一屋檐，各自生长。<br/><span>SAME ROOF, DIFFERENT WORLDS.</span></div></aside>`;
 }
 function homePage() {
   return `<section class="full-page"><div class="eyebrow">A PLACE TO COME BACK TO</div><h1>${state.demo ? "欢迎来到演示小屋。" : "欢迎回家，" + esc(state.me?.name || "家人") + "。"}</h1><p class="page-intro">推开一扇门，就能遇见彼此。</p><div class="home-grid">${state.members.map((m, i) => `<button class="home-room ${tone(m.id)}" data-room="${esc(m.id)}"><div class="room-top">${avatar(m, "large")}<span class="room-number">ROOM 0${i + 1}</span></div><h2>${esc(m.name)}</h2><p>${esc(m.mood || m.model?.id || "把日子过成自己的样子。")}</p><div class="room-bottom"><span>${m.online ? "● 在家" : "○ 暂时离开"}</span>${icon("arrow")}</div></button>`).join("")}<button class="home-living" data-page="chat"><div><div class="eyebrow">OUR COMMON GROUND</div><h2>客厅的灯，<br/>一直为你亮着。</h2><p>${state.messages.length} 条近况 · ${activeTasks().length} 件共同的事</p></div>${icon("chat", 58)}</button></div><div class="home-bottom"><span>${icon("sun")} ${new Date().toLocaleDateString("zh-CN", { month: "long", day: "numeric", weekday: "long" })}</span><span>${state.demo ? "演示角色均为虚构" : "与真实的房子保持连接"}</span></div></section>`;
@@ -258,7 +263,7 @@ function workPage() {
   const people = state.members.filter((m) => m.species !== "human");
   const who = state.workResident || people[0]?.id;
   const m = member(who);
-  return `<section class="workbench"><div class="work-heading"><div><div class="eyebrow">BEHIND THE SCENES</div><h1>${esc(m.name)}的工作台<span class="work-live">${state.demo ? "DEMO" : "READ ONLY"}</span></h1><p class="page-intro">每一步，都有来处。</p></div><button class="soft-btn" data-action="export">${icon("download", 16)} 导出当前记录</button></div><div class="work-body"><aside class="work-sidebar"><div class="side-label">住户</div>${people.map((m) => `<button class="work-resident ${who === m.id ? "active" : ""}" data-work="${esc(m.id)}">${avatar(m)}<span>${esc(m.name)}<small>${esc(m.runtime || m.model?.id || "住户")}</small></span></button>`).join("")}<div class="side-label">最近运行</div>${
+  return `<section class="workbench"><div class="work-heading"><div><div class="eyebrow">BEHIND THE SCENES</div><h1>${esc(m.name)}的工作台<span class="work-live">${state.demo ? "DEMO" : "READ ONLY"}</span></h1><p class="page-intro">每一步，都有来处。</p></div><div class="work-heading-actions"><button class="soft-btn" data-action="quota" data-id="${esc(who)}">${icon("quota", 16)} 电量</button><button class="soft-btn" data-action="export">${icon("download", 16)} 导出当前记录</button></div></div><div class="work-body"><aside class="work-sidebar"><div class="side-label">住户</div>${people.map((m) => `<button class="work-resident ${who === m.id ? "active" : ""}" data-work="${esc(m.id)}">${avatar(m)}<span>${esc(m.name)}<small>${esc(m.runtime || m.model?.id || "住户")}</small></span></button>`).join("")}<div class="side-label">最近运行</div>${
     state.runs
       .filter((r) => r.resident_id === who)
       .slice(0, 6)
@@ -326,6 +331,7 @@ function eventsHTML(events) {
     .join("");
 }
 function modal(title, body) {
+  energyRequest++;
   $("#overlay").innerHTML =
     `<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}"><header><h2>${esc(title)}</h2><button data-action="close-modal" class="icon-btn" aria-label="关闭">${icon("close")}</button></header><div class="modal-body">${body}</div></section></div>`;
   bind($("#overlay"));
@@ -366,34 +372,77 @@ function approvalsDialog() {
     }`,
   );
 }
-async function quotaDialog() {
-  modal("大家还有多少电量", '<div class="loading">正在查看余量…</div>');
-  try {
-    if (!state.demo) state.quota = await api("/quota");
-    const q = state.quota;
+const number = (value) =>
+  value === null || value === undefined
+    ? "—"
+    : Number(value).toLocaleString("zh-CN");
+function resetText(value) {
+  const minutes = Math.ceil((Date.parse(value) - Date.now()) / 60000);
+  if (!Number.isFinite(minutes)) return "重置时间未提供";
+  if (minutes <= 0) return "已到重置时间 · 等待新读数";
+  const d = Math.floor(minutes / 1440),
+    h = Math.floor((minutes % 1440) / 60),
+    m = minutes % 60;
+  return `${d ? d + "天 " : ""}${h ? h + "小时 " : ""}${m}分钟后重置`;
+}
+function energyHTML(data) {
+  const p = data.personal,
+    today = p.today,
+    c = data.context;
+  const max = Math.max(1, ...p.days.map((d) => d.tokens || 0));
+  const accounts = data.accounts
+    .map(
+      (a) =>
+        `<article class="energy-account"><div class="energy-section-head"><h3>${esc(a.label)}</h3><span class="energy-status ${a.stale || a.status === "error" ? "warning" : ""}">${a.expired ? "数据已过期" : a.stale ? "上次成功读数" : a.status === "error" ? "读取失败" : "已读取"}</span></div><p class="energy-scope">${esc(a.scope)}</p>${a.peers.length ? `<p class="notice">同一供应商还关联：${esc(a.peers.join("、"))}。是否共用同一账户尚未核实；这些读数不是该 AI 的个人消耗。</p>` : ""}<div class="gauge-row">${a.windows.map((w) => `<div class="gauge-block"><div class="gauge ${w.usedPercent === null ? "unknown" : ""}" style="--value:${w.usedPercent ?? 0}"><strong>${w.usedPercent === null ? "—" : Math.round(w.usedPercent) + "%"}</strong></div><b>${esc(w.label)} · ${w.usedPercent === null ? "读数未提供" : "已用"}</b><small ${w.resetAt ? `data-reset-at="${esc(w.resetAt)}"` : ""}>${esc(w.resetAt ? resetText(w.resetAt) : w.resetHint || "重置时间未提供")}</small></div>`).join("") || '<p class="notice">此数据源未提供可显示的窗口读数，不能视为 0%。</p>'}</div>${a.message ? `<p class="notice">${esc(a.message)}</p>` : ""}<p class="energy-footnote">数据时间：${a.asOf ? esc(date(a.asOf) + " " + time(a.asOf)) : "未提供"}。未返回的窗口不补造。</p></article>`,
+    )
+    .join("");
+  return `<p class="energy-intro">${data.demo ? "虚构角色与读数，仅用于体验。" : "每个 AI 一份面板，读数按实际来源解释。"}</p><section class="energy-section"><div class="energy-section-head"><h3>账户额度</h3><span>百分比表示已使用</span></div>${data.errors.account ? `<p class="notice">${esc(data.errors.account)}</p>` : ""}${accounts || '<p class="notice">暂未找到与这位 AI 明确关联的额度数据；不会按模型名称猜测账户。</p>'}</section><section class="energy-section"><div class="energy-section-head"><h3>个人用量</h3><span>今日 · ${esc(p.timezone)}</span></div>${data.errors.personal ? `<p class="notice">${esc(data.errors.personal)}</p>` : ""}<div class="energy-metrics"><div><small>已记录 token</small><strong>${number(today.tokens)}</strong></div><div><small>输入 token</small><strong>${number(today.input)}</strong></div><div><small>输出 token</small><strong>${number(today.output)}</strong></div></div><p class="energy-footnote">今日采样 ${today.runs} 次运行，${today.measured} 次有完整 token 总量${today.incomplete ? `；${today.incomplete} 次缺少读数` : ""}。输入 / 输出也只累计已提供的字段，不把缺失计为零。</p><h4>近七日 · 已记录 token</h4><div class="energy-history" role="img" aria-label="${esc(p.days.map((d) => d.day + "：" + (d.tokens === null ? "无读数" : d.tokens + " token")).join("；"))}">${p.days.map((d) => `<div class="energy-day"><small>${number(d.tokens)}</small><div class="energy-bar-track"><i class="${d.tokens === null ? "missing" : ""}" style="height:${d.tokens === null ? 3 : Math.max(3, (d.tokens / max) * 100)}%"></i></div><span>${esc(d.day.slice(5))}</span></div>`).join("")}</div><p class="energy-footnote">${esc(p.source)}；最多读取最近 ${p.limit} 条。${p.capped ? "已达到采样上限，历史可能不完整。" : "未记录的运行与子任务消耗不补估。"}不换算订阅费用，也不将缓存 token 重复相加。</p>${data.errors.timezone ? `<p class="notice">${esc(data.errors.timezone)}</p>` : ""}</section><section class="energy-section"><div class="energy-section-head"><h3>当前会话上下文</h3><span>与账户额度分开</span></div>${c.status === "ok" ? `<div class="context-reading"><strong>${Math.round(c.usedPercent)}<small>% 已占用</small></strong><span>${number(c.usedTokens)} / ${number(c.limitTokens)} token</span></div><div class="context-track"><i style="width:${c.usedPercent}%"></i></div><p class="energy-footnote">${esc(c.source)} · ${esc(date(c.asOf) + " " + time(c.asOf))}</p>` : `<p class="notice">${esc(c.message)}</p>`}</section><button class="soft-btn full" data-action="quota" data-id="${esc(data.resident.id)}">${icon("refresh", 15)} 重新读取这位住户</button>`;
+}
+async function quotaDialog(id) {
+  const people = state.members.filter((m) => m.species !== "human");
+  const preferred =
+    id ||
+    (state.page === "work" ? state.workResident : state.room) ||
+    state.energyResident;
+  const who = people.find((m) => m.id === preferred) || people[0];
+  if (!who) {
     modal(
-      "大家还有多少电量",
-      `<p class="modal-intro">数字表示已使用的额度。留一点余量，也留一点从容。</p>${
-        (q.providers || [])
-          .map(
-            (p) =>
-              `<article class="quota-card"><h3>${esc(p.label || p.provider)}</h3><p>${esc(p.residents?.join("、") || "")}${p.stale ? " · 缓存数据" : ""}</p><div class="gauge-row">${(
-                p.windows || []
-              )
-                .map((w) => {
-                  const n = Number(w.usedPercent);
-                  return `<div class="gauge-block"><div class="gauge" style="--value:${Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0}"><strong>${Number.isFinite(n) ? Math.round(n) + "%" : "—"}</strong></div><b>${esc(w.label)}</b><small>${esc(w.resetHint || (w.resetAt ? "重置：" + time(w.resetAt) : "未提供重置时间"))}</small></div>`;
-                })
-                .join(
-                  "",
-                )}</div>${p.message ? `<p class="notice">${esc(p.message)}</p>` : ""}<small class="muted">更新于 ${time(p.fetchedAt || q.fetched_at)}</small></article>`,
-          )
-          .join("") ||
-        empty("暂时没有额度信息", "供应商返回数据后会显示在这里。")
-      }`,
+      "住户的电量",
+      empty("还没有 AI 住户", "住户加入后，会拥有各自的电量面板。"),
     );
+    return;
+  }
+  state.energyResident = who.id;
+  modal(
+    who.name + "的电量",
+    `<nav class="energy-residents" aria-label="选择电量面板的住户">${people.map((m) => `<button data-energy="${esc(m.id)}" aria-pressed="${m.id === who.id}">${avatar(m)}<span>${esc(m.name)}</span></button>`).join("")}</nav><div id="energy-content" aria-live="polite"><div class="loading">正在读取${esc(who.name)}的状态…</div></div>`,
+  );
+  $("#overlay .modal").classList.add("energy-dialog");
+  const ticket = energyRequest,
+    generation = state.generation;
+  try {
+    const data = state.demo
+      ? buildEnergy(demoEnergyInput(who, state.quota))
+      : await api("/energy?resident=" + encodeURIComponent(who.id));
+    if (
+      ticket !== energyRequest ||
+      generation !== state.generation ||
+      !$("#energy-content")
+    )
+      return;
+    $("#energy-content").innerHTML = energyHTML(data);
+    bind($("#energy-content"));
   } catch (e) {
-    modal("大家还有多少电量", empty("暂时没查到", e.message));
+    if (
+      ticket === energyRequest &&
+      generation === state.generation &&
+      $("#energy-content")
+    ) {
+      $("#energy-content").innerHTML =
+        empty("暂时无法读取这位住户的电量", e.message) +
+        `<button class="soft-btn full" data-action="quota" data-id="${esc(who.id)}">重试</button>`;
+      bind($("#energy-content"));
+    }
   }
 }
 async function loadDM() {
@@ -694,6 +743,9 @@ async function send(form) {
 }
 function bind(root = document) {
   root
+    .querySelectorAll("[data-energy]")
+    .forEach((el) => (el.onclick = () => quotaDialog(el.dataset.energy)));
+  root
     .querySelectorAll("[data-page]")
     .forEach((el) => (el.onclick = () => navigate(el.dataset.page)));
   root
@@ -752,7 +804,7 @@ function bind(root = document) {
         const a = el.dataset.action;
         if (a === "connect") connectDialog();
         if (a === "close-modal") $("#overlay").innerHTML = "";
-        if (a === "quota") quotaDialog();
+        if (a === "quota") quotaDialog(el.dataset.id);
         if (a === "new-task") newTask();
         if (a === "approvals") approvalsDialog();
         if (a === "cancel-reply") {
@@ -947,6 +999,11 @@ if (state.token)
 workPoll = setInterval(() => {
   if (state.page === "work" && !document.hidden) loadWork();
 }, 8000);
+setInterval(() => {
+  document.querySelectorAll("[data-reset-at]").forEach((el) => {
+    el.textContent = resetText(el.dataset.resetAt);
+  });
+}, 30000);
 setInterval(() => {
   if (!state.demo && !document.hidden) refresh();
 }, 45000);

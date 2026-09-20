@@ -172,15 +172,34 @@ export function makeDemo() {
     quota: {
       providers: [
         {
-          provider: "demo",
-          label: "演示额度",
-          residents: ["松果", "云雀"],
+          provider: "demo_planner",
+          label: "演示账户 A",
+          residents: ["松果"],
           status: "ok",
           fetchedAt: at(0),
           windows: [
-            { label: "5 小时", usedPercent: 28, resetHint: "约 3 小时后重置" },
-            { label: "7 天", usedPercent: 11, resetHint: "本周用量" },
+            { label: "5 小时", usedPercent: 28, resetAt: at(-180) },
+            { label: "7 天", usedPercent: 11, resetAt: at(-4320) },
           ],
+        },
+        {
+          provider: "demo_builder",
+          label: "演示账户 B",
+          residents: ["云雀"],
+          status: "ok",
+          fetchedAt: at(0),
+          windows: [
+            { label: "5 小时", usedPercent: 46, resetAt: at(-90) },
+            { label: "7 天", usedPercent: 32, resetAt: at(-2880) },
+          ],
+        },
+        {
+          provider: "demo_helper",
+          label: "演示账户 C",
+          residents: ["栗子"],
+          status: "ok",
+          fetchedAt: at(0),
+          windows: [{ label: "滚动窗", usedPercent: 8, resetAt: at(-240) }],
         },
       ],
     },
@@ -202,6 +221,33 @@ export function makeDemo() {
         tags: ["工作方式"],
       },
     ],
+  };
+}
+// Fictional data only; distinct records for each demo resident, never derived from the live house.
+export function demoEnergyInput(resident, quota) {
+  const index = ["demo_planner", "demo_builder", "demo_helper"].indexOf(
+    resident.id,
+  );
+  const scale = Math.max(1, index + 1);
+  return {
+    resident,
+    quota,
+    timezone: "Asia/Singapore",
+    demo: true,
+    runs: Array.from({ length: 7 }, (_, i) => ({
+      resident_id: resident.id,
+      ts: new Date(now - i * 86400000).toISOString(),
+      usage: {
+        input_tokens: (1200 + i * 310) * scale,
+        output_tokens: (480 + i * 90) * scale,
+      },
+    })),
+    context: {
+      usedTokens: [16000, 39000, 7200][index] ?? 0,
+      limitTokens: 100000,
+      source: "虚构会话示例",
+      asOf: at(0),
+    },
   };
 }
 export const demoEvents = [
