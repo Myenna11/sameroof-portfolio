@@ -43,6 +43,8 @@ jobs:
           node packages/cli/index.js lock --check
       - name: All package tests
         run: npm test
+      - name: Same Roof web authorization and transcript boundaries
+        run: node --test apps/roof/server.test.cjs
       - name: Canonical demo — coordinator + 2 adapters + broker on mock upstream (asserts delegation + task lifecycle; no gateway)
         run: node examples/code-review/demo.js 2>&1 | grep -E "^(OK|FAIL)"
       - name: Fresh-workspace smoke — init → cred → new → check → lock → serve → dispatch → reply → clean shutdown

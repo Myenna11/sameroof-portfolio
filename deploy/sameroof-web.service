@@ -1,0 +1,34 @@
+[Unit]
+Description=Same Roof responsive web and read-only workbench
+After=network.target sameroof-living-room.service
+
+[Service]
+Type=simple
+User=sameroof-web
+Group=sameroof-web
+SupplementaryGroups=systemd-journal
+WorkingDirectory=/opt/sameroof-web/current
+ExecStart=/usr/bin/node server.cjs
+Environment=PORT=17930
+Environment=SAMEROOF_ROOT=/root/sameroof
+Environment=ROOF_UPSTREAM=http://127.0.0.1:8790
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+InaccessiblePaths=-/root/.ssh -/root/.claude -/root/.codex -/root/.sameroof -/var/lib/sameroof-broker -/run/sameroof-broker -/run/sameroof-gateway
+PrivateTmp=true
+PrivateDevices=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+UMask=0077
+MemoryMax=256M
+TasksMax=48
+
+[Install]
+WantedBy=multi-user.target
