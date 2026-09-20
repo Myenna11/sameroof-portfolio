@@ -19,6 +19,8 @@ so deployment at `/sameroof/` is supported.
 
 - Public visitors see explicitly labelled demonstration data. Demo changes are
   in-memory only and never sent to the house. Reload resets them.
+  Demo names and identifiers are fictional and must never be copied from real
+  residents. This includes conversations, tasks, approvals and quota labels.
 - Connect with an existing **human resident** bearer token. It stays in the tab's
   session storage, never in a URL. Disconnect clears it. The existing living-room
   service remains authoritative for messages, tasks, approvals and room access.

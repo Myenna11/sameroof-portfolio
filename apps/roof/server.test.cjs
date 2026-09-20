@@ -8,6 +8,44 @@ const path = require("node:path");
 let server, upstream, base, root, mod;
 const listen = (s) =>
   new Promise((r) => s.listen(0, "127.0.0.1", () => r(s.address().port)));
+test("public demo uses only fictional identities, including cross-references", async () => {
+  const source = await fs.readFile(
+    path.join(__dirname, "public", "demo.js"),
+    "utf8",
+  );
+  const { makeDemo } = await import(
+    "data:text/javascript;base64," + Buffer.from(source).toString("base64")
+  );
+  const demo = makeDemo();
+  const names = new Set(["小禾", "松果", "云雀", "栗子"]);
+  const ids = new Set([
+    "demo_host",
+    "demo_planner",
+    "demo_builder",
+    "demo_helper",
+  ]);
+  assert.equal(demo.members.length, 4);
+  for (const m of [demo.me, ...demo.members]) {
+    assert.ok(names.has(m.name));
+    assert.ok(ids.has(m.id));
+  }
+  for (const m of demo.messages) assert.ok(ids.has(m.from_id));
+  for (const t of demo.tasks) {
+    assert.ok(names.has(t.owner));
+    assert.ok(ids.has(t.owner_id));
+  }
+  for (const a of demo.activity) {
+    assert.ok(names.has(a.actor));
+    assert.ok(ids.has(a.actor_id));
+  }
+  for (const r of demo.runs) {
+    assert.ok(names.has(r.resident));
+    assert.ok(ids.has(r.resident_id));
+  }
+  for (const a of demo.approvals) assert.ok(names.has(a.resident_name));
+  for (const p of demo.quota.providers)
+    for (const n of p.residents) assert.ok(names.has(n));
+});
 before(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "roof-test-"));
   await fs.mkdir(path.join(root, "state"));

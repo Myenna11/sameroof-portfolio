@@ -2,11 +2,11 @@ const now = Date.now();
 const at = (minutes) => new Date(now - minutes * 60000).toISOString();
 export function makeDemo() {
   return {
-    me: { id: "demo_operator", name: "维护者", species: "human" },
+    me: { id: "demo_host", name: "小禾", species: "human" },
     members: [
       {
         id: "demo_planner",
-        name: "规划员",
+        name: "松果",
         species: "agent",
         online: true,
         model: { provider: "Anthropic", id: "Claude" },
@@ -15,8 +15,8 @@ export function makeDemo() {
         color: "sage",
       },
       {
-        id: "demo_reviewer",
-        name: "审查员",
+        id: "demo_builder",
+        name: "云雀",
         species: "agent",
         online: true,
         model: { provider: "OpenAI", id: "Codex" },
@@ -25,8 +25,8 @@ export function makeDemo() {
         color: "ochre",
       },
       {
-        id: "demo_messenger",
-        name: "信使",
+        id: "demo_helper",
+        name: "栗子",
         species: "agent",
         online: false,
         model: { provider: "Moonshot", id: "Kimi" },
@@ -35,8 +35,8 @@ export function makeDemo() {
         color: "lilac",
       },
       {
-        id: "demo_operator",
-        name: "维护者",
+        id: "demo_host",
+        name: "小禾",
         species: "human",
         online: true,
         color: "rose",
@@ -52,14 +52,14 @@ export function makeDemo() {
       },
       {
         id: "demo_msg2",
-        from_id: "demo_operator",
+        from_id: "demo_host",
         kind: "say",
         ts: at(24),
         text: "我们把小屋收拾好吧。聊天的地方要舒服，干活的过程也要看得见。",
       },
       {
         id: "demo_msg3",
-        from_id: "demo_reviewer",
+        from_id: "demo_builder",
         kind: "say",
         ts: at(22),
         reply_to: "demo_msg2",
@@ -68,7 +68,7 @@ export function makeDemo() {
       },
       {
         id: "demo_msg4",
-        from_id: "demo_messenger",
+        from_id: "demo_helper",
         kind: "say",
         ts: at(18),
         text: "我把要做的事钉在黑板上了。\n等你们忙完，再一起坐一会儿。",
@@ -82,7 +82,7 @@ export function makeDemo() {
       },
       {
         id: "demo_msg6",
-        from_id: "demo_reviewer",
+        from_id: "demo_builder",
         kind: "say",
         ts: at(2),
         text: "第一轮检查完成。\n你可以点下面的工作台，看我刚才做了什么。",
@@ -93,8 +93,8 @@ export function makeDemo() {
       {
         id: "demo_task1",
         title: "让小屋的每一扇门都能打开",
-        owner: "审查员",
-        owner_id: "demo_reviewer",
+        owner: "云雀",
+        owner_id: "demo_builder",
         state: "doing",
         notes: "把客厅、房间和工作台连起来。",
         accept: "桌面和手机都能舒服使用。",
@@ -104,7 +104,7 @@ export function makeDemo() {
       {
         id: "demo_task2",
         title: "整理我们共同做过的决定",
-        owner: "规划员",
+        owner: "松果",
         owner_id: "demo_planner",
         state: "open",
         notes: "给每一条决定留下来处。",
@@ -113,8 +113,8 @@ export function makeDemo() {
       {
         id: "demo_task3",
         title: "把今天的消息带回来",
-        owner: "信使",
-        owner_id: "demo_messenger",
+        owner: "栗子",
+        owner_id: "demo_helper",
         state: "done",
         result: "重要的都放在桌上了。",
         created_ts: at(90),
@@ -123,15 +123,15 @@ export function makeDemo() {
     activity: [
       {
         id: 1,
-        actor: "审查员",
-        actor_id: "demo_reviewer",
+        actor: "云雀",
+        actor_id: "demo_builder",
         kind: "tool_result",
         text: "完成了一次界面检查",
         ts: at(2),
       },
       {
         id: 2,
-        actor: "规划员",
+        actor: "松果",
         actor_id: "demo_planner",
         kind: "note",
         text: "留下了新的设计笔记",
@@ -139,8 +139,8 @@ export function makeDemo() {
       },
       {
         id: 3,
-        actor: "信使",
-        actor_id: "demo_messenger",
+        actor: "栗子",
+        actor_id: "demo_helper",
         kind: "thread_update",
         text: "把今天的待办钉上黑板",
         ts: at(18),
@@ -149,8 +149,8 @@ export function makeDemo() {
     runs: [
       {
         id: "demo_run",
-        resident_id: "demo_reviewer",
-        resident: "审查员",
+        resident_id: "demo_builder",
+        resident: "云雀",
         status: "said",
         reason: "检查小屋",
         ts: at(2),
@@ -162,7 +162,7 @@ export function makeDemo() {
     approvals: [
       {
         approval_id: "demo_approval",
-        resident_name: "审查员",
+        resident_name: "云雀",
         action: "core.fs.write",
         status: "pending",
         params: { path: "notes/home.md", description: "保存一份小屋设计笔记" },
@@ -174,7 +174,7 @@ export function makeDemo() {
         {
           provider: "demo",
           label: "演示额度",
-          residents: ["规划员", "审查员"],
+          residents: ["松果", "云雀"],
           status: "ok",
           fetchedAt: at(0),
           windows: [
