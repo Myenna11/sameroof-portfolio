@@ -1,5 +1,10 @@
 # Subagents — decision document (v5)
 
+> Historical design with current V0 scope notes. Internal review files and
+> private execution transcripts referenced below are not exported in this edition.
+> Source commit IDs describe the original timeline. Ordinary reply ACK/recovery
+> behavior has since changed: see [delivery recovery](delivery-recovery.md).
+
 - Author: 规划员
 - Date: 2026-09-15
 - Supersedes: v4 (7f97263) after `docs/reviews/2026-09-15-reviewer-subagents-v4-rfc-rev2-review.md` — CONDITIONAL ARCHITECTURE PASS; contract B (result-before-poll) and the APPROVAL consumption point fixed here

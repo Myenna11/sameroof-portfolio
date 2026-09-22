@@ -1,56 +1,54 @@
 # 同屋 · Same Roof
 
-**多 provider agent 运行时。不同模型，同一个工作区。**
+**多模型 Agent 协作运行时与可视化工作台。**
 
-让不同厂商的 agent——Claude、GPT、GLM、Kimi、Codex——在同一个项目目录里工作。凭证隔离，沙箱执行，协作模式由你定义。
+[English](README.md) · [架构](docs/ARCHITECTURE.md) ·
+[设计决策](docs/DESIGN_DECISIONS.md) · [历史与贡献说明](PROVENANCE.md)
 
-每个 agent 保留自己的原生能力。框架只管协调。
+项目将消息协调、模型凭证访问和工具执行拆成独立组件，支持多个 Agent
+在一个工作区内协作，让人能够查看任务、审批和已经记录的工作过程。
+当前定位是**单机、单租户、自托管原型**，不是多租户生产平台。
 
-## 为什么
+## 核心能力
 
-现在的 agent 工具都是单 provider 封闭的。Claude Code 只跑 Claude，Codex 只跑 OpenAI，DeepSeek Harness 只跑 DeepSeek。
+- Coordinator：HTTP/SSE 消息、私聊、任务、审批投递和 SQLite 持久化收件箱。
+- Broker：为 broker-direct 运行时提供短期、限模型／凭证／用途的访问令牌，记录用量。
+- Gateway：策略判断、审批绑定、bubblewrap 命令沙箱；不可用时拒绝执行，不静默降级。
+- Adapter：事件唤醒、会话交接、只读子任务循环、本地 mailbox 和中断恢复。
+- 可靠投递：持久化 outbox、幂等发布、确认发布后 ACK；回执丢失和重启有故障测试。
+- Web：群聊、私聊、任务板、审批、运行记录和每个 Agent 的用量面板。
 
-同屋把它们放在一个工作区里：
+原生 CLI 的凭证和工具不自动受 Broker／Gateway 管理。模型和工具执行不具备
+端到端 exactly-once 保证。工作台也不声称展示完整终端或隐藏思考链。
 
-- **凭证隔离** — broker 为每个 agent 签发短期 token，agent 之间看不到彼此的密钥
-- **沙箱执行** — 基于 bwrap 的沙箱 + 审批链，fail-closed：没有沙箱就不执行
-- **消息路由** — agent 通过协调器通信，委托任务、请求审核、共享结果
-- **成本控制** — 按 agent 的配额、用量账本、prompt caching
-- **用户定义协作** — 谁干什么由你决定。框架提供基础设施，不提供工作流
+## 无凭证演示
 
-## 核心概念
+需要 Node.js 22+；完整测试和 Gateway 需要 Linux、bubblewrap 及可用的用户命名空间。
 
-**工作区** (`house.yaml`) — 项目级配置：时区、默认权限、凭证别名、通知目标。
-
-**Agent 档案** (`rooms/<name>/room.yaml`) — agent 级配置：模型 provider、凭证、权限、运行时类型。一份档案可以跑多个实例。
-
-**凭证 broker** — 管理多个 provider 的 API key，向 agent 签发短期不透明 token，按 agent 按天记账。
-
-**执行网关** — 在 bwrap 沙箱里跑命令。文件读取走路径规则不起子进程。每个动作都需要审批。没有网关 = 不执行，绝不静默降级。
-
-**协调器** — 在 agent 和人之间路由消息。管理任务板（钉、领、完成）。广播审批请求。
-
-## Agent 协作
-
-同屋提供渠道。怎么协作由你定义。
-
-```yaml
-# 在 agent 的系统提示或 SOUL.md 里：
-# "写完代码让审查员审一下。"
-# "不确定的事情委托给规划员。"
-# "重复的文件扫描任务，起一个 GLM 子实例去跑。"
+```sh
+npm ci
+node examples/code-review/demo.js
+SAMEROOF_ROOT="$PWD" node apps/roof/server.cjs
 ```
 
-agent 可以：
-- 通过协调器**给其他 agent 发消息**
-- 往其他 agent 的任务板上**钉任务**来委托工作
-- 对特权操作**请求审批**
-- **起子实例**——任意已配置的 agent 档案都可以
+网页入口为 `http://127.0.0.1:17930/`。页面默认是虚构数据演示。
+代码审查示例使用真实协调器、适配器和 Broker，但模型上游为 mock，且不启动 Gateway。
+根目录也只是 mock 配置，不含实际家庭成员、账号或部署授权。
 
-不管协作模式是什么，框架保证凭证隔离和沙箱执行。
+## 验证
 
-## 状态
+```sh
+node packages/cli/index.js check
+node packages/cli/index.js lock --check
+npm test
+node --test apps/roof/*.test.cjs
+```
 
-开发中。核心基础设施（broker、gateway、协调器）已上线，118 个测试全绿。
+CI 还包含独立工作区启动、派发、回复和退出的冒烟测试。测试数量以实际输出为准，
+原私有仓库的 CI 记录不能充当本展示版新提交的通过记录。
 
-MIT.
+主要界面是 `apps/roof`；`apps/console` 是管理入口；`apps/house` 是兼容保留的早期界面。
+详细目录、实现边界、部署注意事项见 [英文主页](README.md)。
+
+本版本保留了脱敏后的真实开发历史，没有伪造提交次数，也没有将 AI 协作者的
+贡献改署给一个人。MIT 许可证和历史处理说明见 [PROVENANCE.md](PROVENANCE.md)。

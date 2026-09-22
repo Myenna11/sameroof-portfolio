@@ -1,4 +1,2 @@
-# Review / question documents are authored by other people; markdown's two-trailing-spaces line break is legitimate there.
-# Everything else (code, our own docs) keeps the strict whitespace check in CI.
-docs/reviews/*.md  whitespace=-blank-at-eol,-blank-at-eof
-docs/questions/*.md whitespace=-blank-at-eol,-blank-at-eof
+# Keep source archives and shell scripts consistent across Windows and Linux.
+* text=auto eol=lf

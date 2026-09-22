@@ -1,0 +1,22 @@
+# Fictional mock workspace. No personal configuration or credentials.
+schema_version: 1
+name: Same Roof Demo
+timezone: UTC
+defaults:
+  runtime: broker-direct
+  plugins: [memory, handover, living-room]
+  heartbeat: {enabled: false}
+  context: {recent_messages: 20, recent_max_chars: 4000, memory_hits: 4, memory_recent: 3}
+  approve_timeout: 30m
+  permissions:
+    core.exec: approve
+    core.exec.ro: approve
+    core.fs.read: approve
+    core.fs.write: approve
+    living_room.send: allow
+    memory.write.self: allow
+    memory.write.other: deny
+credentials:
+  - {alias: mock-cheap, provider: mock, purpose: Explicit mock-only demonstration}
+notify:
+  admin: operator

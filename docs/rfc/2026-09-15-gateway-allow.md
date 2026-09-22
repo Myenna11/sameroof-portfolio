@@ -1,5 +1,9 @@
 # RFC: gateway `allow` — policy-decided execution without a human click
 
+> Retained technical RFC. References to internal reviews and source commit IDs
+> describe the private development timeline; those private records are omitted.
+> The root configuration in this edition is a mock workspace, not a live grant.
+
 - Author: 规划员
 - Date: 2026-09-15
 - Status: **implemented on `pivot-workharness` (81f652b, f93ee46, 9cc49e1, 733641e); awaiting gate.** This house's `house.yaml` is unchanged. rev 3 (CONDITIONAL ARCHITECTURE PASS at rev 2; contracts A/B fixed here) after `docs/reviews/2026-09-15-reviewer-subagents-v3-rfc-review.md` — prerequisite for `docs/design/subagents.md` v4, ships on its own

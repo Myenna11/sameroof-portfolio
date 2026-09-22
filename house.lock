@@ -1,0 +1,111 @@
+{
+  "lock_version": 1,
+  "source": {
+    "algorithm": "sha256",
+    "digest": "6a473ad9af2cb83b44ad68cf97eb6bd377aa6b2026a9cbdf7dd34e3ef000ea1b",
+    "files": {
+      "house.yaml": "a3492ad490a47e3f95f78d7d6ef86491b0d36aac4791af6fe0c738d50c0f8934",
+      "rooms/example/room.yaml": "c54d485d9b9f6f4223e6fd208b7d35edcc011c9791dd37da29b34e563a6bca44",
+      "rooms/operator/room.yaml": "0d418ef41997a1c9a35021afe361cb39abe4dc75ff22e1b790b6b02b30d18ee6"
+    }
+  },
+  "schemas": {
+    "house": {
+      "id": "https://sameroof.local/schema/house-v1.json",
+      "digest": {
+        "algorithm": "sha256",
+        "value": "0f4be54d45e43785a5bee20abf0bd56516a81880dec9ae05b791009fad64b15a"
+      }
+    },
+    "room": {
+      "id": "https://sameroof.local/schema/room-v1.json",
+      "digest": {
+        "algorithm": "sha256",
+        "value": "c78e003a7154817e43bd32921dfb7cfda0545dbf7695434f883b6c690eb99385"
+      }
+    }
+  },
+  "components": {
+    "runtimes": [
+      {
+        "id": "broker-direct",
+        "version": "workspace",
+        "source": "packages/adapters/broker-direct",
+        "digest": {
+          "algorithm": "sha256",
+          "value": "766573caf49c06701d4a88cc3908c9fce6aca380e5e9aa31043685dad4e05de7"
+        },
+        "interface_version": 1
+      }
+    ],
+    "plugins": [
+      {
+        "id": "handover",
+        "version": "workspace",
+        "source": "packages/adapters/lib",
+        "digest": {
+          "algorithm": "sha256",
+          "value": "8759855067e3db358ff4dc72347fa34aa8566e8e42f959d4818e6bfda3d4a201"
+        },
+        "interface_version": 1
+      },
+      {
+        "id": "living-room",
+        "version": "0.2.0",
+        "source": "packages/living-room",
+        "digest": {
+          "algorithm": "sha256",
+          "value": "20255c3f24b566023eb2c40cb1d0bbd44adfc97bfdbd330e9438bca79a3609b5"
+        },
+        "interface_version": 1
+      },
+      {
+        "id": "memory",
+        "version": "0.1.0",
+        "source": "packages/plugin-memory",
+        "digest": {
+          "algorithm": "sha256",
+          "value": "06f918ef18d9e1f1cee2b95a8f2e7d07a55d7976656344b59b70949b7ce02000"
+        },
+        "interface_version": 1
+      }
+    ]
+  },
+  "rooms": [
+    {
+      "id": "resident_example_01",
+      "config": "rooms/example/room.yaml",
+      "config_digest": "c54d485d9b9f6f4223e6fd208b7d35edcc011c9791dd37da29b34e563a6bca44",
+      "species": "agent",
+      "runtime": "broker-direct",
+      "plugins": [
+        "handover",
+        "living-room",
+        "memory"
+      ],
+      "deliver": {
+        "human": "after_turn",
+        "agent": "after_turn",
+        "from": {}
+      },
+      "limits": {
+        "run_timeout_ms": 180000,
+        "agent_hops": 6
+      },
+      "routines": []
+    },
+    {
+      "id": "resident_operator_01",
+      "config": "rooms/operator/room.yaml",
+      "config_digest": "0d418ef41997a1c9a35021afe361cb39abe4dc75ff22e1b790b6b02b30d18ee6",
+      "species": "human"
+    }
+  ],
+  "credentials": [
+    {
+      "alias": "mock-cheap",
+      "provider": "mock",
+      "mode": "broker"
+    }
+  ]
+}

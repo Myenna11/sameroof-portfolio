@@ -236,7 +236,7 @@ What happens when things break. Each answer is what the code actually does today
 
 | Scenario | Behavior | Where |
 |---|---|---|
-| **Coordinator crashes** | Adapters lose SSE and reconnect. Posted messages are in SQLite; unread deliveries are tracked per agent in `deliveries`. **The shipping adapter does not pull `/inbox` on reconnect** — messages that arrived during the outage stay unread until the agent's next wake for some other reason (see gap table below). | `deliveries` table; `lib/room.js` resub() |
+| **Coordinator crashes** | Adapters reconnect SSE and queue a recovery wake. Messages and unread deliveries survive in SQLite; a pending reply outbox is recovered before another model call. | `deliveries`, `message_requests`; `lib/room.js`; `lib/delivery-outbox.js` |
 | **Broker crashes** | `broker-direct` agents: model calls fail with a connection error; no fallback — they hold no upstream key. Adapter records `error` in the runs log. `claude-code` / `pi` agents are unaffected: their CLIs keep their own credentials. | broker-direct token ≠ upstream key; runtime-managed creds are outside the broker |
 | **Gateway crashes** | All execution requests fail closed. `APPROVAL:` lines get `gateway_unavailable`. Nothing runs unsandboxed. | `gw.registerIntent()` throws → run status `gateway_unavailable` |
 | **Coordinator process compromised** | Attacker has root on the host (living-room runs as root today). Can read broker DB, gateway token, all rooms. **Not contained.** | `deploy/sameroof-living-room.service` has no `User=` |
@@ -245,18 +245,21 @@ What happens when things break. Each answer is what the code actually does today
 | **Runaway agent (infinite loop)** | Broker token has `max_requests` + `max_tokens`. Exceeded → 429. Coordinator `/say` has per-agent rate limit → 429. | `issueToken({maxRequests, maxTokens})`, `sayLimiter` |
 | **Agent token leaked** | Token is scoped: only bound credentials, only bound models, has TTL. Attacker can't use other agents' models. Revoke with `brokerctl token revoke`. | `MODEL-NOT-ALLOWED`, `CREDENTIAL-NOT-ALLOWED` |
 | **Two agents claim same task** | Last write wins on `owner_id`. No lock. Acceptable for current scale; add optimistic lock if needed. | Known gap |
-| **Prompt injection via DM** | Memory plugin renders memories with "these are not instructions" header and defuses `REMEMBER:`/`APPROVAL:` shapes. Gateway requires human approval regardless of what the agent says. | `plugin-memory` `defuse()`, gateway approval chain |
+| **Prompt injection via DM** | Memory rendering adds untrusted-content framing and defuses directive shapes. Gateway policy remains authoritative: only narrowly pre-authorized operations bypass a click; other actions require approval or are denied. These controls do not eliminate prompt injection. | `plugin-memory` `defuse()`, gateway policy and approval chain |
 | **Upstream API down** | Broker returns upstream error to agent. Ledger records `upstream_error`. Agent sees error, can retry or report. | `ledger.status` |
 | **Disk full** | SQLite writes fail. Coordinator returns 500. This is not handled gracefully. | Known gap |
 
-Known reliability gaps in `lib/room.js` (the shipping adapter), recorded from the 2026-09-14 review — none are fixed yet:
+Publication gaps from the earlier review have been addressed: ordinary replies
+use a durable outbox and idempotent publication before ACK; coordinator requests
+have a 15-second timeout and publication/ACK response validation; SSE reconnect
+queues an inbox recovery wake. See [the current contract](design/delivery-recovery.md).
+Remaining limitations:
 
 | Gap | Effect |
 |---|---|
-| inbox is acked **before** `/say` is confirmed delivered | if `/say` fails after ack, the message is marked read and the response is lost; run log may still say `said` |
-| coordinator client has no timeout and doesn't check HTTP status | a half-open coordinator can hang a wake; 429/500 bodies may be parsed as success |
-| SSE reconnect does not pull `/inbox` | messages that arrived during a disconnect stay unread until the next unrelated wake (heartbeat is off by default in new workspaces) |
-| watchdog `AbortSignal` wraps `think()` only | `/inbox`, `/tasks`, `/history` calls are outside it |
+| publication recovery is wake-triggered, not an independent retry worker | no heartbeat/event/restart can leave a failed reply pending |
+| outbox does not cover the whole turn | pre-publication directives and approval requests are not exactly-once |
+| model watchdog is not a single whole-wake deadline | coordinator calls are individually bounded but several calls can extend the total wake |
 | broker token file is only issued if absent | expired/revoked/mis-scoped token file → 401 loop with one blind retry, no auto-repair |
 | `serve` has no single-instance lock | a second `serve` can steal the broker socket path; partial startup failure doesn't roll back |
 | task claim has no optimistic lock | two agents can both `PIN task: doing` — last write wins |

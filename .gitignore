@@ -6,7 +6,6 @@ rooms/*/handover/
 !rooms/example/
 node_modules/
 state/
-!rooms/*/handover/
 rooms/*/handover/history.md
 rooms/*/memory/
 rooms/*/concerns*.md
@@ -14,3 +13,5 @@ rooms/*/notes.md
 backups/
 state/runs/
 state/cache-probe/
+rooms/*/state/
+scripts/metrics/out/
