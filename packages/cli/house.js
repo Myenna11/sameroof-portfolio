@@ -43,7 +43,19 @@ async function stopChildren(children, { graceMs = 5000, confirmMs = 1000 } = {})
  * Same code path as the systemd deployment; only the paths and the process user differ. The gateway refuses root unless
  * allowRoot is set, and that flag only exists for single-user dev boxes.
  */
-async function startGateway({ root, runDir, port, allowRoot, agentIds, log }) {
+async function assertSocketAvailable(socketPath) {
+  if (!fs.existsSync(socketPath)) return;
+  if (!fs.lstatSync(socketPath).isSocket()) throw new Error('Refusing to replace a non-socket: ' + socketPath);
+  await new Promise((resolve, reject) => {
+    const socket = require('node:net').createConnection(socketPath);
+    const finish = error => { socket.destroy(); error ? reject(error) : resolve(); };
+    socket.setTimeout(1000, () => finish(new Error('Cannot establish ownership of socket: ' + socketPath)));
+    socket.once('connect', () => finish(new Error('Another service already owns socket: ' + socketPath)));
+    socket.once('error', e => finish(['ENOENT', 'ECONNREFUSED'].includes(e.code) ? null : e));
+  });
+}
+
+async function startGateway({ root, runDir, port, allowRoot, agentIds, log, track }) {
   const crypto = require('node:crypto'), http = require('node:http');
   const { spawn } = require('node:child_process');
   const uid = typeof process.getuid === 'function' ? process.getuid() : null;
@@ -52,6 +64,8 @@ async function startGateway({ root, runDir, port, allowRoot, agentIds, log }) {
   try { entry = require.resolve('@sameroof/gateway/server.js'); } catch { throw new Error('@sameroof/gateway is not installed (run `npm ci` in the repository root).'); }
   const { State, issueAdapterToken } = require(entry);
   const gwRun = path.join(runDir, 'gateway'), tokensDir = path.join(gwRun, 'tokens'), stateDir = path.join(root, 'state', 'gateway');
+  const sock = path.join(gwRun, 'gateway.sock');
+  await assertSocketAvailable(sock);
   fs.mkdirSync(tokensDir, { recursive: true, mode: 0o700 });
   fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const serviceTokenFile = path.join(runDir, 'gateway-service.token');
@@ -63,11 +77,10 @@ async function startGateway({ root, runDir, port, allowRoot, agentIds, log }) {
   fs.chmodSync(serviceTokenFile, 0o600);
   const state = new State(path.join(stateDir, 'gateway.db'));
   try { for (const id of agentIds) issueAdapterToken(state, tokensDir, id); } finally { state.close(); }
-  const sock = path.join(gwRun, 'gateway.sock');
-  try { fs.unlinkSync(sock); } catch {}
   const env = { ...process.env, SAMEROOF_ROOT: root, SAMEROOF_GATEWAY_RUN_DIR: gwRun, SAMEROOF_GATEWAY_STATE_DIR: stateDir, SAMEROOF_GATEWAY_SOCKET: sock, SAMEROOF_GATEWAY_SERVICE_TOKEN: serviceTokenFile, SAMEROOF_LIVING_ROOM_PORT: String(port) };
   if (allowRoot) env.SAMEROOF_GATEWAY_ALLOW_ROOT = '1';
   const child = spawn(process.execPath, [entry], { cwd: path.dirname(entry), stdio: ['ignore', 'inherit', 'inherit'], env });
+  track('gateway', child, true);
   const health = () => new Promise(resolve => {
     const req = http.request({ socketPath: sock, path: '/health', method: 'GET', timeout: 1000 }, res => { let b = ''; res.on('data', c => b += c); res.on('end', () => { try { resolve(JSON.parse(b)); } catch { resolve(null); } }); });
     req.on('error', () => resolve(null)); req.on('timeout', () => { req.destroy(); resolve(null); }); req.end();
@@ -124,31 +137,75 @@ const cmds = {
   /** sameroof serve [--port N] [--no-agents] [--with-gateway [--gateway-allow-root]] [--web [PORT]]：启动 broker + coordinator + 所有 agent 适配器（可选：网关、网页） */
   serve(args, opts) {
     const root = h(opts);
-    const port = parseInt(opts.port || '8790', 10);
+    const parsePort = (value, label) => {
+      if (!/^\d+$/.test(String(value)) || Number(value) > 65535) throw new Error('Invalid ' + label + ' port');
+      return Number(value);
+    };
+    const port = parsePort(opts.port ?? 8790, 'coordinator');
+    let webPort = opts.web ? parsePort(opts.web === true ? 17930 : opts.web, 'web') : null;
+    if (opts['with-gateway'] && typeof process.getuid === 'function' && process.getuid() === 0 && !opts['gateway-allow-root']) {
+      throw new Error('the gateway refuses to run as root; use an unprivileged user or explicitly --gateway-allow-root for a single-user dev box');
+    }
     const houseDoc = loadYaml(path.join(root, 'house.yaml'));
     const { spawn } = require('node:child_process');
     const home = process.env.HOME || os.homedir();
     const runDir = path.join(home, '.sameroof', 'run');
     fs.mkdirSync(runDir, { recursive: true, mode: 0o700 });
     fs.mkdirSync(path.join(runDir, 'tokens'), { recursive: true, mode: 0o700 });
+    // One serve per user runtime directory. Never replace another live service's sockets/tokens.
+    const leaseFile = path.join(runDir, 'serve.lock');
+    let lease;
+    try { lease = fs.openSync(leaseFile, 'wx', 0o600); }
+    catch (e) { if (e.code === 'EEXIST') throw new Error('serve.lock exists: another serve may be running. Remove a stale lock only after checking its recorded PID.'); throw e; }
+    fs.writeFileSync(lease, JSON.stringify({ pid: process.pid, workspace: root }));
+    const leaseIdentity = fs.fstatSync(lease);
     const children = [];
     const log = (who, msg) => console.log(`[${who}] ${msg}`);
+    let store, broker, lr, shuttingDown = false, shutdownPromise;
+    const shutdown = (code = 0) => shutdownPromise || (shutdownPromise = (async () => {
+      shuttingDown = true;
+      const watchdog = setTimeout(() => process.exit(1), 20000); watchdog.unref();
+      console.log('\nShutting down...');
+      // Keep gateway/coordinator alive until adapter handover has finished.
+      for (const batch of [children.filter(c => !c.infrastructure), children.filter(c => c.infrastructure)]) {
+        const result = await stopChildren(batch.map(c => c.child));
+        if (result.stillAlive.length) code = 1;
+      }
+      if (lr) await lr.close().catch(() => {});
+      if (broker) await broker.close().catch(() => {});
+      if (store) { try { store.close(); } catch {} }
+      try { const st = fs.statSync(leaseFile); if (st.dev === leaseIdentity.dev && st.ino === leaseIdentity.ino) fs.unlinkSync(leaseFile); } catch {}
+      fs.closeSync(lease); clearTimeout(watchdog); process.exit(code);
+    })());
+    const track = (name, child, infrastructure = false) => {
+      children.push({ name, child, infrastructure });
+      child.on('error', error => { log(name, error.message); void shutdown(1); });
+      child.on('exit', code => { if (!shuttingDown) { log(name, `process exited (${code})`); if (infrastructure) void shutdown(1); } });
+      if (shuttingDown) child.kill('SIGTERM');
+    };
+    const ensureStarting = () => { if (shuttingDown) throw new Error('serve startup interrupted'); };
+    process.on('SIGINT', () => { void shutdown(); });
+    process.on('SIGTERM', () => { void shutdown(); });
 
     (async () => {
       // 1. Broker (in-process, Unix socket)
       const { BrokerStore } = require('@sameroof/broker/store');
       const { createBroker } = require('@sameroof/broker/server');
-      const store = new BrokerStore();
-      const broker = createBroker({ store });
+      store = new BrokerStore();
+      broker = createBroker({ store });
+      await assertSocketAvailable(broker.socketPath);
+      ensureStarting();
       await broker.listen();
+      ensureStarting();
       log('broker', 'listening on ' + path.basename(broker.socketPath));
       const creds = store.listCredentials().filter(c => c.active).map(c => c.alias);   // includes built-in mock-cheap when SAMEROOF_ENABLE_MOCK=1
       if (!creds.length) log('broker', 'warning: no credentials. Add one: sameroof cred add <alias> --provider X --base-url URL --api-key KEY');
 
       // 2. Coordinator (in-process)
       const { createLivingRoom } = require('@sameroof/living-room/server');
-      const lr = createLivingRoom({ houseDir: root, runDir, dataDir: path.join(root, 'state'), port });
+      lr = createLivingRoom({ houseDir: root, runDir, dataDir: path.join(root, 'state'), port });
       const info = await lr.listen();
+      ensureStarting();
       log('coordinator', 'http://127.0.0.1:' + info.port + '  (console: /console)');
 
       const agentRooms = rooms(root).filter(r => (r.species || 'agent') === 'agent');
@@ -157,8 +214,8 @@ const cmds = {
       // 2b. Gateway (optional child process). Without it, APPROVAL: actions fail closed — there is no unsandboxed fallback.
       let gateway = null;
       if (opts['with-gateway']) {
-        gateway = await startGateway({ root, runDir, port: info.port, allowRoot: !!opts['gateway-allow-root'], agentIds: agentRooms.map(r => r.id), log });
-        children.push({ name: 'gateway', child: gateway.child });
+        gateway = await startGateway({ root, runDir, port: info.port, allowRoot: !!opts['gateway-allow-root'], agentIds: agentRooms.map(r => r.id), log, track });
+        ensureStarting();
         log('gateway', `listening on ${path.basename(gateway.sock)} (pid ${gateway.child.pid}); sandbox: ${gateway.sandbox ? 'bwrap ok — core.exec allowed after approval' : 'bwrap unavailable — core.exec is refused, core.fs.* still works'}`);
       } else log('gateway', 'not started (add --with-gateway to enable approved core.exec / core.fs.* actions)');
 
@@ -195,42 +252,33 @@ const cmds = {
           env: { ...process.env, HOME: home, SAMEROOF_ROOT: root, SAMEROOF_LR: 'http://127.0.0.1:' + info.port,
             ...(gateway ? { SAMEROOF_GATEWAY_SOCK: gateway.sock, SAMEROOF_GATEWAY_TOKEN_FILE: path.join(gateway.tokensDir, r.id) } : {}) }
         });
-        child.on('exit', code => { if (!shuttingDown) log(r.name, `adapter exited (${code})`); });
-        children.push({ name: r.name, child });
+        track(r.name, child);
         log(r.name, `adapter started (${runtime}, pid ${child.pid})`);
       }
 
       // 4. Web UI (optional): apps/roof from the source tree, proxying to this coordinator.
       if (opts.web) {
         const roof = path.resolve(__dirname, '..', '..', 'apps', 'roof', 'server.cjs');
-        if (!fs.existsSync(roof)) log('web', 'skip: apps/roof/server.cjs not found (only available from the source tree)');
+        if (!fs.existsSync(roof)) throw new Error('apps/roof/server.cjs not found (only available from the source tree)');
         else {
-          const webPort = String(opts.web === true ? 17930 : parseInt(opts.web, 10));
-          const child = spawn(process.execPath, [roof], { stdio: ['ignore', 'inherit', 'inherit'], env: { ...process.env, PORT: webPort, SAMEROOF_ROOT: root, ROOF_UPSTREAM: 'http://127.0.0.1:' + info.port } });
-          children.push({ name: 'web', child });
+          const child = spawn(process.execPath, [roof], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'], env: { ...process.env, PORT: String(webPort), SAMEROOF_ROOT: root, ROOF_UPSTREAM: 'http://127.0.0.1:' + info.port } });
+          track('web', child, true);
+          webPort = await new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error('web startup timed out')), 15000);
+            child.once('exit', () => { clearTimeout(timer); reject(new Error('web exited before readiness')); });
+            child.once('error', error => { clearTimeout(timer); reject(error); });
+            child.once('message', message => { clearTimeout(timer); if (message?.type === 'ready') resolve(message.port); else reject(new Error('Invalid web readiness message')); });
+          });
+          ensureStarting();
           log('web', `http://127.0.0.1:${webPort}/  (pid ${child.pid}; sign in with the token from: sameroof pair <your-name>)`);
         }
       }
 
       console.log('');
-      const agentCount = children.filter(c => c.name !== 'gateway' && c.name !== 'web').length;
-      console.log(`Same Roof running: ${agentCount} agent(s), coordinator on :${info.port}, broker on socket${gateway ? ', gateway on socket' : ''}${opts.web ? ', web on :' + (opts.web === true ? 17930 : opts.web) : ''}.`);
+      const agentCount = children.filter(c => !c.infrastructure).length;
+      console.log(`Same Roof running: ${agentCount} agent(s), coordinator on :${info.port}, broker on socket${gateway ? ', gateway on socket' : ''}${opts.web ? ', web on :' + webPort : ''}.`);
       console.log('Ctrl+C to stop.');
-
-      let shuttingDown = false;
-      const shutdown = async () => {
-        if (shuttingDown) return; shuttingDown = true;
-        console.log('\nShutting down...');
-        const r = await stopChildren(children.map(c => c.child), { graceMs: 5000 });
-        for (const { name, child } of children) if (r.killed.includes(child.pid)) log(name, 'ignored SIGTERM, sent SIGKILL');
-        if (r.stillAlive.length) log('serve', 'WARNING: pids still alive after SIGKILL: ' + r.stillAlive.join(','));
-        await lr.close().catch(() => {});
-        await broker.close().catch(() => {});
-        process.exit(r.stillAlive.length ? 1 : 0);
-      };
-      process.on('SIGINT', shutdown);
-      process.on('SIGTERM', shutdown);
-    })().catch(e => { console.error('serve failed:', e.message); process.exit(1); });
+    })().catch(async e => { console.error('serve failed:', e.message); await shutdown(1); });
   },
 
   /** sameroof cred add <alias> --provider X --base-url URL --api-key KEY */

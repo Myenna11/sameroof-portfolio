@@ -51,6 +51,9 @@ node examples/gateway-walkthrough/demo.js
 
 ## 起自己的工作区
 
+同一用户运行目录一次只运行一个 `serve`；已有运行锁或活跃 socket 时拒绝覆盖。
+异常退出遗留的 `~/.sameroof/run/serve.lock`，须核对其中 PID 已退出后才可移除。
+
 `sameroof serve` 启动 Broker、协调器和每个 Agent 一个适配器进程。两个可选
 部件放在开关后面，因为各有前提：
 

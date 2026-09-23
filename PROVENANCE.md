@@ -25,6 +25,8 @@ Development was AI-assisted. Contributor identities remain separate:
   human team members or names of commercial products.
 - `Build account (original root author)` preserves unattributed machine-account
   commits without claiming they were authored by the human maintainer.
+- `AI contributor D (Codex)` identifies subsequent review and preparation fixes,
+  separately from the original contributors and the human Git committer.
 - Contributors whose commits only changed removed private material do not
   acquire replacement commits merely to preserve a count.
 

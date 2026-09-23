@@ -33,6 +33,10 @@ under its own system user.
 sudo deploy/install-broker.sh   /path/to/repo
 sudo deploy/install-gateway.sh  /path/to/repo
 sudo deploy/gateway-service-token.sh
+# Review and install the coordinator and adapter templates as well:
+sudo install -m 0644 deploy/sameroof-living-room.service /etc/systemd/system/
+sudo install -m 0644 deploy/sameroof-room@.service /etc/systemd/system/
+sudo systemctl daemon-reload
 sudo systemctl enable --now sameroof-broker sameroof-living-room sameroof-gateway
 sudo sameroof-gateway token issue resident_<name>_01     # once per agent
 sudo systemctl enable --now sameroof-room@resident_<name>_01
@@ -40,3 +44,6 @@ sudo systemctl enable --now sameroof-room@resident_<name>_01
 
 The private deployment this edition was derived from ran this layout; its
 service history is not evidence for this repository — verify on your own host.
+Use an absolute repository path without spaces or unit/shell metacharacters;
+the gateway installer rejects other paths. Review each installed unit before
+starting it: these templates are not an automatic production deployment.

@@ -10,7 +10,8 @@ user — the gateway refuses root.
 ```sh
 # 0. in the repository, once
 npm ci
-alias sameroof="node $PWD/packages/cli/index.js"
+SAMEROOF_REPO="$PWD"
+sameroof() { node "$SAMEROOF_REPO/packages/cli/index.js" "$@"; }
 
 # 1. a workspace outside the repository, seeded from this example
 cp -r examples/quick-start ~/my-workspace
@@ -25,7 +26,10 @@ sameroof check
 sameroof lock
 sameroof serve --with-gateway
 
-# 4. from another shell: your token, then a task
+# 4. from another shell: define the function again, pointing to your clone
+SAMEROOF_REPO=/absolute/path/to/sameroof-portfolio
+sameroof() { node "$SAMEROOF_REPO/packages/cli/index.js" "$@"; }
+cd ~/my-workspace
 TOKEN=$(sameroof pair me | grep -o 'token=[^ ]*' | cut -d= -f2)    # or copy it from the pair output
 curl -X POST http://127.0.0.1:8790/dispatch \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
@@ -38,12 +42,23 @@ curl -X POST http://127.0.0.1:8790/dispatch \
    `APPROVAL: core.fs.write …` line.
 2. The gateway registers the intent; the coordinator shows it to you
    (`GET /approval`, or the web UI / console).
-3. You allow it: `curl -X POST …/approval/<apr_id> -d '{"decision":"allow"}'`.
+3. Read the pending approvals, inspect the requested action, then allow its ID:
+
+   ```sh
+   curl -s http://127.0.0.1:8790/approval -H "Authorization: Bearer $TOKEN"
+   APPROVAL_ID=apr_replace_with_the_reviewed_id
+   curl -X POST "http://127.0.0.1:8790/approval/$APPROVAL_ID" \
+     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"decision":"allow"}'
+   ```
+
    The gateway writes the file inside coder's own room. The same happens for
    the `core.exec` step, which runs in `bwrap` with no network.
-4. Dispatch `{"to":"reviewer","task":"Review coder's hello.py"}`; reviewer can
-   read the file through the gateway but any write or exec is refused by policy
-   before it ever reaches you.
+4. Rooms are isolated: reviewer cannot directly read coder's room in this example.
+   Copy the file into reviewer's room as the workspace owner, or provide its
+   contents in the task. Then ask reviewer to review it; reads need approval,
+   while write or exec is denied by policy. Cross-room shared mounts are not
+   configured here.
 
-No key handy? `node examples/gateway-walkthrough/demo.js` runs the same chain
+No key handy? Run `node "$SAMEROOF_REPO/examples/gateway-walkthrough/demo.js"` for the same chain
 against a local stub model.

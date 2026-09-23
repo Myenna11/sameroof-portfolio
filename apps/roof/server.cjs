@@ -363,8 +363,11 @@ function createServer(options = {}) {
     }
   });
 }
-if (require.main === module)
-  createServer().listen(Number(process.env.PORT || 17930), "127.0.0.1", () =>
-    console.log("Same Roof web listening on loopback"),
-  );
+if (require.main === module) {
+  const server = createServer();
+  server.listen(Number(process.env.PORT || 17930), "127.0.0.1", () => {
+    console.log("Same Roof web listening on loopback");
+    if (process.send) process.send({ type: "ready", port: server.address().port });
+  });
+}
 module.exports = { createServer, redact, boundedFile, clientHeaders };

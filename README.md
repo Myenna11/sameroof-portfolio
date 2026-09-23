@@ -100,6 +100,12 @@ Without `--with-gateway`, `APPROVAL:` actions fail closed: there is no
 unsandboxed fallback. `deploy/` holds the systemd units used for a long-running
 installation with a dedicated gateway user; see [deploy/README.md](deploy/README.md).
 
+Run one `serve` per user runtime directory. It refuses an existing `serve.lock`
+or live broker/gateway socket rather than replacing another instance. After an
+unclean exit, inspect the PID in `~/.sameroof/run/serve.lock` before removing a
+stale lock. Use separate OS users/runtime homes for independent workspaces.
+Requested Web/gateway startup failures cause a nonzero exit and child cleanup.
+
 ## Verify
 
 ```sh

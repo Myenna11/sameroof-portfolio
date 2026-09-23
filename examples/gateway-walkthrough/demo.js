@@ -51,6 +51,7 @@ function api(port, token, pathname, body) {
     const req = http.request({ hostname: '127.0.0.1', port, path: pathname, method: data ? 'POST' : 'GET', headers: { authorization: 'Bearer ' + token, ...(data ? { 'content-type': 'application/json', 'content-length': data.length } : {}) } }, res => {
       let text = ''; res.on('data', c => text += c); res.on('end', () => { try { resolve({ status: res.statusCode, body: JSON.parse(text) }); } catch { resolve({ status: res.statusCode, body: text }); } });
     });
+    req.setTimeout(5000, () => req.destroy(new Error('demo API request timed out')));
     req.on('error', reject); if (data) req.write(data); req.end();
   });
 }
@@ -67,7 +68,8 @@ function api(port, token, pathname, body) {
   const cli = (...args) => execFileSync(process.execPath, [CLI, ...args, '--house', ws], { cwd: REPO, env, encoding: 'utf8', timeout: 30000 });
   const upstream = await fakeUpstream();
   let serve = null, log = '';
-  const fail = msg => { console.error('FAIL ' + msg); if (log) console.error(log.split('\n').slice(-25).join('\n')); process.exit(1); };
+  const fail = msg => { throw new Error(msg); };
+  let passed = false, successLine;
   try {
     // ---- 2. fresh workspace: one agent on the fake upstream (through the broker), one human
     execFileSync(process.execPath, [CLI, 'init', ws], { cwd: REPO, env, encoding: 'utf8' });
@@ -78,7 +80,8 @@ function api(port, token, pathname, body) {
 
     // ---- 3. serve with the gateway
     const args = [CLI, 'serve', '--port', '0', '--with-gateway', '--house', ws]; if (isRoot) args.push('--gateway-allow-root');
-    serve = spawn(process.execPath, args, { cwd: REPO, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    serve = spawn(process.execPath, args, { cwd: REPO, env, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    serve.on('error', e => { log += '\nspawn error: ' + e.message; });
     serve.stdout.on('data', c => log += c); serve.stderr.on('data', c => log += c);
     let ended = false; serve.on('exit', () => { ended = true; });
     const waitFor = async (re, ms, what) => { const t0 = Date.now(); while (!re.test(log)) { if (ended) fail('serve exited while waiting for ' + what); if (Date.now() - t0 > ms) fail('timed out waiting for ' + what); await sleep(200); } return log.match(re); };
@@ -92,7 +95,8 @@ function api(port, token, pathname, body) {
     assert.equal((await api(port, token, '/say', { text: '@worker run uname for me' })).status, 200);
     const [, aprId] = await waitFor(/\[worker 审批\] core\.exec → (apr_[a-f0-9]+)/, 20000, 'approval registration');
     const pending = await api(port, token, '/approval');
-    assert.ok(Array.isArray(pending.body) ? pending.body.some(a => a.approval_id === aprId || a.id === aprId) : true, 'approval visible to the human');
+    assert.equal(pending.status, 200);
+    assert.ok(Array.isArray(pending.body) && pending.body.some(a => a.approval_id === aprId || a.id === aprId), 'approval visible to the human');
 
     // ---- 5. the human allows it → bwrap executes → result reaches the agent
     const decision = await api(port, token, '/approval/' + aprId, { decision: 'allow' });
@@ -108,15 +112,30 @@ function api(port, token, pathname, body) {
     console.log(`gateway intent: status=${intent.status} executor=${result.coverage.executor} sandbox=${result.coverage.sandbox} network=${result.coverage.network} requested=${JSON.stringify(result.coverage.requested)}`);
     if (sandbox === 'bwrap ok') {
       assert.equal(intent.status, 'succeeded'); assert.equal(result.coverage.executor, 'bwrap'); assert.equal(result.coverage.sandbox, 'enforced'); assert.equal(result.coverage.network, 'denied');
-      console.log('OK gateway walkthrough: APPROVAL → intent → human allow → bwrap exec (no network, read-only root) → result → agent reply');
+      successLine = 'OK gateway walkthrough: APPROVAL → intent → human allow → bwrap exec (no network, read-only root) → result → agent reply';
     } else {
       assert.notEqual(intent.status, 'succeeded', 'without bwrap the gateway must refuse, never run unsandboxed');
-      console.log('OK gateway walkthrough (no bwrap on this machine): approval chain worked and the gateway refused to execute unsandboxed — fail closed, as designed');
+      successLine = 'OK gateway walkthrough (no bwrap on this machine): approval chain worked and the gateway refused to execute unsandboxed — fail closed, as designed';
     }
-    console.log(`fake model calls: ${upstream.calls()}; workspace: ${ws}`);
-  } catch (e) { fail(e && e.stack || String(e)); }
+    console.log(`fake model calls: ${upstream.calls()}`);
+    passed = true;
+  } catch (e) { console.error('FAIL ' + (e && e.stack || String(e))); if (log) console.error(log.split('\n').slice(-25).join('\n')); process.exitCode = 1; }
   finally {
-    if (serve && serve.exitCode === null) { serve.kill('SIGINT'); for (let i = 0; i < 50 && serve.exitCode === null && serve.signalCode === null; i++) await sleep(200); if (serve.exitCode === null && serve.signalCode === null) serve.kill('SIGKILL'); }
-    upstream.server.close();
+    const alive = () => serve && serve.exitCode === null && serve.signalCode === null;
+    if (alive()) {
+      serve.kill('SIGINT');
+      for (let i = 0; i < 125 && alive(); i++) await sleep(200);
+      if (alive()) {
+        passed = false; process.exitCode = 1;
+        console.error('FAIL serve did not shut down cleanly');
+        try { if (process.platform !== 'win32') process.kill(-serve.pid, 'SIGKILL'); else serve.kill('SIGKILL'); } catch {}
+        for (let i = 0; i < 25 && alive(); i++) await sleep(100);
+      }
+    }
+    if (serve && serve.exitCode !== 0) { passed = false; process.exitCode = 1; }
+    upstream.server.closeAllConnections();
+    await new Promise(resolve => upstream.server.close(resolve));
+    if (!alive() && path.dirname(tmp) === os.tmpdir() && path.basename(tmp).startsWith('sameroof-gateway-demo-')) fs.rmSync(tmp, { recursive: true, force: true });
+    if (passed) console.log(successLine);
   }
-})();
+})().catch(e => { console.error('FAIL ' + e.message); process.exitCode = 1; });

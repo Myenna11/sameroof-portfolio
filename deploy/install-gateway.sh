@@ -7,7 +7,9 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-repo=${1:-/root/sameroof}
+repo=$(realpath "${1:-/root/sameroof}")
+# Unit path fields and the sed replacement below only support simple absolute paths.
+case "$repo" in *[!a-zA-Z0-9_./-]*) echo 'Repository path must not contain whitespace or shell/unit metacharacters.' >&2; exit 1 ;; esac
 src=$repo/packages/gateway
 test -f "$src/server.js"
 test -f "$repo/deploy/sameroof-gateway.service"

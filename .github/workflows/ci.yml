@@ -48,7 +48,10 @@ jobs:
       - name: Canonical demo — coordinator + 2 adapters + broker on mock upstream (asserts delegation + task lifecycle; no gateway)
         run: node examples/code-review/demo.js 2>&1 | grep -E "^(OK|FAIL)"
       - name: Gateway walkthrough — serve --with-gateway → APPROVAL → human allow → bwrap exec → result → reply (fake upstream, no key)
-        run: node examples/gateway-walkthrough/demo.js 2>&1 | tail -5 | grep -E "^OK gateway walkthrough:"
+        run: |
+          set -o pipefail
+          node examples/gateway-walkthrough/demo.js 2>&1 | tee /tmp/gateway-walkthrough.log
+          grep -E '^OK gateway walkthrough:' /tmp/gateway-walkthrough.log
       - name: Fresh-workspace smoke — init → cred → new → check → lock → serve → dispatch → reply → clean shutdown
         run: |
           set -e
