@@ -11,7 +11,8 @@ node --test apps/roof/*.test.cjs
 ```
 
 Defaults: bind `127.0.0.1:17930`, proxy `http://127.0.0.1:8790`, read records from
-`/root/sameroof`. Override with `PORT`, `ROOF_UPSTREAM`, `SAMEROOF_ROOT`.
+the current directory. Override with `PORT`, `ROOF_UPSTREAM`, `SAMEROOF_ROOT`.
+`sameroof serve --web [PORT]` starts it with all three pointed at that serve.
 Open the trailing-slash URL. All browser assets and API requests are relative,
 so deployment at `/sameroof/` is supported.
 The integration tests require the repository workspace dependencies (`npm ci`);

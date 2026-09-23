@@ -41,7 +41,9 @@ install -d -o sameroof-gateway -g sameroof -m 0700 /var/lib/sameroof-gateway
 # unit 里把 /root/sameroof 绑到 /srv/sameroof；挂载点先在宿主上占好位
 install -d -o root -g root -m 0755 /srv/sameroof
 
-install -o root -g root -m 0644 "$repo/deploy/sameroof-gateway.service" /etc/systemd/system/sameroof-gateway.service
+# The unit ships with the workspace at /root/sameroof; rewrite that to the repo actually being installed from.
+sed "s#/root/sameroof#$repo#g" "$repo/deploy/sameroof-gateway.service" > /etc/systemd/system/sameroof-gateway.service
+chmod 0644 /etc/systemd/system/sameroof-gateway.service
 install -o root -g root -m 0755 "$repo/deploy/sameroof-gateway" /usr/local/bin/sameroof-gateway
 systemctl daemon-reload
 echo "网关程序与 unit 已安装。下一步：deploy/gateway-service-token.sh 签 service token，systemctl enable --now sameroof-gateway，再 sameroof-gateway token issue <resident_id>。"

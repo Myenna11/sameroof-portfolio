@@ -11,7 +11,10 @@ function usage() {
   console.log('  cred add <alias> --provider X --base-url URL --api-key KEY');
   console.log('  cred list                                      List credentials');
   console.log('  new <name> [--model provider/id] [--human]     Create an agent or human');
-  console.log('  serve [--port N]                               Start all services\n');
+  console.log('  serve [--port N] [--with-gateway] [--web]      Start all services');
+  console.log('        --with-gateway         also start the execution gateway (approval + bwrap sandbox)');
+  console.log('        --gateway-allow-root   let the gateway run as root (single-user dev box only)');
+  console.log('        --web [PORT]           also serve the web UI (default port 17930)\n');
   console.log('Management:');
   console.log('  check                                          Validate workspace config');
   console.log('  explain <name>                                 Show resolved config');

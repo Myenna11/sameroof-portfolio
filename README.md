@@ -57,6 +57,22 @@ The demo starts a real coordinator, two adapters and broker against a **mock
 model upstream**, asserting task delegation and completion. It does not start
 the gateway and does not demonstrate real model quality.
 
+To see the whole chain — scoped broker token, `APPROVAL:` line, gateway
+intent, human decision, `bwrap` execution, result back to the agent — run the
+gateway walkthrough. It builds a throwaway workspace, starts
+`sameroof serve --with-gateway`, and stands in for the model with a local
+OpenAI-compatible stub, so it needs no API key:
+
+```sh
+node examples/gateway-walkthrough/demo.js
+```
+
+Run it as a normal user: the gateway refuses to run as root. On a single-user
+box where you are root, `SAMEROOF_DEMO_ALLOW_ROOT=1` passes
+`--gateway-allow-root` through. Without working `bwrap` the chain still runs
+up to the decision, and the demo reports that the gateway refused to execute
+unsandboxed rather than claiming success.
+
 For the standalone web experience:
 
 ```sh
@@ -69,6 +85,21 @@ with a real model, follow [Quick start](examples/quick-start/README.md) and the
 [CLI reference](packages/cli/README.md). Keep private workspaces outside Git.
 Never put API keys in committed YAML or example transcripts.
 
+## Running your own workspace
+
+`sameroof serve` starts the broker, the coordinator and one adapter process per
+agent. Two optional pieces are behind flags, because each has a real
+prerequisite:
+
+| Flag | Starts | Needs |
+| --- | --- | --- |
+| `--with-gateway` | the execution gateway on a Unix socket, wired to this coordinator; adapter tokens and the coordinator↔gateway service token are generated under `~/.sameroof/run/` | an unprivileged user (or `--gateway-allow-root` on a single-user dev box); `bubblewrap` for `core.exec` — without it `core.fs.*` still works and `core.exec` is refused |
+| `--web [PORT]` | the responsive web UI (`apps/roof`) pointed at this workspace and coordinator, default port 17930 | the source tree (it is not a published package) |
+
+Without `--with-gateway`, `APPROVAL:` actions fail closed: there is no
+unsandboxed fallback. `deploy/` holds the systemd units used for a long-running
+installation with a dedicated gateway user; see [deploy/README.md](deploy/README.md).
+
 ## Verify
 
 ```sh
@@ -80,7 +111,8 @@ node examples/code-review/demo.js
 ```
 
 The [CI workflow](.github/workflows/ci.yml) also exercises fresh-workspace
-`init → new → check → lock → serve → dispatch → reply → shutdown`.
+`init → new → check → lock → serve → dispatch → reply → shutdown` and the
+gateway walkthrough above (`serve --with-gateway`, approval, `bwrap` execution).
 Test counts are printed by the runner. CI results from the original private
 repository do not certify rewritten commits in this edition.
 

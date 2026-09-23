@@ -848,5 +848,9 @@ class Gateway {
 }
 
 function createGateway(options = {}) { return new Gateway(options); }
-if (require.main === module) { try { assertUnprivileged(); const gateway = createGateway({ livingRoomSocketPath: process.env.SAMEROOF_LIVING_ROOM_SOCKET || undefined, livingRoomPort: Number(process.env.SAMEROOF_LIVING_ROOM_PORT || process.env.SAMEROOF_PORT || 8790) }); gateway.listen().then(() => { gateway.startApprovalLoop(); console.log('sameroof gateway listening ' + gateway.socketPath); }).catch(error => { console.error(error.code || error); process.exitCode = 1; }); } catch (error) { console.error(error.code || error); process.exitCode = error.status || 1; } }
+if (require.main === module) { try {
+  // Production entry refuses root. `sameroof serve --with-gateway --gateway-allow-root` sets SAMEROOF_GATEWAY_ALLOW_ROOT=1 for
+  // single-user dev boxes; the CLI prints the warning, and this entry never sets it by itself.
+  if (process.env.SAMEROOF_GATEWAY_ALLOW_ROOT !== '1') assertUnprivileged();
+  const gateway = createGateway({ livingRoomSocketPath: process.env.SAMEROOF_LIVING_ROOM_SOCKET || undefined, livingRoomPort: Number(process.env.SAMEROOF_LIVING_ROOM_PORT || process.env.SAMEROOF_PORT || 8790) }); gateway.listen().then(() => { gateway.startApprovalLoop(); console.log('sameroof gateway listening ' + gateway.socketPath); }).catch(error => { console.error(error.code || error); process.exitCode = 1; }); } catch (error) { console.error(error.code || error); process.exitCode = error.status || 1; } }
 module.exports = { Gateway, GatewayError, State, issueAdapterToken, revokeAdapterToken, createGateway, normalizeRelative, protectedPath, resultShell, assertUnprivileged, minimalRuntimeArgs, FS_READ_MAX };

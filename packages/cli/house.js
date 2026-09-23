@@ -34,6 +34,53 @@ async function stopChildren(children, { graceMs = 5000, confirmMs = 1000 } = {})
   return { killed, stillAlive };
 }
 
+/**
+ * Dev-mode gateway for `sameroof serve --with-gateway`: one gateway child process per serve, wired to this coordinator.
+ * Layout (all per workspace / per user, nothing under /run or /var):
+ *   <runDir>/gateway/gateway.sock, <runDir>/gateway/tokens/<resident_id>   (adapter tokens, rotated on every serve)
+ *   <runDir>/gateway-service.token                                        (coordinator ↔ gateway; the coordinator reads exactly this path)
+ *   <root>/state/gateway/gateway.db                                       (intents, audit, adapter token hashes)
+ * Same code path as the systemd deployment; only the paths and the process user differ. The gateway refuses root unless
+ * allowRoot is set, and that flag only exists for single-user dev boxes.
+ */
+async function startGateway({ root, runDir, port, allowRoot, agentIds, log }) {
+  const crypto = require('node:crypto'), http = require('node:http');
+  const { spawn } = require('node:child_process');
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  if (uid === 0 && !allowRoot) throw new Error('the gateway refuses to run as root. Run `sameroof serve` as an unprivileged user, or add --gateway-allow-root on a single-user dev box (never in production).');
+  let entry;
+  try { entry = require.resolve('@sameroof/gateway/server.js'); } catch { throw new Error('@sameroof/gateway is not installed (run `npm ci` in the repository root).'); }
+  const { State, issueAdapterToken } = require(entry);
+  const gwRun = path.join(runDir, 'gateway'), tokensDir = path.join(gwRun, 'tokens'), stateDir = path.join(root, 'state', 'gateway');
+  fs.mkdirSync(tokensDir, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const serviceTokenFile = path.join(runDir, 'gateway-service.token');
+  if (!fs.existsSync(serviceTokenFile)) {
+    const tmp = serviceTokenFile + '.tmp';
+    fs.writeFileSync(tmp, 'srv_' + crypto.randomBytes(32).toString('base64url') + '\n', { mode: 0o600 });
+    fs.renameSync(tmp, serviceTokenFile);
+  }
+  fs.chmodSync(serviceTokenFile, 0o600);
+  const state = new State(path.join(stateDir, 'gateway.db'));
+  try { for (const id of agentIds) issueAdapterToken(state, tokensDir, id); } finally { state.close(); }
+  const sock = path.join(gwRun, 'gateway.sock');
+  try { fs.unlinkSync(sock); } catch {}
+  const env = { ...process.env, SAMEROOF_ROOT: root, SAMEROOF_GATEWAY_RUN_DIR: gwRun, SAMEROOF_GATEWAY_STATE_DIR: stateDir, SAMEROOF_GATEWAY_SOCKET: sock, SAMEROOF_GATEWAY_SERVICE_TOKEN: serviceTokenFile, SAMEROOF_LIVING_ROOM_PORT: String(port) };
+  if (allowRoot) env.SAMEROOF_GATEWAY_ALLOW_ROOT = '1';
+  const child = spawn(process.execPath, [entry], { cwd: path.dirname(entry), stdio: ['ignore', 'inherit', 'inherit'], env });
+  const health = () => new Promise(resolve => {
+    const req = http.request({ socketPath: sock, path: '/health', method: 'GET', timeout: 1000 }, res => { let b = ''; res.on('data', c => b += c); res.on('end', () => { try { resolve(JSON.parse(b)); } catch { resolve(null); } }); });
+    req.on('error', () => resolve(null)); req.on('timeout', () => { req.destroy(); resolve(null); }); req.end();
+  });
+  const deadline = Date.now() + 15000;
+  for (;;) {
+    if (child.exitCode !== null || child.signalCode !== null) throw new Error(`gateway exited during startup (${child.exitCode ?? child.signalCode})`);
+    const h = await health(); if (h && h.ok) { if (allowRoot && uid === 0) log('gateway', 'WARNING: running as root (--gateway-allow-root). Fine for a dev box, not for anything shared.'); return { child, sock, tokensDir, sandbox: !!h.sandbox }; }
+    if (Date.now() > deadline) { try { child.kill('SIGKILL'); } catch {} throw new Error('gateway did not become healthy within 15s'); }
+    await new Promise(r => setTimeout(r, 150));
+  }
+}
+
 const cmds = {
   /** sameroof init [目录]：初始化一个新工作区 */
   init(args, opts) {
@@ -74,7 +121,7 @@ const cmds = {
     console.log('     sameroof serve');
   },
 
-  /** sameroof serve [--port N] [--no-agents]：启动 broker + coordinator + 所有 agent 适配器 */
+  /** sameroof serve [--port N] [--no-agents] [--with-gateway [--gateway-allow-root]] [--web [PORT]]：启动 broker + coordinator + 所有 agent 适配器（可选：网关、网页） */
   serve(args, opts) {
     const root = h(opts);
     const port = parseInt(opts.port || '8790', 10);
@@ -104,9 +151,18 @@ const cmds = {
       const info = await lr.listen();
       log('coordinator', 'http://127.0.0.1:' + info.port + '  (console: /console)');
 
-      // 3. Tokens + adapters
       const agentRooms = rooms(root).filter(r => (r.species || 'agent') === 'agent');
       const humanRooms = rooms(root).filter(r => r.species === 'human');
+
+      // 2b. Gateway (optional child process). Without it, APPROVAL: actions fail closed — there is no unsandboxed fallback.
+      let gateway = null;
+      if (opts['with-gateway']) {
+        gateway = await startGateway({ root, runDir, port: info.port, allowRoot: !!opts['gateway-allow-root'], agentIds: agentRooms.map(r => r.id), log });
+        children.push({ name: 'gateway', child: gateway.child });
+        log('gateway', `listening on ${path.basename(gateway.sock)} (pid ${gateway.child.pid}); sandbox: ${gateway.sandbox ? 'bwrap ok — core.exec allowed after approval' : 'bwrap unavailable — core.exec is refused, core.fs.* still works'}`);
+      } else log('gateway', 'not started (add --with-gateway to enable approved core.exec / core.fs.* actions)');
+
+      // 3. Tokens + adapters
       for (const r of humanRooms) {
         const t = lr.tokenStore.issue(r.id);
         log('token', `${r.name} (human): ${t.created ? 'issued' : 'exists'} — sameroof pair ${r.name} to get it`);
@@ -136,15 +192,29 @@ const cmds = {
         if (!fs.existsSync(adapterFile)) { log(r.name, `skip: no adapter for runtime "${runtime}" (available: ${fs.readdirSync(path.dirname(adapterDir)).filter(d => fs.existsSync(path.join(path.dirname(adapterDir), d, 'adapter.js'))).join(', ')})`); continue; }
         const child = spawn(process.execPath, [adapterFile, r.name], {
           cwd: adapterDir, stdio: ['ignore', 'inherit', 'inherit'],
-          env: { ...process.env, HOME: home, SAMEROOF_ROOT: root, SAMEROOF_LR: 'http://127.0.0.1:' + info.port }
+          env: { ...process.env, HOME: home, SAMEROOF_ROOT: root, SAMEROOF_LR: 'http://127.0.0.1:' + info.port,
+            ...(gateway ? { SAMEROOF_GATEWAY_SOCK: gateway.sock, SAMEROOF_GATEWAY_TOKEN_FILE: path.join(gateway.tokensDir, r.id) } : {}) }
         });
         child.on('exit', code => { if (!shuttingDown) log(r.name, `adapter exited (${code})`); });
         children.push({ name: r.name, child });
         log(r.name, `adapter started (${runtime}, pid ${child.pid})`);
       }
 
+      // 4. Web UI (optional): apps/roof from the source tree, proxying to this coordinator.
+      if (opts.web) {
+        const roof = path.resolve(__dirname, '..', '..', 'apps', 'roof', 'server.cjs');
+        if (!fs.existsSync(roof)) log('web', 'skip: apps/roof/server.cjs not found (only available from the source tree)');
+        else {
+          const webPort = String(opts.web === true ? 17930 : parseInt(opts.web, 10));
+          const child = spawn(process.execPath, [roof], { stdio: ['ignore', 'inherit', 'inherit'], env: { ...process.env, PORT: webPort, SAMEROOF_ROOT: root, ROOF_UPSTREAM: 'http://127.0.0.1:' + info.port } });
+          children.push({ name: 'web', child });
+          log('web', `http://127.0.0.1:${webPort}/  (pid ${child.pid}; sign in with the token from: sameroof pair <your-name>)`);
+        }
+      }
+
       console.log('');
-      console.log(`Same Roof running: ${children.length} agent(s), coordinator on :${info.port}, broker on socket.`);
+      const agentCount = children.filter(c => c.name !== 'gateway' && c.name !== 'web').length;
+      console.log(`Same Roof running: ${agentCount} agent(s), coordinator on :${info.port}, broker on socket${gateway ? ', gateway on socket' : ''}${opts.web ? ', web on :' + (opts.web === true ? 17930 : opts.web) : ''}.`);
       console.log('Ctrl+C to stop.');
 
       let shuttingDown = false;

@@ -7,7 +7,7 @@ defaults:
   runtime: broker-direct
   plugins: [memory]
   heartbeat: {enabled: false}
-  context: {recent_messages: 20, recent_max_chars: 4000}
+  context: {recent_messages: 20, recent_max_chars: 4000, memory_hits: 4, memory_recent: 3}
   approve_timeout: 30m
   permissions:
     core.exec: approve

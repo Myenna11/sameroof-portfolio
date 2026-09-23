@@ -15,6 +15,7 @@
     "@sameroof/schema": "0.1.0",
     "yaml": "^2.8.1",
     "@sameroof/broker": "0.1.0",
-    "@sameroof/adapters": "0.1.0"
+    "@sameroof/adapters": "0.1.0",
+    "@sameroof/gateway": "0.1.0"
   }
 }
