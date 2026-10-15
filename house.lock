@@ -55,7 +55,7 @@
         "source": "packages/living-room",
         "digest": {
           "algorithm": "sha256",
-          "value": "20255c3f24b566023eb2c40cb1d0bbd44adfc97bfdbd330e9438bca79a3609b5"
+          "value": "5e55b9c72867efdb2fdddb954b2e008b04e29b75bb81ae4deeefd65f2de6383a"
         },
         "interface_version": 1
       },

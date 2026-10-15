@@ -8,6 +8,9 @@ const h = opts => opts.house
   : resolveHouseRoot();
 const loadYaml = f => YAML.parse(fs.readFileSync(f, 'utf8'), { maxAliasCount: 50, uniqueKeys: true });
 const rooms = root => fs.readdirSync(path.join(root, 'rooms')).map(d => path.join(root, 'rooms', d, 'room.yaml')).filter(fs.existsSync).map(f => ({ file: f, dir: path.dirname(f), ...loadYaml(f) }));
+const UNIT_BY_RUNTIME = { pi: 'sameroof-room-pi@' };
+const roomUnit = r => (UNIT_BY_RUNTIME[r.runtime] || 'sameroof-room@') + r.id;
+const agentRooms = root => rooms(root).filter(r => (r.species || 'agent') === 'agent');
 const slug = s => 'resident_' + (s.replace(/[^a-z0-9]+/gi, '').toLowerCase() || require('node:crypto').randomBytes(3).toString('hex')) + '_01';
 
 
@@ -377,12 +380,40 @@ const cmds = {
   /** sameroof status */
   status(args, opts) {
     const root = h(opts);
-    const units = ['sameroof-broker', 'sameroof-living-room', ...rooms(root).filter(r => (r.species || 'agent') === 'agent').map(r => (r.runtime === 'pi' ? 'sameroof-room-pi@' : 'sameroof-room@') + r.id)];
+    const units = ['sameroof-broker', 'sameroof-living-room', ...agentRooms(root).map(roomUnit)];
     for (const u of units) { let s; try { s = execSync(`systemctl is-active ${u}`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim(); } catch (e) { s = (e.stdout || '').toString().trim() || 'unknown'; } console.log(`${s === 'active' ? '●' : '○'} ${u.padEnd(44)} ${s}`); }
     try { const lock = require('./lock').verifyLock(root); console.log(`● house.lock 一致 ${lock.source.digest.slice(0, 12)}`); } catch (e) { console.log(`○ house.lock ${e.message}`); }
   },
+  /** sameroof units [name..] [--install] [--force]: list per-room systemd units; --install copies templates from deploy/ and starts only the rooms named (rooms left off are often off on purpose) */
+  units(args, opts) {
+    const root = h(opts);
+    const sysDir = opts['systemd-dir'] || '/etc/systemd/system';
+    const sh = cmd => { try { return execSync(cmd, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim(); } catch (e) { return (e.stdout || '').toString().trim() || 'unknown'; } };
+    const all = agentRooms(root);
+    const plan = all.map(r => ({ name: r.name, unit: roomUnit(r), template: roomUnit(r).replace(/@.*$/, '@') + '.service' }));
+    const unknown = args.filter(a => !all.some(r => r.name === a || r.id === a));
+    if (unknown.length) throw new Error('unknown rooms: ' + unknown.join(', '));
+    const wanted = new Set(all.filter(r => args.includes(r.name) || args.includes(r.id)).map(r => r.name));
+    let reload = false;
+    for (const t of [...new Set(plan.map(p => p.template))]) {
+      const src = path.join(root, 'deploy', t), dst = path.join(sysDir, t);
+      if (!fs.existsSync(src)) { console.log(`○ ${t.padEnd(36)} no template in deploy/`); continue; }
+      const same = fs.existsSync(dst) && fs.readFileSync(dst, 'utf8') === fs.readFileSync(src, 'utf8');
+      if (same) { console.log(`● ${t.padEnd(36)} installed, matches deploy/`); continue; }
+      if (!opts.install || (fs.existsSync(dst) && !opts.force)) { console.log(`○ ${t.padEnd(36)} ${fs.existsSync(dst) ? 'installed but differs from deploy/ (--install --force to overwrite)' : 'not installed (--install)'}`); continue; }
+      fs.copyFileSync(src, dst); reload = true; console.log(`✚ ${t.padEnd(36)} installed from deploy/`);
+    }
+    if (reload) execSync('systemctl daemon-reload');
+    for (const p of plan) {
+      let enabled = sh(`systemctl is-enabled ${p.unit}`), active = sh(`systemctl is-active ${p.unit}`);
+      if (opts.install && wanted.has(p.name) && (enabled !== 'enabled' || active !== 'active') && fs.existsSync(path.join(sysDir, p.template))) {
+        execSync(`systemctl enable --now ${p.unit}`); enabled = sh(`systemctl is-enabled ${p.unit}`); active = sh(`systemctl is-active ${p.unit}`);
+      }
+      console.log(`${active === 'active' ? '●' : '○'} ${p.unit.padEnd(44)} ${enabled}/${active}  ${p.name}`);
+    }
+  },
 };
-module.exports = { cmds, stopChildren };
+module.exports = { cmds, stopChildren, roomUnit };
 
 // ---- 备份与迁移（行李随迁）----
 Object.assign(cmds, {

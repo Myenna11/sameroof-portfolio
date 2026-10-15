@@ -19,6 +19,7 @@ function usage() {
   console.log('  check                                          Validate workspace config');
   console.log('  explain <name>                                 Show resolved config');
   console.log('  status                                         Service status');
+  console.log('  units [name..] [--install] [--force]           List per-room systemd units; install templates, start named rooms');
   console.log('  pair <name> [--api URL]                        Mobile pairing link');
   console.log('  doctor                                         Check for dropped messages');
   console.log('  backup / restore                               Backup and restore workspace');

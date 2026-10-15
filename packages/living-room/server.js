@@ -174,6 +174,16 @@ function pushSubscription(value) {
   return { endpoint: value.endpoint, expirationTime: value.expirationTime || null, keys: { p256dh, auth } };
 }
 
+function residentsSignature(houseDir) {
+  const dir = path.join(houseDir, 'rooms');
+  const parts = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    try { parts.push(entry.name + ':' + fs.statSync(path.join(dir, entry.name, 'room.yaml')).mtimeMs); } catch {}
+  }
+  return parts.sort().join('|');
+}
+
 function createLivingRoom(options = {}) {
   const houseDir = path.resolve(options.houseDir || resolveHouseRoot());
   const runDir = path.resolve(options.runDir || path.join(process.env.HOME || os.homedir(), '.sameroof', 'run'));
@@ -192,6 +202,28 @@ function createLivingRoom(options = {}) {
   const notificationClient = options.notificationClient || new PushClient();
   const reportClient = options.reportClient || new ReportClient(options.report || {});   // V2-LEDGER：broker 只读报表；测试可注入
   tokenStore.ensure(residents.map(resident => resident.id));
+
+  // New rooms are picked up without restarting the living room (a restart also restarts every room adapter).
+  // residents/byId/byName are mutated in place, so every mounted api keeps seeing the same references.
+  const residentsRecheckMs = options.residentsRecheckMs ?? 2000;
+  let residentsSig = residentsSignature(houseDir);
+  let residentsCheckedAt = Date.now();
+  function refreshResidents(now = Date.now()) {
+    if (now - residentsCheckedAt < residentsRecheckMs) return false;
+    residentsCheckedAt = now;
+    const sig = residentsSignature(houseDir);
+    if (sig === residentsSig) return false;
+    residentsSig = sig;
+    let next;
+    try { next = loadResidents(houseDir); }
+    catch (error) { console.error('[living-room] resident reload failed, keeping the previous list: ' + error.message); return false; }
+    residents.splice(0, residents.length, ...next);
+    byId.clear(); for (const resident of next) byId.set(resident.id, resident);
+    byName.clear(); for (const resident of next) for (const name of resident._names) byName.set(name, resident);
+    tokenStore.ensure(next.map(resident => resident.id));
+    console.log('[living-room] residents reloaded: ' + next.map(resident => resident.name).join(', '));
+    return true;
+  }
 
   const db = new Database(path.join(dataDir, 'house.db'));
   db.pragma('journal_mode = WAL');
@@ -520,6 +552,7 @@ function createLivingRoom(options = {}) {
   }
 
   const server = http.createServer(async (req, res) => {
+    try { refreshResidents(); } catch (error) { console.error('[living-room] resident check failed: ' + error.message); }
     const identity = connectionIdentity(req, options.trustLoopbackProxy !== false);
     const ip = identity.ip;
     try {
@@ -928,7 +961,7 @@ function createLivingRoom(options = {}) {
     return new Promise(resolve => server.close(() => { db.close(); resolve(); }));
   }
 
-  return { server, listen, close, tokenStore, residents, db, gatewayTokenFile, blackboard, clientIp: req => clientIp(req, options.trustLoopbackProxy !== false) };
+  return { server, listen, close, tokenStore, residents, refreshResidents, db, gatewayTokenFile, blackboard, clientIp: req => clientIp(req, options.trustLoopbackProxy !== false) };
 }
 
 async function main() {
