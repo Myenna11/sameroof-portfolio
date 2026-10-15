@@ -9,6 +9,9 @@ const { promisify } = require("node:util");
 const exec = promisify(execFile);
 const ROOT = process.env.SAMEROOF_ROOT || process.cwd();   // the workspace whose records this UI reads; `sameroof serve --web` sets it
 const UPSTREAM = process.env.ROOF_UPSTREAM || "http://127.0.0.1:8790";
+// Node's default agent keeps sockets alive; after the living room restarts the pooled
+// socket is dead and the next proxied write fails with a 502. Loopback, so fresh sockets are cheap.
+const upstreamAgent = new http.Agent({ keepAlive: false });
 const STATIC = path.join(__dirname, "public");
 const assets = {
   "/": ["index.html", "text/html"],
@@ -310,6 +313,7 @@ function createServer(options = {}) {
           new URL(target + url.search, UPSTREAM),
           {
             method: req.method,
+            agent: upstreamAgent,
             headers: {
               authorization: auth,
               ...origin,
