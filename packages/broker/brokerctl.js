@@ -57,7 +57,7 @@ sameroof-broker push init --subject <https://...|mailto:...> [--rotate]
 sameroof-broker push status
 sameroof-broker report init [--rotate]      # 给房子签只读报表凭证（report-client.token）
 sameroof-broker report status
-sameroof-broker report daily [--days 7] [--tz Asia/Shanghai]
+sameroof-broker report daily [--days 7] [--tz Asia/Manila]
 sameroof-broker report drift [--resident <id>] [--limit 20]   # 前缀漂移（走 socket 问活的 broker；内存态，重启清零）
 sameroof-broker ledger [--limit 50]
 

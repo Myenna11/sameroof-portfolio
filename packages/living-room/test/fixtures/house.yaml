@@ -1,7 +1,7 @@
 # 测试用最小合法 house.yaml（结构照根目录 house.yaml 裁；凭证只是假别名，没有真东西）
 schema_version: 1
 name: 测试小家
-timezone: Asia/Shanghai
+timezone: Asia/Manila
 schedule:
   quiet_hours: "01:00-09:00"
 defaults:

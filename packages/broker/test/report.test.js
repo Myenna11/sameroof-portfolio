@@ -21,8 +21,8 @@ test('LedgerReport.daily：按天×住户聚合、tz 归天、by_model、空天�
     ins.run('r4', '2026-09-06T10:00:00Z', 'builder', tid, 'example-model', 'kimi-coding', 'k3', 'interactive', 100, 800, 0, 'complete', 200, 500, 100, 20);
     ins.run('r5', '2026-08-20T10:00:00Z', 'researcher', tid, 'shared-cheap', 'zhipu', 'glm-5.3-flash', 'interactive', 100, 99999, 0, 'complete', 200, 1, 0, 0);   // 范围外
     const rep = new LedgerReport({ store });
-    const d = rep.daily({ days: 3, tz: 'Asia/Shanghai', now });
-    assert.deepEqual(d.days, ['2026-09-06', '2026-09-07', '2026-09-08']); assert.equal(d.timezone, 'Asia/Shanghai');
+    const d = rep.daily({ days: 3, tz: 'Asia/Manila', now });
+    assert.deepEqual(d.days, ['2026-09-06', '2026-09-07', '2026-09-08']); assert.equal(d.timezone, 'Asia/Manila');
     const z = d.residents.find(r => r.resident_id === 'researcher'), k = d.residents.find(r => r.resident_id === 'builder');
     assert.equal(d.residents[0].resident_id, 'researcher');   // tokens 多的在前
     assert.deepEqual(z.days.map(x => x.requests), [0, 1, 2]);
@@ -58,8 +58,8 @@ test('/internal/report/daily：缺凭证 503、错凭证 401、对凭证 200；i
     // 住户 token 不能看报表
     const issued = store.issueToken({ residentId: 'resident_agent_01', credentials: ['mock-cheap'], models: ['mock-chat'] });
     assert.equal((await req(broker.socketPath, '/internal/report/daily', issued.secret)).status, 401);
-    const ok = await req(broker.socketPath, '/internal/report/daily?days=2&tz=Asia/Shanghai', secret);
-    assert.equal(ok.status, 200); assert.equal(ok.json.days.length, 2); assert.equal(ok.json.timezone, 'Asia/Shanghai'); assert.deepEqual(ok.json.residents, []);
+    const ok = await req(broker.socketPath, '/internal/report/daily?days=2&tz=Asia/Manila', secret);
+    assert.equal(ok.status, 200); assert.equal(ok.json.days.length, 2); assert.equal(ok.json.timezone, 'Asia/Manila'); assert.deepEqual(ok.json.residents, []);
     assert.equal((await req(broker.socketPath, '/internal/report/daily?tz=Nope/Nope', secret)).status, 400);
     rep.initialize(true); assert.notEqual(fs.readFileSync(rep.clientTokenFile, 'utf8').trim(), secret);
     assert.equal((await req(broker.socketPath, '/internal/report/daily', secret)).status, 401);   // 旧的作废

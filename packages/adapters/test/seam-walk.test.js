@@ -38,7 +38,7 @@ function house() {
   fs.mkdirSync(path.join(ROOT, 'rooms', '乙'), { recursive: true });
   fs.mkdirSync(path.join(ROOT, 'apps', 'house'), { recursive: true });
   fs.mkdirSync(RUN_DIR, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(path.join(ROOT, 'house.yaml'), 'schema_version: 1\nname: 接缝测试小家\ntimezone: Asia/Shanghai\ndefaults:\n  runtime: pi\n  plugins: [living-room]\n  heartbeat: {enabled: false}\n');
+  fs.writeFileSync(path.join(ROOT, 'house.yaml'), 'schema_version: 1\nname: 接缝测试小家\ntimezone: Asia/Manila\ndefaults:\n  runtime: pi\n  plugins: [living-room]\n  heartbeat: {enabled: false}\n');
   fs.writeFileSync(path.join(ROOT, 'rooms', '甲', 'room.yaml'), 'schema_version: 1\nid: resident_alpha_01\nname: 甲\nspecies: human\n');
   fs.writeFileSync(path.join(ROOT, 'rooms', '乙', 'room.yaml'), 'schema_version: 1\nid: resident_beta_01\nname: 乙\nspecies: agent\nplugins: [living-room]\nheartbeat: {enabled: false}\n');
   fs.writeFileSync(path.join(ROOT, 'apps', 'house', 'index.html'), '<!doctype html>');

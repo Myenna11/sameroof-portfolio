@@ -22,7 +22,7 @@ function makeHouse({ house, rooms }) {
 const validHouse = `
 schema_version: 1
 name: 测试小家
-timezone: Asia/Shanghai
+timezone: Asia/Manila
 defaults:
   runtime: pi
   plugins: [memory, handover, living-room]

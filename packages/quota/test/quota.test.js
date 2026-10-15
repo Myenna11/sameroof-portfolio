@@ -59,15 +59,15 @@ test('snapshot：上次好数据留着，这次错了就带 stale 标记', async
   let fail = false;
   const providers = { kimi: { label: 'Kimi', fetch: async () => { if (fail) throw new Error('过期'); return { status: 'ok', windows: [{ label: '周额度', usedPercent: 33 }] }; } } };
   const residents = [{ id: 'c', name: '实现员', model: { provider: 'kimi-coding' } }];
-  const first = await quota.snapshot({ residents, providers, cachePath, tz: 'Asia/Shanghai' });
+  const first = await quota.snapshot({ residents, providers, cachePath, tz: 'Asia/Manila' });
   assert.equal(first.providers[0].status, 'ok'); assert.equal(first.providers[0].stale, undefined);
   fail = true;
-  const second = await quota.snapshot({ residents, providers, cachePath, tz: 'Asia/Shanghai' });
+  const second = await quota.snapshot({ residents, providers, cachePath, tz: 'Asia/Manila' });
   const c = second.providers[0];
   assert.equal(c.status, 'error'); assert.equal(c.stale, true); assert.equal(c.staleSince, first.providers[0].fetchedAt); assert.equal(c.staleExpired, false); assert.deepEqual(c.windows, [{ label: '周额度', usedPercent: 33 }]);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 test('dayStartIso：房子时区的今天 00:00', () => {
-  assert.equal(quota.dayStartIso('Asia/Shanghai', new Date('2026-09-07T18:30:00Z')), '2026-09-07T16:00:00.000Z');   // 上海 9/8 00:00
+  assert.equal(quota.dayStartIso('Asia/Manila', new Date('2026-09-07T18:30:00Z')), '2026-09-07T16:00:00.000Z');   // 上海 9/8 00:00
   assert.equal(quota.dayStartIso('UTC', new Date('2026-09-07T18:30:00Z')), '2026-09-07T00:00:00.000Z');
 });

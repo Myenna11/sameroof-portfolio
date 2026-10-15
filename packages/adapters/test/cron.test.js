@@ -42,15 +42,15 @@ test('非法表达式抛错，错误里带原文', () => {
   }
   assert.throws(() => parse(42), /不是字符串/);
 });
-test('时区：同一 UTC 时刻在 Asia/Shanghai 与 UTC 下小时不同', () => {
+test('时区：同一 UTC 时刻在 Asia/Manila 与 UTC 下小时不同', () => {
   const d = at('2026-09-07T00:30:00Z');
   assert.equal(parts(d, 'UTC').hour, 0);
-  assert.equal(parts(d, 'Asia/Shanghai').hour, 8);
-  assert.equal(matches('30 8 * * *', d, 'Asia/Shanghai'), true);
+  assert.equal(parts(d, 'Asia/Manila').hour, 8);
+  assert.equal(matches('30 8 * * *', d, 'Asia/Manila'), true);
   assert.equal(matches('30 8 * * *', d, 'UTC'), false);
   assert.equal(matches('30 0 * * *', d, 'UTC'), true);
   // 跨日：上海已经是 8 号周二
   const e = at('2026-09-07T16:30:00Z');
-  assert.deepEqual([parts(e, 'Asia/Shanghai').day, parts(e, 'Asia/Shanghai').dow, parts(e, 'Asia/Shanghai').key], [8, 2, '2026-09-08T00:30']);
+  assert.deepEqual([parts(e, 'Asia/Manila').day, parts(e, 'Asia/Manila').dow, parts(e, 'Asia/Manila').key], [8, 2, '2026-09-08T00:30']);
   assert.equal(parts(e, 'UTC').key, '2026-09-07T16:30');
 });

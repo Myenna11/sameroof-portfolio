@@ -64,7 +64,7 @@ PIN task_mf1abc123: drop 不该我做
 ### 心跳与醒来
 
 - **每次醒来**（不只心跳）先拉 `GET /tasks?owner=me&state=open,doing,blocked`；非空就在 user 侧 `【为什么醒】` 后面加一段 `【黑板上我的事】`（≤10 条，客厅已按到期近的在前、无到期的按钉上时间排）：
-  `- [doing] task_… 标题（验收: …；到期: 2026-09-08 21:00 Asia/Shanghai）`
+  `- [doing] task_… 标题（验收: …；到期: 2026-09-08 21:00 Asia/Manila）`
 - 心跳 `passive_idle`（不叫模型）的条件改成：inbox 空 **且** 惦记本空 **且** 黑板上我的 open/doing/blocked 也空。黑板有事就该醒来看一眼。
 - 客厅拉不到 `/tasks`（老客厅 404、没开门）→ stderr 一行，这轮当没有，不影响醒来。
 - `state/runs/<id>.jsonl` 每轮多 `tasks:[{id,state,title}]`；PIN 行进 `directives`（k='PIN'），失败进 `pin_error`。

@@ -59,7 +59,7 @@ const builder_RUNS = [
 ];
 const MEM = [
   { id: 'mem_a1', ts: iso(500), content: '维护者下雨天心情会更好，适合聊大事', source: 'self', by: 'resident_builder_01', confidence: .7, review: 'pending', authored: true, version_status: 'current', fact_key: 'operator.mood.rain', redacted: false, hits: 2, tags: ['维护者'] },
-  { id: 'mem_a2', ts: iso(1400), content: '家里的账务时区是 Asia/Shanghai，全屋统一', source: 'human', by: 'resident_operator_01', confidence: .9, review: 'approved', authored: true, version_status: 'current', hits: 5, tags: [] },
+  { id: 'mem_a2', ts: iso(1400), content: '家里的账务时区是 Asia/Manila，全屋统一', source: 'human', by: 'resident_operator_01', confidence: .9, review: 'approved', authored: true, version_status: 'current', hits: 5, tags: [] },
   { id: 'mem_a3', ts: iso(2600), content: '客厅的老消息 id 偏短，标已读要容忍', source: 'inbox', by: 'resident_builder_01', confidence: .4, review: 'approved', authored: false, version_status: 'superseded', hits: 0, tags: ['客厅'] },
 ];
 const MEM_PENDING = [
@@ -83,7 +83,7 @@ const QUOTA = { fetched_at: iso(1), providers: [
   { provider: 'claude', label: 'Claude Max', residents: ['规划员'], status: 'ok', windows: [{ label: '5 小时窗', usedPercent: 92, resetAt: new Date(NOW + 44 * 60000).toISOString() }] },
   { provider: 'glm', label: '智谱 GLM', residents: ['检索员'], status: 'error', message: '拉取超时 5s', windows: [] },
 ] };
-const COST = { timezone: 'Asia/Shanghai', days: Array.from({ length: 7 }, (_, i) => '2026-09-0' + (6 + i)), residents: [
+const COST = { timezone: 'Asia/Manila', days: Array.from({ length: 7 }, (_, i) => '2026-09-0' + (6 + i)), residents: [
   { resident: '实现员', runtime: 'broker-direct', days: [1200, 3400, 800, 5200, 4100, 9000, 6200].map(v => ({ input: v, output: Math.round(v * .3) })), total: { wakes: 42, input: 30000, output: 9000, cached: 12000, with_usage: 40 } },
   { resident: '检索员', runtime: 'broker-direct', days: [8000, 6200, 9100, 4300, 7200, 5100, 6600].map(v => ({ input: v, output: Math.round(v * .4) })), total: { wakes: 60, input: 46000, output: 18000, cached: 3000, with_usage: 60 } },
 ], ledger: { residents: [{ resident: '实现员', total: { requests: 40, tokens: 39000, cached: 12000, errors: 0, estimated: 2 } }, { resident: '检索员', total: { requests: 60, tokens: 64000, errors: 1 } }] } };

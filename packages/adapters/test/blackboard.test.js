@@ -5,7 +5,7 @@ const test = require('node:test');
 const { parsePin, syncTaskRoutines, renderTaskLines, buildRoutine, parseAt } = require('../lib/blackboard');
 const room = require('../lib/room');
 
-const TZ = 'Asia/Shanghai';
+const TZ = 'Asia/Manila';
 
 test('parsePin 钉：只有标题必填，| 段可选、顺序无关，中英冒号都认', () => {
   assert.deepEqual(parsePin('PIN: 把 demo 家的 README 写了'), { op: 'pin', title: '把 demo 家的 README 写了' });
@@ -80,7 +80,7 @@ test('syncTaskRoutines 加出来的 routine 能过 dueNow', () => {
 });
 test('renderTaskLines：≤10 条，带状态、id、验收、到期（房子时区）', () => {
   const lines = renderTaskLines([T('task_aaaaaa', { state: 'doing', accept: '两条路', due_at: '2026-09-08T13:00:00.000Z' }), T('task_bbbbbb', { due_cron: '0 9 * * *' }), T('task_cccccc', { state: 'blocked', notes: '等 W5' })], TZ);
-  assert.deepEqual(lines, ['- [doing] task_aaaaaa 事 task_aaaaaa（验收: 两条路；到期: 2026-09-08 21:00 Asia/Shanghai）', '- [open] task_bbbbbb 事 task_bbbbbb（到期: 每 0 9 * * *）', '- [blocked] task_cccccc 事 task_cccccc（卡在: 等 W5）']);
+  assert.deepEqual(lines, ['- [doing] task_aaaaaa 事 task_aaaaaa（验收: 两条路；到期: 2026-09-08 21:00 Asia/Manila）', '- [open] task_bbbbbb 事 task_bbbbbb（到期: 每 0 9 * * *）', '- [blocked] task_cccccc 事 task_cccccc（卡在: 等 W5）']);
   assert.equal(renderTaskLines(Array.from({ length: 14 }, (_, i) => T('task_' + String(i).padStart(6, '0'))), TZ).length, 10);
   assert.deepEqual(renderTaskLines(null), []);
 });
@@ -92,6 +92,6 @@ test('parseAt / buildRoutine 从 room.js 抽出来后行为不变', () => {
 
 test('到期看不懂：照钉不带到期，带 due_error', () => {
   const { parsePin } = require('../lib/blackboard');
-  const r = parsePin('PIN: 写周报 | 到期: 下周三吧', { tz: 'Asia/Shanghai' });
+  const r = parsePin('PIN: 写周报 | 到期: 下周三吧', { tz: 'Asia/Manila' });
   assert.equal(r.op, 'pin'); assert.equal(r.title, '写周报'); assert.equal(r.due_at, undefined); assert.equal(r.due_cron, undefined); assert.equal(r.due_error, '下周三吧');
 });

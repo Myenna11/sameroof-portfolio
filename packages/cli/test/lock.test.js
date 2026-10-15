@@ -21,7 +21,7 @@ function fixture() {
   fs.writeFileSync(path.join(root, 'packages', 'living-room', 'package.json'), '{"version":"1.2.3"}\n');
   fs.writeFileSync(path.join(root, 'house.yaml'), `schema_version: 1
 name: 测试小家
-timezone: Asia/Shanghai
+timezone: Asia/Manila
 defaults:
   runtime: pi
   plugins: [living-room]
