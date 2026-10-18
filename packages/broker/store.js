@@ -225,21 +225,21 @@ class BrokerStore {
     const secret = 'sr_' + crypto.randomBytes(32).toString('base64url');
     const createdAt = nowIso();
     const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
-    this.db.prepare(`INSERT INTO tokens(id,token_hash,resident_id,credential_aliases,models,purposes,expires_at,max_requests,max_tokens,reason,created_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(id, hashToken(secret), residentId, JSON.stringify(credentials), JSON.stringify(models), JSON.stringify(purposes), expiresAt, maxRequests, maxTokens, input.reason || null, createdAt);
+    // 旧文件先检查、先读完再落库：读不了（权限、坏文件）就直接失败，不在库里留一枚谁也没拿着的 active token
     let tokenFile = null;
     let replacedTokenId = null;
+    let previousHash = null;
     if (input.writeFile !== false) {
       tokenFile = path.join(this.tokenDir, residentId);
-      if (fs.existsSync(tokenFile) && !input.replaceFile) {
-        this.db.prepare('DELETE FROM tokens WHERE id=?').run(id);
-        throw new BrokerError(409, 'TOKEN-FILE-EXISTS', '该住户已有 token 文件；如确认替换，请显式使用 --replace。');
-      }
-      let previousHash = null;
+      if (fs.existsSync(tokenFile) && !input.replaceFile) throw new BrokerError(409, 'TOKEN-FILE-EXISTS', '该住户已有 token 文件；如确认替换，请显式使用 --replace。');
       if (fs.existsSync(tokenFile)) {
         previousHash = hashToken(fs.readFileSync(tokenFile, 'utf8').trim());
         replacedTokenId = this.db.prepare("SELECT id FROM tokens WHERE token_hash=? AND status!='revoked'").get(previousHash)?.id || null;
       }
+    }
+    this.db.prepare(`INSERT INTO tokens(id,token_hash,resident_id,credential_aliases,models,purposes,expires_at,max_requests,max_tokens,reason,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(id, hashToken(secret), residentId, JSON.stringify(credentials), JSON.stringify(models), JSON.stringify(purposes), expiresAt, maxRequests, maxTokens, input.reason || null, createdAt);
+    if (input.writeFile !== false) {
       const temporary = tokenFile + '.tmp-' + process.pid + '-' + crypto.randomBytes(4).toString('hex');
       try {
         fs.writeFileSync(temporary, secret + '\n', { mode: 0o600, flag: 'wx' });
@@ -326,6 +326,26 @@ class BrokerStore {
 
   listTokens() {
     return this.db.prepare('SELECT id,resident_id,credential_aliases,models,purposes,expires_at,max_requests,max_tokens,used_requests,used_tokens,status,reason,created_at,revoked_at FROM tokens ORDER BY created_at DESC').all().map(parseRow);
+  }
+
+  // token 按设计会过期（最长 7 天），但 serve 只在 token 文件不存在时才签——文件还在、token 已过期，住户就一直 401 醒不来，且没人知道。
+  // 这里给 tokens 目录里有文件的每个住户看最新签的那一枚：离过期不到 withinSeconds（或已过期/已吊销）就照抄凭证、模型、用途、预算重签并替换文件。
+  // 适配器遇到 401 会重读 token 文件，换钥匙不用重启。由定时器周期调用（deploy/sameroof-broker-renew.timer）。
+  renewDueTokens({ withinSeconds = 2 * 86400, ttlSeconds = 604800, now = Date.now() } = {}) {
+    let residents = [];
+    try { residents = fs.readdirSync(this.tokenDir).filter(name => SAFE_RESIDENT.test(name)); } catch { return []; }
+    const latest = new Map();
+    for (const t of this.listTokens()) if (residents.includes(t.resident_id) && !latest.has(t.resident_id)) latest.set(t.resident_id, t);   // listTokens 按 created_at 倒序
+    const renewed = [];
+    for (const residentId of residents) {
+      const t = latest.get(residentId);
+      if (!t) continue;   // 文件不是这个 broker 签的，不猜
+      if (t.status === 'active' && Date.parse(t.expires_at) - now > withinSeconds * 1000) continue;
+      const issued = this.issueToken({ residentId, credentials: t.credential_aliases, models: t.models, purposes: t.purposes,
+        ttlSeconds, maxRequests: t.max_requests, maxTokens: t.max_tokens, reason: 'renewed', replaceFile: true });
+      renewed.push({ resident_id: residentId, previous_token_id: t.id, token_id: issued.id, expires_at: issued.expires_at });
+    }
+    return renewed;
   }
 }
 

@@ -171,6 +171,34 @@ test('凭证列表绝不返回 api_key，数据库和 token 文件为 0600', () 
   store.close();
 });
 
+test('renew-due：快过期和已过期的照原样重签，还新的不动，没文件的不管', () => {
+  const store = new BrokerStore({ home: tempHome() });
+  store.addCredential({ alias: 'shared-cheap', provider: 'zhipu', baseUrl: 'http://127.0.0.1:9999/v1', apiKey: 'top-secret' });
+  const fresh = store.issueToken({ residentId: 'resident_alpha_01', credentials: ['shared-cheap'], models: ['glm-test'], purposes: 'interactive,heartbeat', ttlSeconds: 604800 });
+  const dying = store.issueToken({ residentId: 'resident_beta_01', credentials: ['shared-cheap'], models: ['glm-test'], purposes: 'interactive,heartbeat,subagent', ttlSeconds: 3600, maxTokens: 5000 });
+  store.issueToken({ residentId: 'resident_gamma_01', credentials: ['shared-cheap'], models: ['glm-test'], writeFile: false, ttlSeconds: 60 });
+  const renewed = store.renewDueTokens({ withinSeconds: 2 * 86400, ttlSeconds: 604800 });
+  assert.deepEqual(renewed.map(r => r.resident_id), ['resident_beta_01']);
+  assert.equal(renewed[0].previous_token_id, dying.id);
+  const now = store.listTokens().find(t => t.id === renewed[0].token_id);
+  assert.deepEqual([now.purposes, now.models, now.credential_aliases, now.max_tokens], [['interactive', 'heartbeat', 'subagent'], ['glm-test'], ['shared-cheap'], 5000]);
+  assert.equal(store.authenticate(fs.readFileSync(path.join(store.tokenDir, 'resident_beta_01'), 'utf8').trim()).resident_id, 'resident_beta_01');
+  assert.throws(() => store.authenticate(dying.secret), error => error instanceof BrokerError && error.code === 'TOKEN-INVALID');
+  assert.equal(store.authenticate(fresh.secret).resident_id, 'resident_alpha_01');
+  assert.deepEqual(store.renewDueTokens({ withinSeconds: 2 * 86400, now: Date.now() + 3 * 86400e3 }).map(r => r.resident_id).sort(), []);   // 刚续的 7 天、alpha 的 7 天，3 天后都还剩 4 天
+  assert.deepEqual(store.renewDueTokens({ withinSeconds: 2 * 86400, now: Date.now() + 6 * 86400e3 }).map(r => r.resident_id).sort(), ['resident_alpha_01', 'resident_beta_01']);
+  store.close();
+});
+
+test('--replace 读不了旧 token 文件时直接失败，库里不留孤儿 token', () => {
+  const store = new BrokerStore({ home: tempHome() });
+  store.addCredential({ alias: 'shared-cheap', provider: 'zhipu', baseUrl: 'http://127.0.0.1:9999/v1', apiKey: 'top-secret' });
+  fs.mkdirSync(path.join(store.tokenDir, 'resident_researcher_01'), { recursive: true });   // 读它会 EISDIR，模拟旧文件权限不对
+  assert.throws(() => store.issueToken({ residentId: 'resident_researcher_01', credentials: ['shared-cheap'], models: ['glm-test'], replaceFile: true }));
+  assert.equal(store.listTokens().length, 0);
+  store.close();
+});
+
 test('state、runtime 与 token 目录可以分离，socket 可安全开放给本机客户端组', async () => {
   const root = tempHome();
   const store = new BrokerStore({
