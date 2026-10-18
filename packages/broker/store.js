@@ -325,7 +325,7 @@ class BrokerStore {
   }
 
   listTokens() {
-    return this.db.prepare('SELECT id,resident_id,credential_aliases,models,purposes,expires_at,max_requests,max_tokens,used_requests,used_tokens,status,reason,created_at,revoked_at FROM tokens ORDER BY created_at DESC').all().map(parseRow);
+    return this.db.prepare('SELECT id,resident_id,credential_aliases,models,purposes,expires_at,max_requests,max_tokens,used_requests,used_tokens,status,reason,created_at,revoked_at FROM tokens ORDER BY created_at DESC, rowid DESC').all().map(parseRow);
   }
 
   // token 按设计会过期（最长 7 天），但 serve 只在 token 文件不存在时才签——文件还在、token 已过期，住户就一直 401 醒不来，且没人知道。
@@ -335,7 +335,7 @@ class BrokerStore {
     let residents = [];
     try { residents = fs.readdirSync(this.tokenDir).filter(name => SAFE_RESIDENT.test(name)); } catch { return []; }
     const latest = new Map();
-    for (const t of this.listTokens()) if (residents.includes(t.resident_id) && !latest.has(t.resident_id)) latest.set(t.resident_id, t);   // listTokens 按 created_at 倒序
+    for (const t of this.listTokens()) if (residents.includes(t.resident_id) && !latest.has(t.resident_id)) latest.set(t.resident_id, t);   // listTokens 按 created_at、再按插入顺序倒序：同一毫秒签的也分得清新旧
     const renewed = [];
     for (const residentId of residents) {
       const t = latest.get(residentId);
