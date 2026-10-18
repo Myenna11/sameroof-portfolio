@@ -1,0 +1,7 @@
+[Unit]
+Description=同屋 broker 住户 token 续期
+After=sameroof-broker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/sameroof-broker token renew-due --within 2d --ttl 7d

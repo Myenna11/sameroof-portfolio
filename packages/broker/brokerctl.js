@@ -52,6 +52,7 @@ sameroof-broker cred rotate <alias> --key-file <path|->
 sameroof-broker cred revoke <alias>
 sameroof-broker token issue <resident_id> --credential <alias[,alias]> --models <id[,id]> [--purposes interactive,heartbeat] [--ttl 12h] [--max-requests 100] [--max-tokens 200000] [--replace]
 sameroof-broker token list
+sameroof-broker token renew-due [--within 2d] [--ttl 7d]   # 快过期/已过期的住户 token 照原样重签（定时器调用）
 sameroof-broker token revoke|quarantine|activate <token_id>
 sameroof-broker push init --subject <https://...|mailto:...> [--rotate]
 sameroof-broker push status
@@ -115,6 +116,7 @@ async function run(argv = process.argv.slice(2)) {
       replaceFile: f.replace === true
     }));
     if (p[0] === 'token' && p[1] === 'list') return print(store.listTokens());
+    if (p[0] === 'token' && p[1] === 'renew-due') return print(store.renewDueTokens({ withinSeconds: seconds(f.within || '2d'), ttlSeconds: seconds(f.ttl || '7d') }));
     if (p[0] === 'token' && p[1] === 'revoke') return print(store.revokeToken(required(p[2], '缺 token id。')));
     if (p[0] === 'token' && p[1] === 'quarantine') return print(store.setTokenStatus(required(p[2], '缺 token id。'), 'quarantined'));
     if (p[0] === 'token' && p[1] === 'activate') return print(store.setTokenStatus(required(p[2], '缺 token id。'), 'active'));
