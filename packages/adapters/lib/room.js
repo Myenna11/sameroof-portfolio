@@ -501,7 +501,7 @@ async function run(roomName, runtimeName, think, opts = {}) {
     const noteBudget = deadlineAt ? deadlineAt - Date.now() : Infinity;
     if (shift.length && !opts.dry && noteBudget > 1500) {       // 再让本人补一句（交接信是面）；收尾 deadline 不够就跳过，事实已落盘
       const noteAc = new AbortController(); const noteTimer = Number.isFinite(noteBudget) ? setTimeout(() => noteAc.abort(new Error('便条超时')), noteBudget) : null;
-      try { const raw = await Promise.race([think(`你是${room.name}。现在要睡了，给明天醒来的自己写两三句交接信：这一班发生了什么、你惦记什么、有什么没做完。像给自己留便条，不要客套。`, `这一班的事实：\n${facts}`, noteAc.signal), new Promise((_, rej) => noteAc.signal.addEventListener('abort', () => rej(noteAc.signal.reason), { once: true }))]);
+      try { const raw = await Promise.race([think(`你是${room.name}。现在要睡了，给明天醒来的自己写两三句交接信：这一班发生了什么、你惦记什么、有什么没做完。像给自己留便条，不要客套。`, `这一班的事实：\n${facts}`, noteAc.signal, { oneShot: true }), new Promise((_, rej) => noteAc.signal.addEventListener('abort', () => rej(noteAc.signal.reason), { once: true }))]);
         const note = unpackReply(raw).text.trim();
         fs.writeSync(2, `[${room.name}] 便条原文长度 ${note.length}\n`);
         if (note) { fs.writeFileSync(hoPath, render(note)); fs.writeSync(2, `[${room.name}] 交接信·便条已写\n`); } } catch (e) { fs.writeSync(2, `[便条没写成] ${e && e.message || e}\n`); } finally { if (noteTimer) clearTimeout(noteTimer); }

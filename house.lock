@@ -45,7 +45,7 @@
         "source": "packages/adapters/lib",
         "digest": {
           "algorithm": "sha256",
-          "value": "8759855067e3db358ff4dc72347fa34aa8566e8e42f959d4818e6bfda3d4a201"
+          "value": "f2ed3ea5c9385efd8eec28ea296b4e3a1bf715a9126ae72d3a51ac526b425439"
         },
         "interface_version": 1
       },
