@@ -8,6 +8,8 @@ Type=simple
 User=sameroof-gateway
 Group=sameroof
 WorkingDirectory=/opt/sameroof/gateway
+# 住户 token 文件在 /run（tmpfs），机器重启后没了；起服务前把 active 住户缺的补签回来
+ExecStartPre=/usr/bin/node /opt/sameroof/gateway/gatewayctl.js token ensure
 ExecStart=/usr/bin/node /opt/sameroof/gateway/server.js
 Restart=always
 RestartSec=3
